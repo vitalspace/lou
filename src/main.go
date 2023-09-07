@@ -24,6 +24,11 @@ type Schema struct {
 	Fields map[string]FieldValidator
 }
 
+func stringValidator(value interface{}) bool {
+	_, ok := value.(string)
+	return ok
+}
+
 func Validate(jsonString string, schema Schema) bool {
 	isValid := true
 
