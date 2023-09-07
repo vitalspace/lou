@@ -15,6 +15,8 @@ func str(ch *C.char) string {
 	return C.GoString(ch)
 }
 
+type FieldValidator func(interface{}) bool
+
 func mian() {
 	fmt.Println("Hello world")
 }
