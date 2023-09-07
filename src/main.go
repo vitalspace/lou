@@ -17,6 +17,10 @@ func str(ch *C.char) string {
 
 type FieldValidator func(interface{}) bool
 
+type Schema struct {
+	Fields map[string]FieldValidator
+}
+
 func mian() {
 	fmt.Println("Hello world")
 }
