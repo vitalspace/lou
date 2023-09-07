@@ -51,7 +51,7 @@ func Validate(jsonString string, schema Schema) bool {
 	return isValid
 }
 
-func mian() {
+func main() {
 	user := `{ "name": "Juan", "email": "juan@email.com" }`
 
 	userSchema := Schema{
