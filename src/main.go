@@ -52,5 +52,18 @@ func Validate(jsonString string, schema Schema) bool {
 }
 
 func mian() {
-	fmt.Println("Hello world")
+	user := `{ "name": "Juan", "email": "juan@email.com" }`
+
+	userSchema := Schema{
+		Fields: map[string]FieldValidator{
+			"name":  stringValidator,
+			"email": stringValidator,
+		},
+	}
+
+	if !Validate(user, userSchema) {
+		fmt.Println("Invalid data")
+	} else {
+		fmt.Println("Valid data")
+	}
 }
