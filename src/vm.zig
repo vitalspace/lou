@@ -11,10 +11,11 @@ pub const Op = enum(u8) {
     not_, and_, or_, nullish,
     true_, false_, null_, void_,
     pop, dup,
-    def_global, get_global, set_global,
+    def_global, get_global, set_global, try_get_global,
     get_local, set_local,
     jump, jump_if_false, loop,
     make_array, index_get, get_prop,
+    bit_and, bit_or, bit_xor, bit_not, left_shift, right_shift,
     builtin, method_call, call, ret,
 };
 
@@ -57,7 +58,27 @@ pub const Compiler = struct {
     fn stmt(self: *Compiler, n: *ast.Node) void {
         switch (n.*) {
             .ConstantDeclaration, .VariableDeclaration, .LetDeclaration => self.decl(n),
-            .BlockStatement => { for (n.BlockStatement.statements) |s| self.stmt(s); },
+            .BlockStatement => {
+                const stmts = n.BlockStatement.statements;
+                var save_buf: [64][]const u8 = undefined;
+                var save_count: usize = 0;
+                for (stmts) |s| {
+                    const name = switch (s.*) {
+                        .LetDeclaration => |v| v.name,
+                        .ConstantDeclaration => |v| v.name,
+                        else => continue,
+                    };
+                    self.c.op2w(.try_get_global, self.c.emitS(name));
+                    save_buf[save_count] = name;
+                    save_count += 1;
+                }
+                for (stmts) |s| self.stmt(s);
+                var i: usize = save_count;
+                while (i > 0) {
+                    i -= 1;
+                    self.c.op2w(.set_global, self.c.emitS(save_buf[i]));
+                }
+            },
             .IfStatement => self.ifStmt(n),
             .WhileLoop => self.whileStmt(n),
             .ForLoop => self.forStmt(n),
@@ -237,6 +258,11 @@ pub const Compiler = struct {
                         self.c.op2w(.set_global, self.c.emitS(name));
                     }
                 },
+                .BitNot => {
+                    // ~x is parsed as BinaryExpression(left=0, op=BitNot, right=x)
+                    self.expr(b.right);
+                    self.c.op(.bit_not);
+                },
                 else => {
                     self.expr(b.left); self.expr(b.right);
                     switch (b.operator) {
@@ -245,8 +271,15 @@ pub const Compiler = struct {
                         .Equal, .StrictEqual => self.c.op(.eq),
                         .NotEqual, .StrictNotEqual => self.c.op(.ne),
                         .LessThan => self.c.op(.lt), .GreaterThan => self.c.op(.gt),
+                        .LessThanOrEqual => { self.c.op(.gt); self.c.op(.not_); },
+                        .GreaterThanOrEqual => { self.c.op(.lt); self.c.op(.not_); },
                         .And => self.c.op(.and_), .Or => self.c.op(.or_), .Nullish => self.c.op(.nullish),
                         .Not => self.c.op(.not_),
+                        .BitAnd => self.c.op(.bit_and),
+                        .BitOr => self.c.op(.bit_or),
+                        .BitXor => self.c.op(.bit_xor),
+                        .LeftShift => self.c.op(.left_shift),
+                        .RightShift => self.c.op(.right_shift),
                         else => {},
                     }
                 },
@@ -329,6 +362,12 @@ pub const VM = struct {
                 .and_ => { const b = self.pop(); const a = self.pop(); self.push(.{ .boolean = truthy(a) and truthy(b) }); },
                 .or_ => { const b = self.pop(); const a = self.pop(); self.push(.{ .boolean = truthy(a) or truthy(b) }); },
                 .nullish => { const b = self.pop(); const a = self.pop(); self.push(if (a == .null or a == .void) b else a); },
+                .bit_and => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a & b }); },
+                .bit_or => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a | b }); },
+                .bit_xor => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a ^ b }); },
+                .bit_not => { const a = toInt(self.pop()); self.push(.{ .integer = ~a }); },
+                .left_shift => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a << @intCast(b) }); },
+                .right_shift => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a >> @intCast(b) }); },
                 .pop => _ = self.pop(),
                 .dup => { const v = self.peek(0); self.push(v); },
                 .def_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setVar(n, v) catch {}; },
@@ -338,6 +377,9 @@ pub const VM = struct {
                     else { return error.UndefinedVariable; }
                 },
                 .set_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setInScope(n, v) catch {}; },
+                .try_get_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string;
+                    if (self.env.get(n)) |v| { self.push(v); } else { self.push(.{ .void = {} }); }
+                },
                 .get_local => { const slot = self.c.code.items[self.ip]; self.ip += 1; self.push(self.stack[slot]); },
                 .set_local => { const slot = self.c.code.items[self.ip]; self.ip += 1; self.stack[slot] = self.peek(0); },
                 .jump => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2 + (@as(usize,hi) << 8) | lo; },
@@ -419,6 +461,12 @@ pub const VM = struct {
                             const md = bObjPtr.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
                             const r = md(&.{}, self.env);
                             switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                        } else if (obj == .array) {
+                            const bObj = self.env.getBuiltinObject("Array") orelse { self.push(.{ .void = {} }); break; };
+                            const md = bObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                            var tmp = [_]Value{obj};
+                            const r = md(tmp[0..], self.env);
+                            switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                         } else { self.push(.{ .void = {} }); }
                     }
                 },
@@ -434,6 +482,7 @@ pub const VM = struct {
 
 fn truthy(v: Value) bool { return switch (v) { .boolean => |b| b, .float => |f| f != 0.0, .integer => |i| i != 0, .string => |s| s.len > 0, .void,.null => false, else => true }; }
 fn toF64(v: Value) ?f64 { return switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => null }; }
+fn toInt(v: Value) i64 { return switch (v) { .integer => |i| i, .float => |f| @intFromFloat(f), else => 0 }; }
 fn valEq(l: Value, r: Value) bool { return switch (l) {
     .integer => |li| switch (r) { .integer => |ri| li==ri, .float => |rf| @as(f64,@floatFromInt(li))==rf, else => false },
     .float => |lf| switch (r) { .float => |rf| lf==rf, .integer => |ri| lf==@as(f64,@floatFromInt(ri)), else => false },
