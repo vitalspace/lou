@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const builtins = @import("./builtins/builtins.zig");
 const builtinsTypes = @import("./types/types.zig");
+const ArrayEntries = @import("./builtins/array/entries.zig");
 
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -17,6 +18,8 @@ inline fn freeValue(value: ast.Value) void {
     switch (value) {
         .array => |arr| arr.deinit(),
         .closure => |cl| cl.deinit(),
+        .iterator => |it| it.deinit(),
+        .js_object => |obj| obj.deinit(),
         else => {},
     }
 }
@@ -41,6 +44,8 @@ pub const Environment = struct {
     builtin_objects: std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl),
     timers: std.StringHashMap(i128),
     arrays: std.ArrayList(*ast.ArrayObject),
+    iterators: std.ArrayList(*ast.ArrayIterator),
+    objects: std.ArrayList(*ast.ObjectValue),
     owned_strings: std.ArrayList([]const u8),
     outer: ?*Environment,
     scope_kind: enum { block, function } = .function,
@@ -62,6 +67,8 @@ pub const Environment = struct {
 
     pub fn initWithIo(allocator: std.mem.Allocator, outer: ?*Environment, io: ?std.Io) !Environment {
         const arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0);
+        const iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0);
+        const objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0);
         const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
 
         const env = Environment{
@@ -74,6 +81,8 @@ pub const Environment = struct {
             .builtin_objects = try builtins.initBuiltinObjects(allocator),
             .timers = std.StringHashMap(i128).init(allocator),
             .arrays = arrays,
+            .iterators = iterators,
+            .objects = objects,
             .owned_strings = owned_strings,
             .outer = outer,
             .exports = std.StringHashMap(ast.Value).init(allocator),
@@ -98,6 +107,8 @@ pub const Environment = struct {
             .builtin_objects = std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl).init(allocator),
             .timers = std.StringHashMap(i128).init(allocator),
             .arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0),
+            .iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0),
+            .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
             .owned_strings = owned_strings,
             .outer = outer,
             .scope_kind = .block,
@@ -236,6 +247,30 @@ pub const Environment = struct {
         }
         self.arrays.deinit(self.allocator);
 
+        // Bubble up iterators to parent
+        if (self.outer) |outer| {
+            for (self.iterators.items) |it| {
+                outer.iterators.append(outer.allocator, it) catch {};
+            }
+        } else {
+            for (self.iterators.items) |it| {
+                it.deinit();
+            }
+        }
+        self.iterators.deinit(self.allocator);
+
+        // Bubble up objects to parent
+        if (self.outer) |outer| {
+            for (self.objects.items) |obj| {
+                outer.objects.append(outer.allocator, obj) catch {};
+            }
+        } else {
+            for (self.objects.items) |obj| {
+                obj.deinit();
+            }
+        }
+        self.objects.deinit(self.allocator);
+
         self.exports.deinit();
         self.values.deinit();
         self.constants.deinit();
@@ -354,6 +389,8 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
         .void => right == .void,
         .null => right == .null,
         .closure => right == .closure,
+        .iterator => right == .iterator,
+        .js_object => right == .js_object,
     };
 }
 
@@ -933,13 +970,38 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 array_obj.elements.appendAssumeCapacity(val);
             }
 
-            // Register this ArrayObject for cleanup
             try env.arrays.append(env.allocator, array_obj);
 
             return .{ .array = array_obj };
         },
+        .ObjectLiteral => |o| {
+            const obj = try ast.ObjectValue.init(env.allocator);
+            errdefer obj.deinit();
+
+            for (o.properties) |prop| {
+                const val = try evaluate(prop.value, env);
+                try obj.properties.put(prop.key, val);
+            }
+
+            try env.objects.append(env.allocator, obj);
+            return .{ .js_object = obj };
+        },
         .ArrayIndex => |a| {
             const array_val = try evaluate(a.array, env);
+            if (array_val == .iterator) {
+                return .{ .void = {} };
+            }
+            if (array_val == .js_object) {
+                const index_val = try evaluate(a.index, env);
+                const key = switch (index_val) {
+                    .string => |s| s,
+                    else => return error.InvalidIndex,
+                };
+                if (array_val.js_object.properties.get(key)) |v| {
+                    return v;
+                }
+                return .{ .void = {} };
+            }
             if (array_val != .array) {
                 return error.NotAnArray;
             }
@@ -955,6 +1017,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return error.IndexOutOfBounds;
             }
         },
+        .PropertySet => |p| {
+            const object_val = try evaluate(p.object, env);
+            if (object_val != .js_object) {
+                return error.InvalidAssignmentTarget;
+            }
+            const val = try evaluate(p.value, env);
+            try object_val.js_object.properties.put(p.key, val);
+            return val;
+        },
         .Identifier => |i| {
             if (env.get(i.name)) |value| {
                 return value;
@@ -964,6 +1035,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         },
         .BinaryExpression => |b| {
             if (b.operator == .Assign) {
+                if (b.left.* == .MemberAccess) {
+                    const obj_val = try evaluate(b.left.MemberAccess.object, env);
+                    if (obj_val != .js_object) return error.InvalidAssignment;
+                    const val = try evaluate(b.right, env);
+                    try obj_val.js_object.properties.put(b.left.MemberAccess.property, val);
+                    return val;
+                }
                 if (b.left.* != .Identifier) {
                     return error.InvalidAssignment;
                 }
@@ -1676,6 +1754,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 } else {
                     return error.UndefinedMethod;
                 }
+            } else if (value == .iterator) {
+                return .{ .void = {} };
+            } else if (value == .js_object) {
+                if (value.js_object.properties.get(m.property)) |v| {
+                    return v;
+                }
+                return .{ .void = {} };
             } else {
                 return error.InvalidMemberAccess;
             }
@@ -1722,6 +1807,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             .value => |val| val,
                             .void => .void,
                         };
+                    } else if (value == .iterator) {
+                        if (std.mem.eql(u8, m.method, "next")) {
+                            return ArrayEntries.IteratorNext(value.iterator, env);
+                        }
+                        return .{ .void = {} };
                     }
                 }
 
@@ -1772,12 +1862,12 @@ const result = method(args.items, env);
                     for (m.arguments, 0..) |arg, idx| {
                         stack_buf3[idx + 1] = try evaluate(arg, env);
                     }
-const result = method(stack_buf3[0..total3], env);
-                     return switch (result) {
-                         .value => |val| val,
-                         .void => .void,
-                     };
-                 }
+                    const result = method(stack_buf3[0..total3], env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
                 var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
                 for (m.arguments) |arg| {
                     const val = try evaluate(arg, env);
@@ -1787,13 +1877,38 @@ const result = method(stack_buf3[0..total3], env);
                 defer method_args.deinit(env.allocator);
                 try method_args.append(env.allocator, value);
                 try method_args.appendSlice(env.allocator, args.items);
-const result = method(method_args.items, env);
-                 method_args.clearAndFree(env.allocator);
-                 args.clearAndFree(env.allocator);
-                 return switch (result) {
-                     .value => |val| val,
-                     .void => .void,
-                 };
+                const result = method(method_args.items, env);
+                method_args.clearAndFree(env.allocator);
+                args.clearAndFree(env.allocator);
+                return switch (result) {
+                    .value => |val| val,
+                    .void => .void,
+                };
+            } else if (value == .iterator) {
+                if (std.mem.eql(u8, m.method, "next")) {
+                    return ArrayEntries.IteratorNext(value.iterator, env);
+                }
+                return .{ .void = {} };
+            } else if (value == .object) {
+                const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @alignCast(@ptrCast(value.object));
+                const method = bObjPtr.getMethod(m.method) orelse {
+                    return error.UndefinedMethod;
+                };
+                var stack_buf4: [16]ast.Value = undefined;
+                var args4: []ast.Value = &[_]ast.Value{};
+                if (m.arguments.len > 0) {
+                    if (m.arguments.len <= 16) {
+                        for (m.arguments, 0..) |arg, idx| {
+                            stack_buf4[idx] = try evaluate(arg, env);
+                        }
+                        args4 = stack_buf4[0..m.arguments.len];
+                    }
+                }
+                const result4 = method(args4, env);
+                return switch (result4) {
+                    .value => |val| val,
+                    .void => .void,
+                };
             } else {
                 return error.InvalidMethodCall;
             }
