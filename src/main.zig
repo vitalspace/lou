@@ -25,6 +25,7 @@ test {
     _ = @import("builtins/array/at.zig");
     _ = @import("builtins/array/pop.zig");
     _ = @import("builtins/array/push.zig");
+    _ = @import("builtins/array/entries.zig");
 }
 
 fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const u8 {
