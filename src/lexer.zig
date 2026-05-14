@@ -79,6 +79,12 @@ pub const TokenType = enum {
     Default,
     Match,
 
+    // Module system
+    Import,
+    From,
+    As,
+    Export,
+
     // Delimiters
     LParen,
     RParen,
@@ -297,48 +303,7 @@ pub const Lexer = struct {
                     this.readChar();
                 }
                 const literal = this.input[start..this.position];
-                const token_type: TokenType = if (std.mem.eql(u8, literal, "const"))
-                    TokenType.Const
-                else if (std.mem.eql(u8, literal, "var"))
-                    TokenType.Var
-                else if (std.mem.eql(u8, literal, "let"))
-                    TokenType.Let
-                else if (std.mem.eql(u8, literal, "null"))
-                    TokenType.Null
-                else if (std.mem.eql(u8, literal, "undefined"))
-                    TokenType.Undefined
-                else if (std.mem.eql(u8, literal, "true"))
-                    TokenType.True
-                else if (std.mem.eql(u8, literal, "false"))
-                    TokenType.False
-                else if (std.mem.eql(u8, literal, "fn") or std.mem.eql(u8, literal, "function"))
-                    TokenType.Fn
-                else if (std.mem.eql(u8, literal, "return"))
-                    TokenType.Return
-                else if (std.mem.eql(u8, literal, "if"))
-                    TokenType.If
-                else if (std.mem.eql(u8, literal, "else"))
-                    TokenType.Else
-                else if (std.mem.eql(u8, literal, "for"))
-                    TokenType.For
-                else if (std.mem.eql(u8, literal, "while"))
-                    TokenType.While
-                else if (std.mem.eql(u8, literal, "in"))
-                    TokenType.In
-                else if (std.mem.eql(u8, literal, "break"))
-                    TokenType.Break
-                else if (std.mem.eql(u8, literal, "continue"))
-                    TokenType.Continue
-                else if (std.mem.eql(u8, literal, "switch"))
-                    TokenType.Switch
-                else if (std.mem.eql(u8, literal, "case"))
-                    TokenType.Case
-                else if (std.mem.eql(u8, literal, "default"))
-                    TokenType.Default
-                else if (std.mem.eql(u8, literal, "match"))
-                    TokenType.Match
-                else
-                    TokenType.Identifier;
+                const token_type: TokenType = getKeywordType(literal);
                 return .{ .type = token_type, .literal = literal };
             } else {
                 return .{ .type = .EOF, .literal = "" };
@@ -435,6 +400,37 @@ pub fn main() !void {
     var lexer = Lexer.init(input);
     const tok = lexer.nextToken();
     std.debug.print("Token: {s}\n", .{tok.literal});
+}
+
+fn getKeywordType(literal: []const u8) TokenType {
+    const map = std.StaticStringMap(TokenType).initComptime(.{
+        .{ "const", .Const },
+        .{ "var", .Var },
+        .{ "let", .Let },
+        .{ "null", .Null },
+        .{ "undefined", .Undefined },
+        .{ "true", .True },
+        .{ "false", .False },
+        .{ "fn", .Fn },
+        .{ "function", .Fn },
+        .{ "return", .Return },
+        .{ "if", .If },
+        .{ "else", .Else },
+        .{ "for", .For },
+        .{ "while", .While },
+        .{ "in", .In },
+        .{ "break", .Break },
+        .{ "continue", .Continue },
+        .{ "switch", .Switch },
+        .{ "case", .Case },
+        .{ "default", .Default },
+        .{ "match", .Match },
+        .{ "import", .Import },
+        .{ "from", .From },
+        .{ "as", .As },
+        .{ "export", .Export },
+    });
+    return map.get(literal) orelse .Identifier;
 }
 
 // ============================================================================
