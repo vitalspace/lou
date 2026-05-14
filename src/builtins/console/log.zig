@@ -22,6 +22,8 @@ fn printValueTo(out: anytype, value: Types.Value) void {
                     .object => out.print("[object]", .{}) catch {},
                     .array => out.print("[ array ]", .{}) catch {},
                     .closure => out.print("[closure]", .{}) catch {},
+                    .iterator => out.print("[object Array Iterator]", .{}) catch {},
+                    .js_object => out.print("[object]", .{}) catch {},
                 }
             }
             out.print("]", .{}) catch {};
@@ -30,6 +32,19 @@ fn printValueTo(out: anytype, value: Types.Value) void {
         .null => out.print("null", .{}) catch {},
         .object => out.print("[object]", .{}) catch {},
         .closure => out.print("[closure]", .{}) catch {},
+        .iterator => out.print("[object Array Iterator]", .{}) catch {},
+        .js_object => |o| {
+            out.print("{{", .{}) catch {};
+            var first = true;
+            var it = o.properties.iterator();
+            while (it.next()) |entry| {
+                if (!first) out.print(", ", .{}) catch {};
+                first = false;
+                out.print("{s}: ", .{entry.key_ptr.*}) catch {};
+                printValueTo(out, entry.value_ptr.*);
+            }
+            out.print("}}", .{}) catch {};
+        },
     }
 }
 
