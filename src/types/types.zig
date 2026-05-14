@@ -1,15 +1,16 @@
 const std = @import("std");
 
-const ast = @import("../ast.zig");
+const rt = @import("runtime.zig");
 const env = @import("../evaluator.zig");
 
-pub const Value = ast.Value;
+pub const Value = rt.Value;
+pub const BuiltinObject = rt.BuiltinObject;
+pub const ArrayObject = rt.ArrayObject;
+pub const ArrayIterator = rt.ArrayIterator;
+pub const ObjectValue = rt.ObjectValue;
+pub const ClosureValue = rt.ClosureValue;
+pub const BuiltinResult = rt.BuiltinResult;
 pub const Environment = env.Environment;
-
-pub const BuiltinResult = union(enum) {
-    value: Value,
-    void,
-};
 
 pub const BuiltinFn = *const fn ([]Value, *Environment) BuiltinResult;
 
@@ -22,7 +23,6 @@ pub const BuiltinObjectImpl = struct {
     name: []const u8,
     methods: []const BuiltinMethod,
 
-    /// Busca un método por nombre
     pub fn getMethod(self: *const BuiltinObjectImpl, method_name: []const u8) ?BuiltinFn {
         for (self.methods) |method| {
             if (std.mem.eql(u8, method.name, method_name)) {
@@ -32,3 +32,5 @@ pub const BuiltinObjectImpl = struct {
         return null;
     }
 };
+
+
