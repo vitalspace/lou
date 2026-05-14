@@ -77,6 +77,22 @@ pub const Parser = struct {
                         .value = value,
                     } };
                     return node;
+                } else if (this.peek_token.type == .Dot or this.peek_token.type == .LBracket) {
+                    const expr = try this.parseExpression();
+                    if (this.current_token.type == .Assign) {
+                        if (expr.* == .MemberAccess) {
+                            const key = expr.MemberAccess.property;
+                            const object = expr.MemberAccess.object;
+                            this.allocator.destroy(expr);
+                            this.nextToken(); // consume '='
+                            const value = try this.parseExpression();
+                            const node = try this.allocator.create(ast.Node);
+                            node.* = .{ .PropertySet = .{ .object = object, .key = key, .value = value } };
+                            return node;
+                        }
+                        return error.InvalidAssignmentTarget;
+                    }
+                    return expr;
                 } else {
                     return try this.parseExpression();
                 }
@@ -91,7 +107,8 @@ pub const Parser = struct {
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
-        const value = try this.parseStatement();
+        const value = try this.parseExpression();
+        if (this.current_token.type == .Semicolon) this.nextToken();
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .ConstantDeclaration = .{
             .name = name,
@@ -105,7 +122,7 @@ pub const Parser = struct {
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
-        const value = try this.parseStatement();
+        const value = try this.parseExpression();
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .VariableDeclaration = .{
             .name = name,
@@ -119,7 +136,7 @@ pub const Parser = struct {
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
-        const value = try this.parseStatement();
+        const value = try this.parseExpression();
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .LetDeclaration = .{
             .name = name,
@@ -191,7 +208,24 @@ pub const Parser = struct {
                 this.nextToken();
                 return node;
             },
-            .LBracket => return try this.parseArrayLiteral(),
+            .LBracket => {
+                var base = try this.parseArrayLiteral();
+
+                // Postfix chain: .prop, [index], (args)
+                while (true) {
+                    if (this.current_token.type == .LBracket) {
+                        base = try this.parseArrayIndex(base);
+                    } else if (this.current_token.type == .Dot) {
+                        base = try this.parseMemberAccessOrCall(base);
+                    } else if (this.current_token.type == .LParen) {
+                        base = try this.parseFunctionCallFromBase(base);
+                    } else {
+                        break;
+                    }
+                }
+
+                return base;
+            },
             .Identifier => {
                 var base = try this.parseIdentifier();
 
@@ -283,6 +317,19 @@ pub const Parser = struct {
                 } else {
                     return error.UnexpectedToken;
                 }
+            },
+            .LBrace => {
+                var base = try this.parseObjectLiteral();
+                while (true) {
+                    if (this.current_token.type == .LBracket) {
+                        base = try this.parseArrayIndex(base);
+                    } else if (this.current_token.type == .Dot) {
+                        base = try this.parseMemberAccessOrCall(base);
+                    } else {
+                        break;
+                    }
+                }
+                return base;
             },
             .Not => {
                 // Handle logical NOT operator like !x
@@ -382,6 +429,43 @@ pub const Parser = struct {
                 .elements = try elements.toOwnedSlice(this.allocator),
             },
         };
+        return node;
+    }
+
+    fn parseObjectLiteral(this: *Parser) anyerror!*ast.Node {
+        this.nextToken(); // consume '{'
+        var properties = try std.ArrayList(ast.Property).initCapacity(this.allocator, 8);
+        defer properties.deinit(this.allocator);
+
+        while (this.current_token.type != .RBrace and this.current_token.type != .EOF) {
+            const key = switch (this.current_token.type) {
+                .String => this.current_token.literal,
+                .Identifier => this.current_token.literal,
+                else => return error.ExpectedPropertyName,
+            };
+            this.nextToken(); // consume key
+
+            if (this.current_token.type != .Colon) return error.ExpectedColon;
+            this.nextToken(); // consume ':'
+
+            const value = try this.parseExpression();
+
+            try properties.append(this.allocator, .{ .key = key, .value = value });
+
+            if (this.current_token.type == .Comma) {
+                this.nextToken(); // consume ','
+            } else if (this.current_token.type != .RBrace) {
+                return error.ExpectedCommaOrRBrace;
+            }
+        }
+
+        if (this.current_token.type != .RBrace) return error.ExpectedRBrace;
+        this.nextToken(); // consume '}'
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .ObjectLiteral = .{
+            .properties = try properties.toOwnedSlice(this.allocator),
+        } };
         return node;
     }
 
