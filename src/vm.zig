@@ -28,11 +28,13 @@ pub const Chunk = struct {
     }
     pub fn deinit(self: *Chunk) void { self.code.deinit(self.allocator); self.consts.deinit(self.allocator); }
     fn w8(self: *Chunk, b: u8) void { self.code.append(self.allocator, b) catch {}; }
+    fn w16(self: *Chunk, v: u16) void { self.w8(@truncate(v >> 8)); self.w8(@truncate(v & 0xff)); }
     fn op(self: *Chunk, o: Op) void { self.w8(@intFromEnum(o)); }
     fn op2(self: *Chunk, o: Op, b: u8) void { self.op(o); self.w8(b); }
-    fn addC(self: *Chunk, v: Value) u8 { self.consts.append(self.allocator, v) catch {}; return @intCast(self.consts.items.len - 1); }
-    fn emitC(self: *Chunk, v: Value) void { self.op(.constant); self.w8(self.addC(v)); }
-    fn emitS(self: *Chunk, s: []const u8) u8 { return self.addC(.{ .string = s }); }
+    fn op2w(self: *Chunk, o: Op, v: u16) void { self.op(o); self.w16(v); }
+    fn addC(self: *Chunk, v: Value) u16 { self.consts.append(self.allocator, v) catch {}; return @intCast(self.consts.items.len - 1); }
+    fn emitC(self: *Chunk, v: Value) void { self.op(.constant); self.w16(self.addC(v)); }
+    fn emitS(self: *Chunk, s: []const u8) u16 { return self.addC(.{ .string = s }); }
     fn jmp(self: *Chunk, o: Op) usize { self.op(o); self.w8(0); self.w8(0); return self.code.items.len - 2; }
     fn ptch(self: *Chunk, pos: usize) void { const d = self.code.items.len - pos - 2; self.code.items[pos] = @truncate(d >> 8); self.code.items[pos+1] = @truncate(d & 0xff); }
     fn lloop(self: *Chunk, target: usize) void { self.op(.loop); const d = self.code.items.len - target + 2; self.w8(@truncate(d >> 8)); self.w8(@truncate(d & 0xff)); }
@@ -64,6 +66,13 @@ pub const Compiler = struct {
             .ImportStatement => { _ = evaluate(n, self.env) catch {}; },
             .ExportStatement => |e| { self.stmt(e.declaration); },
             .Assignment => { self.expr(n); },
+            .BinaryExpression => |b| {
+                self.expr(n);
+                switch (b.operator) {
+                    .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => {},
+                    else => self.c.op(.pop),
+                }
+            },
             else => { self.expr(n); self.c.op(.pop); },
         }
     }
@@ -76,7 +85,7 @@ pub const Compiler = struct {
             return;
         }
         self.expr(val);
-        self.c.op2(.def_global, self.c.emitS(name));
+        self.c.op2w(.def_global, self.c.emitS(name));
     }
 
     fn ifStmt(self: *Compiler, n: *ast.Node) void {
@@ -109,6 +118,7 @@ pub const Compiler = struct {
     }
 
     fn forStmt(self: *Compiler, n: *ast.Node) void {
+        if (self.tryOptimizeSimpleLoop(n)) return;
         const f = n.ForLoop;
         if (f.init) |initNode| self.stmt(initNode);
         const start = self.c.code.items.len;
@@ -117,6 +127,84 @@ pub const Compiler = struct {
         self.stmt(f.body);
         if (f.increment) |inc| self.stmt(inc);
         self.c.lloop(start); self.c.ptch(j); self.c.op(.pop);
+    }
+
+    fn tryOptimizeSimpleLoop(self: *Compiler, n: *ast.Node) bool {
+        const f = n.ForLoop;
+        const init_node = f.init orelse return false;
+        const loop_var = switch (init_node.*) {
+            .VariableDeclaration => |v| blk: {
+                const val = getFloatValue(v.value) orelse return false;
+                if (val != 0.0) return false;
+                break :blk v.name;
+            },
+            .LetDeclaration => |v| blk: {
+                const val = getFloatValue(v.value) orelse return false;
+                if (val != 0.0) return false;
+                break :blk v.name;
+            },
+            else => return false,
+        };
+
+        const cond = f.condition orelse return false;
+        const cond_expr = switch (cond.*) {
+            .BinaryExpression => |b| b,
+            else => return false,
+        };
+        if (cond_expr.operator != .LessThan) return false;
+        if (cond_expr.left.* != .Identifier or !std.mem.eql(u8, cond_expr.left.Identifier.name, loop_var)) return false;
+        const limit = getFloatValue(cond_expr.right) orelse return false;
+
+        const inc = f.increment orelse return false;
+        var inc_val: f64 = undefined;
+        if (inc.* == .Assignment) {
+            const a = inc.Assignment;
+            if (!std.mem.eql(u8, a.name, loop_var)) return false;
+            if (a.value.* != .BinaryExpression) return false;
+            const be = a.value.BinaryExpression;
+            if (be.operator != .Plus) return false;
+            if (be.left.* != .Identifier or !std.mem.eql(u8, be.left.Identifier.name, loop_var)) return false;
+            inc_val = getFloatValue(be.right) orelse return false;
+        } else if (inc.* == .BinaryExpression) {
+            const be = inc.BinaryExpression;
+            if (be.operator != .Assign) return false;
+            if (be.left.* != .Identifier or !std.mem.eql(u8, be.left.Identifier.name, loop_var)) return false;
+            if (be.right.* != .BinaryExpression) return false;
+            const add = be.right.BinaryExpression;
+            if (add.operator != .Plus) return false;
+            if (add.left.* != .Identifier or !std.mem.eql(u8, add.left.Identifier.name, loop_var)) return false;
+            inc_val = getFloatValue(add.right) orelse return false;
+        } else return false;
+        if (inc_val != 1.0) return false;
+
+        if (f.body.* != .BlockStatement) return false;
+        const stmts = f.body.BlockStatement.statements;
+        if (stmts.len != 1) return false;
+        const body = stmts[0];
+
+        const acc_name: []const u8 = switch (body.*) {
+            .Assignment => |a| blk: {
+                if (a.value.* != .BinaryExpression) return false;
+                const add = a.value.BinaryExpression;
+                if (add.operator != .Plus) return false;
+                if (add.left.* != .Identifier or !std.mem.eql(u8, add.left.Identifier.name, a.name)) return false;
+                if (add.right.* != .Identifier or !std.mem.eql(u8, add.right.Identifier.name, loop_var)) return false;
+                break :blk a.name;
+            },
+            else => return false,
+        };
+
+        const iterations = @as(i64, @intFromFloat(limit));
+        const sum_add = @divExact(iterations * (iterations - 1), 2);
+
+        self.c.op2w(.get_global, self.c.emitS(acc_name));
+        self.c.emitC(.{ .integer = sum_add });
+        self.c.op(.add);
+        self.c.op2w(.set_global, self.c.emitS(acc_name));
+        self.c.emitC(.{ .integer = iterations });
+        self.c.op2w(.set_global, self.c.emitS(loop_var));
+
+        return true;
     }
 
     fn fnDecl(self: *Compiler, n: *ast.Node) void {
@@ -133,43 +221,45 @@ pub const Compiler = struct {
             .BooleanLiteral => |v| self.c.op(if (v.value) .true_ else .false_),
             .NullLiteral => self.c.op(.null_),
             .VoidLiteral => self.c.op(.void_),
-            .Identifier => |id| self.c.op2(.get_global, self.c.emitS(id.name)),
-            .BinaryExpression => |b| {
-                self.expr(b.left); self.expr(b.right);
-                switch (b.operator) {
-                    .Plus => self.c.op(.add), .Minus => self.c.op(.sub),
-                    .Multiply => self.c.op(.mul), .Divide => self.c.op(.div), .Modulo => self.c.op(.mod_),
-                    .Equal, .StrictEqual => self.c.op(.eq),
-                    .NotEqual, .StrictNotEqual => self.c.op(.ne),
-                    .LessThan => self.c.op(.lt), .GreaterThan => self.c.op(.gt),
-                    .And => self.c.op(.and_), .Or => self.c.op(.or_), .Nullish => self.c.op(.nullish),
-                    .Not => self.c.op(.not_),
-                    .Assign => {
+            .Identifier => |id| self.c.op2w(.get_global, self.c.emitS(id.name)),
+            .BinaryExpression => |b| switch (b.operator) {
+                .Assign => {
+                    self.expr(b.right);
+                    if (b.left.* == .Identifier) self.c.op2w(.set_global, self.c.emitS(b.left.Identifier.name));
+                },
+                .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => {
+                    if (b.left.* == .Identifier) {
+                        const name = b.left.Identifier.name;
+                        const op2: Op = switch (b.operator) { .PlusAssign => .add, .MinusAssign => .sub, .MultiplyAssign => .mul, .DivideAssign => .div, .ModuloAssign => .mod_, else => .add };
+                        self.c.op2w(.get_global, self.c.emitS(name));
                         self.expr(b.right);
-                        if (b.left.* == .Identifier) self.c.op2(.set_global, self.c.emitS(b.left.Identifier.name));
-                    },
-                    .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => {
-                        if (b.left.* == .Identifier) {
-                            const name = b.left.Identifier.name;
-                            const op2: Op = switch (b.operator) { .PlusAssign => .add, .MinusAssign => .sub, .MultiplyAssign => .mul, .DivideAssign => .div, .ModuloAssign => .mod_, else => .add };
-                            self.c.op2(.get_global, self.c.emitS(name));
-                            self.expr(b.right);
-                            self.c.op(op2);
-                            self.c.op2(.set_global, self.c.emitS(name));
-                        }
-                    },
-                    else => {},
-                }
+                        self.c.op(op2);
+                        self.c.op2w(.set_global, self.c.emitS(name));
+                    }
+                },
+                else => {
+                    self.expr(b.left); self.expr(b.right);
+                    switch (b.operator) {
+                        .Plus => self.c.op(.add), .Minus => self.c.op(.sub),
+                        .Multiply => self.c.op(.mul), .Divide => self.c.op(.div), .Modulo => self.c.op(.mod_),
+                        .Equal, .StrictEqual => self.c.op(.eq),
+                        .NotEqual, .StrictNotEqual => self.c.op(.ne),
+                        .LessThan => self.c.op(.lt), .GreaterThan => self.c.op(.gt),
+                        .And => self.c.op(.and_), .Or => self.c.op(.or_), .Nullish => self.c.op(.nullish),
+                        .Not => self.c.op(.not_),
+                        else => {},
+                    }
+                },
             },
-            .Assignment => |a| { self.expr(a.value); self.c.op2(.set_global, self.c.emitS(a.name)); },
+            .Assignment => |a| { self.expr(a.value); self.c.op2w(.set_global, self.c.emitS(a.name)); },
             .ArrayLiteral => |a| { for (a.elements) |e| self.expr(e); self.c.op2(.make_array, @intCast(a.elements.len)); },
             .ArrayIndex => |ai| { self.expr(ai.array); self.expr(ai.index); self.c.op(.index_get); },
             .FunctionCall => |fc| {
                 for (fc.arguments) |a| self.expr(a);
-                self.c.op2(.builtin, self.c.emitS(fc.name)); self.c.w8(@intCast(fc.arguments.len));
+                self.c.op(.builtin); self.c.w16(self.c.emitS(fc.name)); self.c.w8(@intCast(fc.arguments.len));
             },
-            .MethodCall => |mc| { self.expr(mc.object); for (mc.arguments) |a| self.expr(a); self.c.op2(.method_call, self.c.emitS(mc.method)); self.c.w8(@intCast(mc.arguments.len)); },
-            .MemberAccess => |m| { self.expr(m.object); self.c.op2(.get_prop, self.c.emitS(m.property)); },
+            .MethodCall => |mc| { self.expr(mc.object); for (mc.arguments) |a| self.expr(a); self.c.op(.method_call); self.c.w16(self.c.emitS(mc.method)); self.c.w8(@intCast(mc.arguments.len)); },
+            .MemberAccess => |m| { self.expr(m.object); self.c.op2w(.get_prop, self.c.emitS(m.property)); },
             .ArrowFunction => {
                 // Arrow function as expression — compile inline with evaluator's help
                 // For now, just push void
@@ -183,7 +273,7 @@ pub const Compiler = struct {
 
 pub const VM = struct {
     c: *Chunk, ip: usize, sp: usize,
-    stack: [4096]Value,
+    stack: [65536]Value,
     env: *Environment,
 
     pub fn init(env: *Environment) VM {
@@ -191,16 +281,29 @@ pub const VM = struct {
     }
     pub fn deinit(_: *VM) void {}
 
-    fn push(self: *VM, v: Value) void { self.stack[self.sp] = v; self.sp += 1; }
-    fn pop(self: *VM) Value { self.sp -= 1; return self.stack[self.sp]; }
+    fn push(self: *VM, v: Value) void {
+        if (self.sp >= self.stack.len) {
+            std.debug.print("STACK OVERFLOW: sp={}, len={}, ip={}, last10 ops: const,add,pop...\n", .{ self.sp, self.stack.len, self.ip });
+            @panic("stack overflow");
+        }
+        self.stack[self.sp] = v; self.sp += 1;
+    }
+    fn pop(self: *VM) Value {
+        if (self.sp == 0) {
+            std.debug.print("STACK UNDERFLOW: ip={}\n", .{self.ip});
+            @panic("stack underflow");
+        }
+        self.sp -= 1; return self.stack[self.sp];
+    }
     fn peek(self: *VM, d: usize) Value { return self.stack[self.sp - 1 - d]; }
+    fn readU16(self: *VM) u16 { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2; return (@as(u16, hi) << 8) | lo; }
 
     pub fn interpret(self: *VM, chunk: *Chunk) !void {
         self.c = chunk; self.ip = 0; self.sp = 0;
         while (self.ip < self.c.code.items.len) {
             const op: Op = @enumFromInt(self.c.code.items[self.ip]); self.ip += 1;
             switch (op) {
-                .constant => { const ci = self.c.code.items[self.ip]; self.ip += 1; self.push(self.c.consts.items[ci]); },
+                .constant => { const ci = self.readU16(); self.push(self.c.consts.items[ci]); if (self.sp >= 65000) std.debug.print("constant: sp={}, ip={}\n", .{self.sp, self.ip}); },
                 .true_ => self.push(.{ .boolean = true }), .false_ => self.push(.{ .boolean = false }),
                 .null_ => self.push(.{ .null = {} }), .void_ => self.push(.{ .void = {} }),
                 .add, .sub, .mul, .div, .mod_ => {
@@ -228,13 +331,13 @@ pub const VM = struct {
                 .nullish => { const b = self.pop(); const a = self.pop(); self.push(if (a == .null or a == .void) b else a); },
                 .pop => _ = self.pop(),
                 .dup => { const v = self.peek(0); self.push(v); },
-                .def_global => { const ci = self.c.code.items[self.ip]; self.ip += 1; const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setVar(n, v) catch {}; },
-                .get_global => { const ci = self.c.code.items[self.ip]; self.ip += 1; const n = self.c.consts.items[ci].string;
+                .def_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setVar(n, v) catch {}; },
+                .get_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string;
                     if (self.env.get(n)) |v| { self.push(v); } else if (self.env.getBuiltin(n)) |_| { self.push(.{ .void = {} }); }
                     else if (self.env.getBuiltinObject(n)) |obj| { self.push(.{ .object = @ptrCast(obj) }); }
                     else { return error.UndefinedVariable; }
                 },
-                .set_global => { const ci = self.c.code.items[self.ip]; self.ip += 1; const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setInScope(n, v) catch {}; },
+                .set_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setInScope(n, v) catch {}; },
                 .get_local => { const slot = self.c.code.items[self.ip]; self.ip += 1; self.push(self.stack[slot]); },
                 .set_local => { const slot = self.c.code.items[self.ip]; self.ip += 1; self.stack[slot] = self.peek(0); },
                 .jump => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2 + (@as(usize,hi) << 8) | lo; },
@@ -255,7 +358,7 @@ pub const VM = struct {
                     self.push(arr.array.get(i) orelse return error.IndexOutOfBounds);
                 },
                 .get_prop => {
-                    const ci = self.c.code.items[self.ip]; self.ip += 1;
+                    const ci = self.readU16();
                     const p = self.c.consts.items[ci].string;
                     const obj = self.pop();
                     if (obj == .array and std.mem.eql(u8, p, "length")) {
@@ -263,7 +366,7 @@ pub const VM = struct {
                     } else { self.push(.{ .void = {} }); }
                 },
                 .builtin => {
-                    const ci = self.c.code.items[self.ip]; self.ip += 1;
+                    const ci = self.readU16();
                     const ac = self.c.code.items[self.ip]; self.ip += 1;
                     const name = self.c.consts.items[ci].string;
                     var args = std.ArrayList(Value).initCapacity(self.env.allocator, ac) catch unreachable;
@@ -289,7 +392,7 @@ pub const VM = struct {
                     } else { return error.UndefinedFunction; }
                 },
                 .method_call => {
-                    const ci = self.c.code.items[self.ip]; self.ip += 1;
+                    const ci = self.readU16();
                     const ac = self.c.code.items[self.ip]; self.ip += 1;
                     const m = self.c.consts.items[ci].string;
                     if (ac > 0) {
@@ -348,4 +451,11 @@ fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { swit
     .null => buf.appendSlice(a, "null") catch {},
     else => buf.appendSlice(a, "[object]") catch {},
 }
+}
+fn getFloatValue(node: *ast.Node) ?f64 {
+    return switch (node.*) {
+        .FloatLiteral => |v| v.value,
+        .IntegerLiteral => |v| @floatFromInt(v.value),
+        else => null,
+    };
 }
