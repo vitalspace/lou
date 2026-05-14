@@ -4,6 +4,7 @@ const Value = ast.Value;
 const Environment = @import("evaluator.zig").Environment;
 const builtinsTypes = @import("./types/types.zig");
 const evaluate = @import("evaluator.zig").evaluate;
+const ArrayEntries = @import("./builtins/array/entries.zig");
 
 pub const Op = enum(u8) {
     constant, add, sub, mul, div, mod_, negate,
@@ -14,7 +15,7 @@ pub const Op = enum(u8) {
     def_global, get_global, set_global, try_get_global,
     get_local, set_local,
     jump, jump_if_false, loop,
-    make_array, index_get, get_prop,
+    make_array, index_get, get_prop, make_object, set_prop,
     bit_and, bit_or, bit_xor, bit_not, left_shift, right_shift,
     builtin, method_call, call, ret,
 };
@@ -245,8 +246,14 @@ pub const Compiler = struct {
             .Identifier => |id| self.c.op2w(.get_global, self.c.emitS(id.name)),
             .BinaryExpression => |b| switch (b.operator) {
                 .Assign => {
-                    self.expr(b.right);
-                    if (b.left.* == .Identifier) self.c.op2w(.set_global, self.c.emitS(b.left.Identifier.name));
+                    if (b.left.* == .MemberAccess) {
+                        self.expr(b.left.MemberAccess.object);
+                        self.expr(b.right);
+                        self.c.op2w(.set_prop, self.c.emitS(b.left.MemberAccess.property));
+                    } else {
+                        self.expr(b.right);
+                        if (b.left.* == .Identifier) self.c.op2w(.set_global, self.c.emitS(b.left.Identifier.name));
+                    }
                 },
                 .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => {
                     if (b.left.* == .Identifier) {
@@ -286,6 +293,16 @@ pub const Compiler = struct {
             },
             .Assignment => |a| { self.expr(a.value); self.c.op2w(.set_global, self.c.emitS(a.name)); },
             .ArrayLiteral => |a| { for (a.elements) |e| self.expr(e); self.c.op2(.make_array, @intCast(a.elements.len)); },
+            .ObjectLiteral => |o| {
+                self.c.op(.make_object);
+                for (o.properties) |prop| {
+                    self.c.op(.dup);
+                    self.expr(prop.value);
+                    self.c.op2w(.set_prop, self.c.emitS(prop.key));
+                    self.c.op(.pop);
+                }
+            },
+            .PropertySet => |p| { self.expr(p.object); self.expr(p.value); self.c.op2w(.set_prop, self.c.emitS(p.key)); },
             .ArrayIndex => |ai| { self.expr(ai.array); self.expr(ai.index); self.c.op(.index_get); },
             .FunctionCall => |fc| {
                 for (fc.arguments) |a| self.expr(a);
@@ -405,6 +422,27 @@ pub const VM = struct {
                     const obj = self.pop();
                     if (obj == .array and std.mem.eql(u8, p, "length")) {
                         self.push(.{ .integer = @intCast(obj.array.elements.items.len) });
+                    } else if (obj == .js_object) {
+                        if (obj.js_object.properties.get(p)) |v| {
+                            self.push(v);
+                        } else {
+                            self.push(.{ .void = {} });
+                        }
+                    } else { self.push(.{ .void = {} }); }
+                },
+                .make_object => {
+                    const obj = ast.ObjectValue.init(self.env.allocator) catch unreachable;
+                    self.env.objects.append(self.env.allocator, obj) catch {};
+                    self.push(.{ .js_object = obj });
+                },
+                .set_prop => {
+                    const ci = self.readU16();
+                    const p = self.c.consts.items[ci].string;
+                    const val = self.pop();
+                    const obj = self.pop();
+                    if (obj == .js_object) {
+                        obj.js_object.properties.put(p, val) catch {};
+                        self.push(val);
                     } else { self.push(.{ .void = {} }); }
                 },
                 .builtin => {
@@ -453,6 +491,9 @@ pub const VM = struct {
                             const md = bObjPtr.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
                             const r = md(args.items, self.env);
                             switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                        } else if (obj == .iterator) {
+                            const v = ArrayEntries.IteratorNext(obj.iterator, self.env);
+                            self.push(v);
                         } else { self.push(.{ .void = {} }); }
                     } else {
                         const obj = self.pop();
@@ -467,6 +508,9 @@ pub const VM = struct {
                             var tmp = [_]Value{obj};
                             const r = md(tmp[0..], self.env);
                             switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                        } else if (obj == .iterator) {
+                            const v = ArrayEntries.IteratorNext(obj.iterator, self.env);
+                            self.push(v);
                         } else { self.push(.{ .void = {} }); }
                     }
                 },
