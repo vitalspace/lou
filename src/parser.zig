@@ -63,6 +63,8 @@ pub const Parser = struct {
             .If => return try this.parseIfStatement(),
             .Return => return try this.parseReturnStatement(),
             .Fn => return try this.parseFunctionDeclaration(),
+            .Import => return try this.parseImportStatement(),
+            .Export => return try this.parseExportStatement(),
             .Identifier => {
                 if (this.peek_token.type == .Assign) {
                     const name = this.current_token.literal;
@@ -776,6 +778,216 @@ pub const Parser = struct {
         node.* = .{ .FunctionCall = .{
             .name = name,
             .arguments = try arguments.toOwnedSlice(this.allocator),
+        } };
+        return node;
+    }
+
+    fn parseImportStatement(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'import'
+
+        // import "module-name" (side-effect only)
+        if (this.current_token.type == .String) {
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = this.current_token.literal,
+                .default_binding = null,
+                .namespace = null,
+                .named_bindings = null,
+                .side_effect_only = true,
+            } };
+            this.nextToken();
+            return node;
+        }
+
+        // import * as name from "..."
+        if (this.current_token.type == .Multiply) {
+            this.nextToken(); // consume '*'
+            if (this.current_token.type != .As) return error.ExpectedAs;
+            this.nextToken(); // consume 'as'
+            if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+            const namespace = this.current_token.literal;
+            this.nextToken(); // consume name
+            if (this.current_token.type != .From) return error.ExpectedFrom;
+            this.nextToken(); // consume 'from'
+            if (this.current_token.type != .String) return error.ExpectedString;
+            const module_path = this.current_token.literal;
+            this.nextToken(); // consume string
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = module_path,
+                .default_binding = null,
+                .namespace = namespace,
+                .named_bindings = null,
+                .side_effect_only = false,
+            } };
+            return node;
+        }
+
+        // import { ... } from "..."
+        if (this.current_token.type == .LBrace) {
+            var bindings = try std.ArrayList(ast.NamedImport).initCapacity(this.allocator, 4);
+            defer bindings.deinit(this.allocator);
+
+            this.nextToken(); // consume '{'
+            while (this.current_token.type != .RBrace) {
+                if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+                const name = this.current_token.literal;
+                this.nextToken(); // consume name
+
+                var alias: ?[]const u8 = null;
+                if (this.current_token.type == .As) {
+                    this.nextToken(); // consume 'as'
+                    if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+                    alias = this.current_token.literal;
+                    this.nextToken(); // consume alias
+                }
+
+                try bindings.append(this.allocator, .{ .name = name, .alias = alias });
+
+                if (this.current_token.type == .RBrace) break;
+                if (this.current_token.type != .Comma) return error.ExpectedComma;
+                this.nextToken(); // consume ','
+            }
+            this.nextToken(); // consume '}'
+
+            if (this.current_token.type != .From) return error.ExpectedFrom;
+            this.nextToken(); // consume 'from'
+            if (this.current_token.type != .String) return error.ExpectedString;
+            const module_path = this.current_token.literal;
+            this.nextToken(); // consume string
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = module_path,
+                .default_binding = null,
+                .namespace = null,
+                .named_bindings = try bindings.toOwnedSlice(this.allocator),
+                .side_effect_only = false,
+            } };
+            return node;
+        }
+
+        // import defaultExport from "..." or import defaultExport, { ... } from "..." or import defaultExport, * as name from "..."
+        if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+        const default_binding = this.current_token.literal;
+        this.nextToken(); // consume default name
+
+        // import defaultExport from "..."
+        if (this.current_token.type == .From) {
+            this.nextToken(); // consume 'from'
+            if (this.current_token.type != .String) return error.ExpectedString;
+            const module_path = this.current_token.literal;
+            this.nextToken(); // consume string
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = module_path,
+                .default_binding = default_binding,
+                .namespace = null,
+                .named_bindings = null,
+                .side_effect_only = false,
+            } };
+            return node;
+        }
+
+        // import defaultExport, ... from "..."
+        if (this.current_token.type != .Comma) return error.UnexpectedToken;
+        this.nextToken(); // consume ','
+
+        // import defaultExport, * as name from "..."
+        if (this.current_token.type == .Multiply) {
+            this.nextToken(); // consume '*'
+            if (this.current_token.type != .As) return error.ExpectedAs;
+            this.nextToken(); // consume 'as'
+            if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+            const namespace = this.current_token.literal;
+            this.nextToken(); // consume name
+            if (this.current_token.type != .From) return error.ExpectedFrom;
+            this.nextToken(); // consume 'from'
+            if (this.current_token.type != .String) return error.ExpectedString;
+            const module_path = this.current_token.literal;
+            this.nextToken(); // consume string
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = module_path,
+                .default_binding = default_binding,
+                .namespace = namespace,
+                .named_bindings = null,
+                .side_effect_only = false,
+            } };
+            return node;
+        }
+
+        // import defaultExport, { ... } from "..."
+        if (this.current_token.type == .LBrace) {
+            var bindings = try std.ArrayList(ast.NamedImport).initCapacity(this.allocator, 4);
+            defer bindings.deinit(this.allocator);
+
+            this.nextToken(); // consume '{'
+            while (this.current_token.type != .RBrace) {
+                if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+                const name = this.current_token.literal;
+                this.nextToken(); // consume name
+
+                var alias: ?[]const u8 = null;
+                if (this.current_token.type == .As) {
+                    this.nextToken(); // consume 'as'
+                    if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+                    alias = this.current_token.literal;
+                    this.nextToken(); // consume alias
+                }
+
+                try bindings.append(this.allocator, .{ .name = name, .alias = alias });
+
+                if (this.current_token.type == .RBrace) break;
+                if (this.current_token.type != .Comma) return error.ExpectedComma;
+                this.nextToken(); // consume ','
+            }
+            this.nextToken(); // consume '}'
+
+            if (this.current_token.type != .From) return error.ExpectedFrom;
+            this.nextToken(); // consume 'from'
+            if (this.current_token.type != .String) return error.ExpectedString;
+            const module_path = this.current_token.literal;
+            this.nextToken(); // consume string
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ImportStatement = .{
+                .module_path = module_path,
+                .default_binding = default_binding,
+                .namespace = null,
+                .named_bindings = try bindings.toOwnedSlice(this.allocator),
+                .side_effect_only = false,
+            } };
+            return node;
+        }
+
+        return error.UnexpectedToken;
+    }
+
+    fn parseExportStatement(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'export'
+
+        // export default ...
+        if (this.current_token.type == .Default) {
+            this.nextToken(); // consume 'default'
+            const declaration = try this.parseStatement();
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ExportStatement = .{
+                .declaration = declaration,
+                .is_default = true,
+            } };
+            return node;
+        }
+
+        // export const/var/let/fn ...
+        const declaration = try this.parseStatement();
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .ExportStatement = .{
+            .declaration = declaration,
+            .is_default = false,
         } };
         return node;
     }
