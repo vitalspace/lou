@@ -60,3 +60,73 @@ for (let i = 0; i < 3; i = i + 1) {
     console.log(predefined[i][j]);
   }
 }
+
+// Concat
+var a1 = ["a", "b", "c"];
+var a2 = ["d", "e", "f"];
+var a3 = a1.concat(a2);
+console.log(a3.length);
+console.log(a3[0]);
+console.log(a3[3]);
+console.log(a3[5]);
+
+// Concat with values
+var a4 = a1.concat(1, [2, 3]);
+console.log(a4.length);
+console.log(a4[0]);
+console.log(a4[3]);
+console.log(a4[4]);
+console.log(a4[5]);
+
+// Concat empty
+var empty = [].concat([1, 2]);
+console.log(empty.length);
+console.log(empty[0]);
+
+// Concat no args (copy)
+var copy = a1.concat();
+console.log(copy.length);
+console.log(copy[0]);
+
+// copyWithin target start end
+var cw1 = ["a", "b", "c", "d", "e"];
+console.log(cw1.copyWithin(0, 3, 4));
+
+// copyWithin only target (start=0)
+var cw2 = [1, 2, 3, 4, 5];
+console.log(cw2.copyWithin(2));
+
+// copyWithin negative indices
+var cw3 = [1, 2, 3, 4, 5];
+console.log(cw3.copyWithin(-2, -3, -1));
+
+// copyWithin start to end
+var cw4 = ["a", "b", "c", "d", "e"];
+console.log(cw4.copyWithin(1, 3));
+
+// entries
+var letters = ["a", "b", "c"];
+var it = letters.entries();
+console.log(it.next());
+console.log(it.next());
+console.log(it.next());
+console.log(it.next());
+
+var nums = [10, 20, 30];
+var numIt = nums.entries();
+console.log(numIt.next());
+console.log(numIt.next());
+console.log(numIt.next());
+console.log(numIt.next());
+
+var emptyIt = [].entries();
+console.log(emptyIt.next());
+
+var mixedIt = [1, "hello", true].entries();
+console.log(mixedIt.next());
+console.log(mixedIt.next());
+console.log(mixedIt.next());
+console.log(mixedIt.next());
+
+// DEBUG
+console.log("HERE");
