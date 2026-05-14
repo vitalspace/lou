@@ -2,7 +2,6 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const builtins = @import("./builtins/builtins.zig");
 const builtinsTypes = @import("./types/types.zig");
-const ArrayEntries = @import("./builtins/array/entries.zig");
 
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -1809,7 +1808,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         };
                     } else if (value == .iterator) {
                         if (std.mem.eql(u8, m.method, "next")) {
-                            return ArrayEntries.IteratorNext(value.iterator, env);
+                            return value.iterator.next(env.allocator, &env.arrays, &env.objects);
                         }
                         return .{ .void = {} };
                     }
@@ -1886,7 +1885,7 @@ const result = method(args.items, env);
                 };
             } else if (value == .iterator) {
                 if (std.mem.eql(u8, m.method, "next")) {
-                    return ArrayEntries.IteratorNext(value.iterator, env);
+                    return value.iterator.next(env.allocator, &env.arrays, &env.objects);
                 }
                 return .{ .void = {} };
             } else if (value == .object) {
