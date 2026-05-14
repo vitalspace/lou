@@ -3,7 +3,7 @@ const TokenType = @import("lexer.zig").TokenType;
 
 pub const BuiltinObject = opaque {};
 
-pub const Value = union(enum) { float: f64, integer: i64, string: []const u8, boolean: bool, array: *ArrayObject, object: *const BuiltinObject, closure: *ClosureValue, void: void, null: void };
+pub const Value = union(enum) { float: f64, integer: i64, string: []const u8, boolean: bool, array: *ArrayObject, object: *const BuiltinObject, closure: *ClosureValue, iterator: *ArrayIterator, js_object: *ObjectValue, void: void, null: void };
 
 pub const ClosureValue = struct {
     chunk_ptr: *ChunkType,
@@ -39,6 +39,26 @@ pub const ClosureValue = struct {
         this.chunk_ptr.constants.deinit(this.allocator);
         this.chunk_ptr.lines.deinit(this.allocator);
         this.allocator.destroy(this.chunk_ptr);
+        this.allocator.destroy(this);
+    }
+};
+
+pub const ArrayIterator = struct {
+    allocator: std.mem.Allocator,
+    source: *ArrayObject,
+    index: usize,
+
+    pub fn init(allocator: std.mem.Allocator, source: *ArrayObject) !*ArrayIterator {
+        const obj = try allocator.create(ArrayIterator);
+        obj.* = .{
+            .allocator = allocator,
+            .source = source,
+            .index = 0,
+        };
+        return obj;
+    }
+
+    pub fn deinit(this: *ArrayIterator) void {
         this.allocator.destroy(this);
     }
 };
@@ -82,6 +102,30 @@ pub const ArrayObject = struct {
     }
 };
 
+pub const Property = struct {
+    key: []const u8,
+    value: *Node,
+};
+
+pub const ObjectValue = struct {
+    allocator: std.mem.Allocator,
+    properties: std.StringHashMap(Value),
+
+    pub fn init(allocator: std.mem.Allocator) !*ObjectValue {
+        const obj = try allocator.create(ObjectValue);
+        obj.* = .{
+            .allocator = allocator,
+            .properties = std.StringHashMap(Value).init(allocator),
+        };
+        return obj;
+    }
+
+    pub fn deinit(this: *ObjectValue) void {
+        this.properties.deinit();
+        this.allocator.destroy(this);
+    }
+};
+
 pub const NodeType = enum {
     IntegerLiteral, // Literales enteros como 42
     FloatLiteral, // Literales flotantes como 3.14
@@ -90,7 +134,9 @@ pub const NodeType = enum {
     NullLiteral, // null
     VoidLiteral, // undefined
     ArrayLiteral, // Nuevo: Para literales de array como [1, 2, 3]
-    ArrayIndex, // Nuevo: Para acceso a índices de array como arr[0]
+    ArrayIndex,
+    ObjectLiteral,
+    PropertySet,
     Identifier,
     BinaryExpression,
     Assignment,
@@ -132,6 +178,14 @@ pub const Node = union(NodeType) {
     ArrayIndex: struct {
         array: *Node,
         index: *Node,
+    },
+    ObjectLiteral: struct {
+        properties: []Property,
+    },
+    PropertySet: struct {
+        object: *Node,
+        key: []const u8,
+        value: *Node,
     },
     Identifier: struct {
         name: []const u8,
@@ -286,6 +340,25 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try printIdent(writer, depth + 1);
             try writer.print("Index:\n", .{});
             try printAst(a.index, depth + 2, writer);
+        },
+        .ObjectLiteral => |o| {
+            try writer.print("ObjectLiteral:\n", .{});
+            for (o.properties, 0..) |prop, i| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Property {d}: key=\"{s}\"\n", .{ i, prop.key });
+                try printAst(prop.value, depth + 2, writer);
+            }
+        },
+        .PropertySet => |p| {
+            try writer.print("PropertySet:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Object:\n", .{});
+            try printAst(p.object, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Key: {s}\n", .{p.key});
+            try printIdent(writer, depth + 1);
+            try writer.print("Value:\n", .{});
+            try printAst(p.value, depth + 2, writer);
         },
         .Identifier => |i| try writer.print("Identifier: {s}\n", .{i.name}),
         .BinaryExpression => |b| {
@@ -506,6 +579,16 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .ArrayIndex => |a| {
             freeAst(allocator, a.array);
             freeAst(allocator, a.index);
+        },
+        .ObjectLiteral => |o| {
+            for (o.properties) |prop| {
+                freeAst(allocator, prop.value);
+            }
+            allocator.free(o.properties);
+        },
+        .PropertySet => |p| {
+            freeAst(allocator, p.object);
+            freeAst(allocator, p.value);
         },
         .Identifier => {},
         .BinaryExpression => |b| {
