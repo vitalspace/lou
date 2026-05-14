@@ -7,8 +7,11 @@ const Environment = @import("evaluator.zig").Environment;
 const evaluate = @import("evaluator.zig").evaluate;
 const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
+const VM = @import("vm.zig").VM;
+const Compiler = @import("vm.zig").Compiler;
+const Chunk = @import("vm.zig").Chunk;
 
-const use_vm = false;
+const use_vm = true;
 
 test {
     _ = @import("builtins/console/log.zig");
@@ -19,6 +22,9 @@ test {
 
 test {
     _ = @import("builtins/array/length.zig");
+    _ = @import("builtins/array/at.zig");
+    _ = @import("builtins/array/pop.zig");
+    _ = @import("builtins/array/push.zig");
 }
 
 fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const u8 {
@@ -64,7 +70,24 @@ pub fn main(init: std.process.Init) !void {
     var env_ = try Environment.initWithIo(gpa, null, io);
     defer env_.deinit();
 
-    for (program) |stmt| {
-        _ = try evaluate(stmt, &env_);
+    var dir_buf: []const u8 = ".";
+    if (std.mem.lastIndexOfScalar(u8, filePath, '/')) |idx| {
+        dir_buf = filePath[0..idx];
+    }
+    env_.module_dir = dir_buf;
+
+    if (use_vm) {
+        var chunk = Chunk.init(gpa);
+        defer chunk.deinit();
+        var comp = Compiler.init(&env_);
+        comp.compile(program, &chunk);
+        comp.deinit();
+        var vm = VM.init(&env_);
+        defer vm.deinit();
+        try vm.interpret(&chunk);
+    } else {
+        for (program) |stmt| {
+            _ = try evaluate(stmt, &env_);
+        }
     }
 }
