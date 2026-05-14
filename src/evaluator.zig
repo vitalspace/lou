@@ -4,6 +4,7 @@ const builtins = @import("./builtins/builtins.zig");
 const builtinsTypes = @import("./types/types.zig");
 
 const builtin = @import("builtin");
+const Io = std.Io;
 const DEBUG_OPTIMIZATION = false;
 
 inline fn debugPrint(comptime fmt: []const u8, args: anytype) void {
@@ -20,6 +21,16 @@ inline fn freeValue(value: ast.Value) void {
     }
 }
 
+pub const ModuleCacheEntry = struct {
+    exports: std.StringHashMap(ast.Value),
+    functions: std.StringHashMap(*ast.Node),
+
+    pub fn deinit(self: *ModuleCacheEntry) void {
+        self.exports.deinit();
+        self.functions.deinit();
+    }
+};
+
 pub const Environment = struct {
     allocator: std.mem.Allocator,
     io: ?std.Io,
@@ -33,9 +44,20 @@ pub const Environment = struct {
     owned_strings: std.ArrayList([]const u8),
     outer: ?*Environment,
     scope_kind: enum { block, function } = .function,
+    exports: std.StringHashMap(ast.Value),
+    module_dir: ?[]const u8,
+    module_contents: std.ArrayList([]const u8),
+    module_arenas: std.ArrayList(*std.heap.ArenaAllocator),
+    module_cache: std.StringHashMap(ModuleCacheEntry),
 
     pub fn init(allocator: std.mem.Allocator, outer: ?*Environment) !Environment {
         return initWithIo(allocator, outer, null);
+    }
+
+    pub fn initModule(allocator: std.mem.Allocator, module_dir: []const u8) !Environment {
+        var env = try initWithIo(allocator, null, null);
+        env.module_dir = module_dir;
+        return env;
     }
 
     pub fn initWithIo(allocator: std.mem.Allocator, outer: ?*Environment, io: ?std.Io) !Environment {
@@ -54,6 +76,11 @@ pub const Environment = struct {
             .arrays = arrays,
             .owned_strings = owned_strings,
             .outer = outer,
+            .exports = std.StringHashMap(ast.Value).init(allocator),
+            .module_dir = null,
+            .module_contents = try std.ArrayList([]const u8).initCapacity(allocator, 0),
+            .module_arenas = try std.ArrayList(*std.heap.ArenaAllocator).initCapacity(allocator, 0),
+            .module_cache = std.StringHashMap(ModuleCacheEntry).init(allocator),
         };
 
         return env;
@@ -74,6 +101,11 @@ pub const Environment = struct {
             .owned_strings = owned_strings,
             .outer = outer,
             .scope_kind = .block,
+            .exports = std.StringHashMap(ast.Value).init(allocator),
+            .module_dir = null,
+            .module_contents = try std.ArrayList([]const u8).initCapacity(allocator, 0),
+            .module_arenas = try std.ArrayList(*std.heap.ArenaAllocator).initCapacity(allocator, 0),
+            .module_cache = std.StringHashMap(ModuleCacheEntry).init(allocator),
         };
         return env;
     }
@@ -84,6 +116,18 @@ pub const Environment = struct {
         }
         if (self.outer) |outer| {
             return outer.getFunction(name);
+        }
+        return null;
+    }
+
+    pub fn getFunctionWithModuleFallback(self: *Environment, name: []const u8) ?*ast.Node {
+        if (self.getFunction(name)) |node| return node;
+        // Check module cache for functions defined in imported modules
+        var root = self;
+        while (root.outer) |outer| root = outer;
+        var it = root.module_cache.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.functions.get(name)) |node| return node;
         }
         return null;
     }
@@ -168,24 +212,58 @@ pub const Environment = struct {
     }
 
     pub fn deinit(self: *Environment) void {
-        // Clean up all ArrayObjects
-        for (self.arrays.items) |array_obj| {
-            array_obj.deinit();
-        }
-        self.arrays.deinit(self.allocator);
-
-        // Clean up all owned strings
-        for (self.owned_strings.items) |s| {
-            self.allocator.free(s);
+        // Bubble up owned_strings to parent (prevent dangling on return)
+        if (self.outer) |outer| {
+            for (self.owned_strings.items) |s| {
+                outer.owned_strings.append(outer.allocator, s) catch {};
+            }
+        } else {
+            for (self.owned_strings.items) |s| {
+                self.allocator.free(s);
+            }
         }
         self.owned_strings.deinit(self.allocator);
 
+        // Bubble up arrays to parent
+        if (self.outer) |outer| {
+            for (self.arrays.items) |arr| {
+                outer.arrays.append(outer.allocator, arr) catch {};
+            }
+        } else {
+            for (self.arrays.items) |array_obj| {
+                array_obj.deinit();
+            }
+        }
+        self.arrays.deinit(self.allocator);
+
+        self.exports.deinit();
         self.values.deinit();
         self.constants.deinit();
         self.functions.deinit();
         self.builtins.deinit();
         self.builtin_objects.deinit();
         self.timers.deinit();
+
+        // Free module file contents
+        for (self.module_contents.items) |c| {
+            self.allocator.free(c);
+        }
+        self.module_contents.deinit(self.allocator);
+
+        // Free module parser arenas
+        for (self.module_arenas.items) |a| {
+            a.deinit();
+            self.allocator.destroy(a);
+        }
+        self.module_arenas.deinit(self.allocator);
+
+        // Free module cache entries (keys + values)
+        var cache_it = self.module_cache.iterator();
+        while (cache_it.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.module_cache.deinit();
     }
 
     pub fn get(self: *Environment, name: []const u8) ?ast.Value {
@@ -1555,7 +1633,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
-            const func_node = env.getFunction(f.name) orelse return error.UndefinedFunction;
+            const func_node = env.getFunctionWithModuleFallback(f.name) orelse return error.UndefinedFunction;
 
             var func_env = try Environment.init(env.allocator, env);
             defer func_env.deinit();
@@ -1719,6 +1797,161 @@ const result = method(method_args.items, env);
             } else {
                 return error.InvalidMethodCall;
             }
+        },
+        .ImportStatement => |i| {
+            const allocator = env.allocator;
+            const io = env.io orelse return error.NoIo;
+
+            var full_path: []const u8 = undefined;
+            var needs_free = false;
+            if (i.module_path.len > 0 and i.module_path[0] == '/') {
+                full_path = i.module_path;
+            } else if (env.module_dir) |dir| {
+                full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, i.module_path });
+                needs_free = true;
+            } else {
+                full_path = i.module_path;
+            }
+            defer if (needs_free) allocator.free(full_path);
+
+            var root = env;
+            while (root.outer) |outer| root = outer;
+
+            // Check cache first
+            var cached_exports: ?*const std.StringHashMap(ast.Value) = null;
+            var cached_functions: ?*const std.StringHashMap(*ast.Node) = null;
+
+            if (root.module_cache.get(full_path)) |cached| {
+                cached_exports = &cached.exports;
+                cached_functions = &cached.functions;
+            }
+
+            if (cached_exports == null) {
+                // First import: load, parse, evaluate, cache
+                const content = try Io.Dir.cwd().readFileAlloc(io, full_path, allocator, Io.Limit.limited(10 * 1024 * 1024));
+                var resources_stored = false;
+                errdefer if (!resources_stored) allocator.free(content);
+
+                const LexerT = @import("lexer.zig").Lexer;
+                const ParserT = @import("parser.zig").Parser;
+                var lexer = LexerT.init(content);
+                var parser = try ParserT.init(&lexer, allocator);
+                errdefer if (!resources_stored) parser.deinit();
+                const statements = try parser.parseProgram();
+
+                try root.module_contents.append(root.allocator, content);
+                try root.module_arenas.append(root.allocator, parser.arena);
+                resources_stored = true;
+
+                var module_dir: []const u8 = ".";
+                if (std.mem.lastIndexOfScalar(u8, full_path, '/')) |idx| {
+                    module_dir = full_path[0..idx];
+                }
+
+                var module_env = try Environment.initWithIo(allocator, null, io);
+                defer module_env.deinit();
+                module_env.module_dir = module_dir;
+
+                for (statements) |stmt| {
+                    _ = try evaluate(stmt, &module_env);
+                }
+
+                // Store in cache
+                var cache_entry = ModuleCacheEntry{
+                    .exports = std.StringHashMap(ast.Value).init(allocator),
+                    .functions = std.StringHashMap(*ast.Node).init(allocator),
+                };
+                {
+                    var it = module_env.exports.iterator();
+                    while (it.next()) |entry| {
+                        try cache_entry.exports.put(entry.key_ptr.*, entry.value_ptr.*);
+                    }
+                }
+                {
+                    var it = module_env.functions.iterator();
+                    while (it.next()) |entry| {
+                        try cache_entry.functions.put(entry.key_ptr.*, entry.value_ptr.*);
+                    }
+                }
+                const cache_key = try allocator.dupe(u8, full_path);
+                errdefer allocator.free(cache_key);
+                try root.module_cache.put(cache_key, cache_entry);
+
+                cached_exports = &root.module_cache.get(cache_key).?.exports;
+                cached_functions = &root.module_cache.get(cache_key).?.functions;
+            }
+
+            // Bind exports from cache
+            if (i.named_bindings) |bindings| {
+                for (bindings) |binding| {
+                    const export_name = binding.name;
+                    const local_name = binding.alias orelse binding.name;
+                    const val = cached_exports.?.get(export_name) orelse return error.ExportNotFound;
+                    try env.setVar(local_name, val);
+                    if (cached_functions.?.get(export_name)) |func_node| {
+                        try env.setFunction(local_name, func_node);
+                    }
+                }
+            }
+
+            if (i.namespace) |_| {
+                var it = cached_exports.?.iterator();
+                while (it.next()) |entry| {
+                    if (std.mem.eql(u8, entry.key_ptr.*, "default")) continue;
+                    try env.setVar(entry.key_ptr.*, entry.value_ptr.*);
+                    if (cached_functions.?.get(entry.key_ptr.*)) |func_node| {
+                        try env.setFunction(entry.key_ptr.*, func_node);
+                    }
+                }
+            }
+
+            if (i.default_binding) |db| {
+                const val = cached_exports.?.get("default") orelse return error.ExportNotFound;
+                try env.setVar(db, val);
+                if (cached_functions.?.get("default")) |func_node| {
+                    try env.setFunction(db, func_node);
+                }
+            }
+
+            return .{ .float = 0.0 };
+        },
+        .ExportStatement => |e| {
+            const result = try evaluate(e.declaration, env);
+            const decl_name: ?[]const u8 = switch (e.declaration.*) {
+                .ConstantDeclaration => |c| c.name,
+                .VariableDeclaration => |v| v.name,
+                .LetDeclaration => |v| v.name,
+                .FunctionDeclaration => |f| f.name,
+                else => null,
+            };
+
+            if (e.is_default) {
+                if (decl_name) |n| {
+                    if (env.get(n)) |v| {
+                        try env.exports.put("default", v);
+                    } else if (env.getFunction(n)) |_| {
+                        try env.exports.put("default", .{ .float = 0.0 });
+                    } else {
+                        try env.exports.put("default", result);
+                    }
+                } else {
+                    try env.exports.put("default", result);
+                }
+            }
+
+            if (!e.is_default) {
+                if (decl_name) |n| {
+                    if (env.get(n)) |v| {
+                        try env.exports.put(n, v);
+                    } else if (env.getFunction(n)) |_| {
+                        try env.exports.put(n, .{ .float = 0.0 });
+                    } else {
+                        return error.ExportNotFound;
+                    }
+                }
+            }
+
+            return result;
         },
     }
 }
