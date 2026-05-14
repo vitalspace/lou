@@ -1,129 +1,16 @@
 const std = @import("std");
 const TokenType = @import("lexer.zig").TokenType;
 
-pub const BuiltinObject = opaque {};
-
-pub const Value = union(enum) { float: f64, integer: i64, string: []const u8, boolean: bool, array: *ArrayObject, object: *const BuiltinObject, closure: *ClosureValue, iterator: *ArrayIterator, js_object: *ObjectValue, void: void, null: void };
-
-pub const ClosureValue = struct {
-    chunk_ptr: *ChunkType,
-    param_count: u8,
-    allocator: std.mem.Allocator,
-
-    pub const ChunkType = struct {
-        code: std.ArrayList(u8),
-        constants: std.ArrayList(Value),
-        lines: std.ArrayList(u32),
-        allocator: std.mem.Allocator,
-    };
-
-    pub fn init(allocator: std.mem.Allocator, param_count: u8) !*ClosureValue {
-        const obj = try allocator.create(ClosureValue);
-        const chunk = try allocator.create(ChunkType);
-        chunk.* = .{
-            .code = try std.ArrayList(u8).initCapacity(allocator, 256),
-            .constants = try std.ArrayList(Value).initCapacity(allocator, 64),
-            .lines = try std.ArrayList(u32).initCapacity(allocator, 256),
-            .allocator = allocator,
-        };
-        obj.* = .{
-            .chunk_ptr = chunk,
-            .param_count = param_count,
-            .allocator = allocator,
-        };
-        return obj;
-    }
-
-    pub fn deinit(this: *ClosureValue) void {
-        this.chunk_ptr.code.deinit(this.allocator);
-        this.chunk_ptr.constants.deinit(this.allocator);
-        this.chunk_ptr.lines.deinit(this.allocator);
-        this.allocator.destroy(this.chunk_ptr);
-        this.allocator.destroy(this);
-    }
-};
-
-pub const ArrayIterator = struct {
-    allocator: std.mem.Allocator,
-    source: *ArrayObject,
-    index: usize,
-
-    pub fn init(allocator: std.mem.Allocator, source: *ArrayObject) !*ArrayIterator {
-        const obj = try allocator.create(ArrayIterator);
-        obj.* = .{
-            .allocator = allocator,
-            .source = source,
-            .index = 0,
-        };
-        return obj;
-    }
-
-    pub fn deinit(this: *ArrayIterator) void {
-        this.allocator.destroy(this);
-    }
-};
-
-pub const ArrayObject = struct {
-    allocator: std.mem.Allocator,
-    elements: std.ArrayListAligned(Value, null),
-
-    pub fn init(allocator: std.mem.Allocator) !*ArrayObject {
-        const obj = try allocator.create(ArrayObject);
-
-        obj.* = .{
-            .elements = .empty,
-            .allocator = allocator,
-        };
-
-        return obj;
-    }
-
-    pub fn deinit(this: *ArrayObject) void {
-        // Free the elements array memory first
-        if (this.elements.capacity > 0) {
-            this.allocator.free(this.elements.allocatedSlice());
-        }
-        // Free the ArrayObject itself
-        this.allocator.destroy(this);
-    }
-
-    pub fn get(this: *ArrayObject, index: usize) ?Value {
-        if (index >= this.elements.items.len) return null;
-        return this.elements.items[index];
-    }
-
-    pub fn set(this: *ArrayObject, index: usize, value: Value) !void {
-        if (index >= this.elements.items.len) {
-            while (this.elements.items.len <= index) {
-                try this.elements.append(this.allocator, .{ .float = 0.0 });
-            }
-        }
-        this.elements.items[index] = value;
-    }
-};
+pub const BuiltinObject = @import("types/runtime.zig").BuiltinObject;
+pub const Value = @import("types/runtime.zig").Value;
+pub const ClosureValue = @import("types/runtime.zig").ClosureValue;
+pub const ArrayObject = @import("types/runtime.zig").ArrayObject;
+pub const ArrayIterator = @import("types/runtime.zig").ArrayIterator;
+pub const ObjectValue = @import("types/runtime.zig").ObjectValue;
 
 pub const Property = struct {
     key: []const u8,
     value: *Node,
-};
-
-pub const ObjectValue = struct {
-    allocator: std.mem.Allocator,
-    properties: std.StringHashMap(Value),
-
-    pub fn init(allocator: std.mem.Allocator) !*ObjectValue {
-        const obj = try allocator.create(ObjectValue);
-        obj.* = .{
-            .allocator = allocator,
-            .properties = std.StringHashMap(Value).init(allocator),
-        };
-        return obj;
-    }
-
-    pub fn deinit(this: *ObjectValue) void {
-        this.properties.deinit();
-        this.allocator.destroy(this);
-    }
 };
 
 pub const NodeType = enum {
