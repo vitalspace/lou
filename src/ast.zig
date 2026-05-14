@@ -107,6 +107,8 @@ pub const NodeType = enum {
     ArrowFunction,
     MemberAccess, // Nuevo: Para console.log (sin llamada)
     MethodCall, // Nuevo: Para console.log() (con llamada)
+    ImportStatement,
+    ExportStatement,
 };
 
 pub const Node = union(NodeType) {
@@ -198,6 +200,22 @@ pub const Node = union(NodeType) {
         method: []const u8, // Nombre del método
         arguments: []*Node, // Argumentos de la llamada
     },
+    ImportStatement: struct {
+        module_path: []const u8,
+        default_binding: ?[]const u8,
+        namespace: ?[]const u8,
+        named_bindings: ?[]NamedImport,
+        side_effect_only: bool,
+    },
+    ExportStatement: struct {
+        declaration: *Node,
+        is_default: bool,
+    },
+};
+
+pub const NamedImport = struct {
+    name: []const u8,
+    alias: ?[]const u8,
 };
 
 pub const Precedence = enum(u8) {
@@ -435,6 +453,43 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
         },
         .VoidLiteral => try writer.print("VoidLiteral: undefined\n", .{}),
         .NullLiteral => try writer.print("NullLiteral: null\n", .{}),
+        .ImportStatement => |i| {
+            try writer.print("ImportStatement:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Module: {s}\n", .{i.module_path});
+            if (i.default_binding) |db| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Default: {s}\n", .{db});
+            }
+            if (i.namespace) |ns| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Namespace: {s}\n", .{ns});
+            }
+            if (i.named_bindings) |nb| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Named:\n", .{});
+                for (nb) |n| {
+                    try printIdent(writer, depth + 2);
+                    try writer.print("{s}", .{n.name});
+                    if (n.alias) |a| try writer.print(" as {s}", .{a});
+                    try writer.print("\n", .{});
+                }
+            }
+            if (i.side_effect_only) {
+                try printIdent(writer, depth + 1);
+                try writer.print("Side effect only: true\n", .{});
+            }
+        },
+        .ExportStatement => |e| {
+            try writer.print("ExportStatement:\n", .{});
+            if (e.is_default) {
+                try printIdent(writer, depth + 1);
+                try writer.print("Default: true\n", .{});
+            }
+            try printIdent(writer, depth + 1);
+            try writer.print("Declaration:\n", .{});
+            try printAst(e.declaration, depth + 2, writer);
+        },
     }
 }
 
@@ -531,6 +586,10 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .BooleanLiteral => {},
         .VoidLiteral => {},
         .NullLiteral => {},
+        .ImportStatement => |i| {
+            if (i.named_bindings) |nb| allocator.free(nb);
+        },
+        .ExportStatement => |e| freeAst(allocator, e.declaration),
     }
     allocator.destroy(node);
 }
