@@ -4,7 +4,6 @@ const Value = ast.Value;
 const Environment = @import("evaluator.zig").Environment;
 const builtinsTypes = @import("./types/types.zig");
 const evaluate = @import("evaluator.zig").evaluate;
-const ArrayEntries = @import("./builtins/array/entries.zig");
 
 pub const Op = enum(u8) {
     constant, add, sub, mul, div, mod_, negate,
@@ -492,7 +491,7 @@ pub const VM = struct {
                             const r = md(args.items, self.env);
                             switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                         } else if (obj == .iterator) {
-                            const v = ArrayEntries.IteratorNext(obj.iterator, self.env);
+                            const v = obj.iterator.next(self.env.allocator, &self.env.arrays, &self.env.objects);
                             self.push(v);
                         } else { self.push(.{ .void = {} }); }
                     } else {
@@ -509,7 +508,7 @@ pub const VM = struct {
                             const r = md(tmp[0..], self.env);
                             switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                         } else if (obj == .iterator) {
-                            const v = ArrayEntries.IteratorNext(obj.iterator, self.env);
+                            const v = obj.iterator.next(self.env.allocator, &self.env.arrays, &self.env.objects);
                             self.push(v);
                         } else { self.push(.{ .void = {} }); }
                     }
