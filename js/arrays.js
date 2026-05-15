@@ -128,5 +128,18 @@ console.log(mixedIt.next());
 console.log(mixedIt.next());
 console.log(mixedIt.next());
 
+// Every
+function isBelowThreshold(currentValue) {
+  return currentValue < 40;
+}
+var every1 = [1, 30, 39, 29, 10, 13].every(isBelowThreshold);
+console.log(every1);
+
+var every2 = [12, 5, 8, 130, 44].every(isBelowThreshold);
+console.log(every2);
+
+var every3 = [].every(isBelowThreshold);
+console.log(every3);
+
 // DEBUG
 console.log("HERE");
