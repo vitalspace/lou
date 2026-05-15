@@ -1028,6 +1028,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         .Identifier => |i| {
             if (env.get(i.name)) |value| {
                 return value;
+            } else if (env.getFunction(i.name)) |_| {
+                return .{ .string = i.name };
             } else {
                 return error.UndefinedVariable;
             }
