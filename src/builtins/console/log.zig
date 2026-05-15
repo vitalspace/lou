@@ -1,49 +1,38 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Env = @import("../../evaluator.zig").Environment;
+const ansi = @import("../../utils/ansi.zig");
 
 fn printValueTo(out: anytype, value: Types.Value) void {
     switch (value) {
-        .integer => |int_val| out.print("{d}", .{int_val}) catch {},
-        .float => |f| out.print("{d}", .{f}) catch {},
-        .string => |s| out.print("{s}", .{s}) catch {},
-        .boolean => |b| out.print("{}", .{b}) catch {},
+        .integer => |int_val| out.print("{s}{d}{s}", .{ ansi.Yellow, int_val, ansi.Reset }) catch {},
+        .float => |f| out.print("{s}{d}{s}", .{ ansi.Yellow, f, ansi.Reset }) catch {},
+        .string => |s| out.print("{s}\"{s}\"{s}", .{ ansi.Green, s, ansi.Reset }) catch {},
+        .boolean => |b| out.print("{s}{}{s}", .{ ansi.Magenta, b, ansi.Reset }) catch {},
         .array => |a| {
-            out.print("[", .{}) catch {};
+            out.print("{s}[ {s}", .{ ansi.Gray, ansi.Reset }) catch {};
             for (a.elements.items, 0..) |elem, j| {
-                if (j > 0) out.print(", ", .{}) catch {};
-                switch (elem) {
-                    .integer => |int_val| out.print("{d}", .{int_val}) catch {},
-                    .float => |f| out.print("{d}", .{f}) catch {},
-                    .string => |s| out.print("\"{s}\"", .{s}) catch {},
-                    .boolean => |b| out.print("{}", .{b}) catch {},
-                    .void => out.print("undefined", .{}) catch {},
-                    .null => out.print("null", .{}) catch {},
-                    .object => out.print("[object]", .{}) catch {},
-                    .array => out.print("[ array ]", .{}) catch {},
-                    .closure => out.print("[closure]", .{}) catch {},
-                    .iterator => out.print("[object Array Iterator]", .{}) catch {},
-                    .js_object => out.print("[object]", .{}) catch {},
-                }
+                if (j > 0) out.print("{s}, {s}", .{ ansi.Gray, ansi.Reset }) catch {};
+                printValueTo(out, elem);
             }
-            out.print("]", .{}) catch {};
+            out.print("{s} ]{s}", .{ ansi.Gray, ansi.Reset }) catch {};
         },
-        .void => out.print("undefined", .{}) catch {},
-        .null => out.print("null", .{}) catch {},
-        .object => out.print("[object]", .{}) catch {},
-        .closure => out.print("[closure]", .{}) catch {},
-        .iterator => out.print("[object Array Iterator]", .{}) catch {},
+        .void => out.print("{s}undefined{s}", .{ ansi.Dim, ansi.Reset }) catch {},
+        .null => out.print("{s}null{s}", .{ ansi.Dim, ansi.Reset }) catch {},
+        .object => out.print("{s}[object]{s}", .{ ansi.Cyan, ansi.Reset }) catch {},
+        .closure => out.print("{s}[closure]{s}", .{ ansi.Cyan, ansi.Reset }) catch {},
+        .iterator => out.print("{s}[object Array Iterator]{s}", .{ ansi.Yellow, ansi.Reset }) catch {},
         .js_object => |o| {
-            out.print("{{", .{}) catch {};
+            out.print("{s}{{", .{ ansi.Gray }) catch {};
             var first = true;
             var it = o.properties.iterator();
             while (it.next()) |entry| {
-                if (!first) out.print(", ", .{}) catch {};
+                if (!first) out.print("{s},{s} ", .{ ansi.Gray, ansi.Reset }) catch {};
                 first = false;
-                out.print("{s}: ", .{entry.key_ptr.*}) catch {};
+                out.print("{s}{s}:{s} ", .{ ansi.Cyan, entry.key_ptr.*, ansi.Reset }) catch {};
                 printValueTo(out, entry.value_ptr.*);
             }
-            out.print("}}", .{}) catch {};
+            out.print("{s}}}{s}", .{ ansi.Gray, ansi.Reset }) catch {};
         },
     }
 }
@@ -55,7 +44,10 @@ pub fn Log(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
         const out = &file_writer.interface;
         for (args, 0..) |arg, i| {
             if (i > 0) out.print(" ", .{}) catch {};
-            printValueTo(out, arg);
+            switch (arg) {
+                .string => |s| out.print("{s}", .{s}) catch {},
+                else => printValueTo(out, arg),
+            }
         }
         out.print("\n", .{}) catch {};
         file_writer.flush() catch {};
