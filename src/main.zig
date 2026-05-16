@@ -25,7 +25,17 @@ test {
     _ = @import("builtins/array/at.zig");
     _ = @import("builtins/array/pop.zig");
     _ = @import("builtins/array/push.zig");
+    _ = @import("builtins/array/concat.zig");
+    _ = @import("builtins/array/copyWithin.zig");
     _ = @import("builtins/array/entries.zig");
+    _ = @import("builtins/array/every.zig");
+    _ = @import("builtins/array/fill.zig");
+    _ = @import("builtins/array/filter.zig");
+}
+
+test {
+    _ = @import("builtins/math/math.zig");
+    _ = @import("builtins/math/abs.zig");
 }
 
 fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const u8 {
