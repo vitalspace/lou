@@ -388,7 +388,9 @@ pub const VM = struct {
                 .dup => { const v = self.peek(0); self.push(v); },
                 .def_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setVar(n, v) catch {}; },
                 .get_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string;
-                    if (self.env.get(n)) |v| { self.push(v); } else if (self.env.getBuiltin(n)) |_| { self.push(.{ .void = {} }); }
+                    if (self.env.get(n)) |v| { self.push(v); }
+                    else if (self.env.getFunction(n)) |_| { self.push(.{ .string = n }); }
+                    else if (self.env.getBuiltin(n)) |_| { self.push(.{ .void = {} }); }
                     else if (self.env.getBuiltinObject(n)) |obj| { self.push(.{ .object = @ptrCast(obj) }); }
                     else { return error.UndefinedVariable; }
                 },
