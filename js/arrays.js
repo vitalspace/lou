@@ -141,5 +141,46 @@ console.log(every2);
 var every3 = [].every(isBelowThreshold);
 console.log(every3);
 
-// DEBUG
-console.log("HERE");
+// Fill
+var fill_arr = [1, 2, 3, 4];
+console.log(fill_arr.fill(0, 2, 4));
+console.log(fill_arr.fill(5, 1));
+console.log(fill_arr.fill(6));
+
+// Fill examples from spec
+console.log([1, 2, 3].fill(4));
+console.log([1, 2, 3].fill(4, 1));
+console.log([1, 2, 3].fill(4, 1, 2));
+console.log([1, 2, 3].fill(4, 1, 1));
+console.log([1, 2, 3].fill(4, 3, 3));
+console.log([1, 2, 3].fill(4, -3, -2));
+console.log(Array(3).fill(4));
+
+// Fill populate empty array
+var tempGirls = Array(5).fill("girl", 0);
+console.log(tempGirls);
+
+// Filter
+function isBigEnough(value) {
+  return value >= 10;
+}
+var filtered = [12, 5, 8, 130, 44].filter(isBigEnough);
+console.log(filtered);
+
+// Filter empty
+var emptyFilter = [].filter(isBigEnough);
+console.log(emptyFilter);
+
+// Filter none pass
+function alwaysFalse(x) {
+  return false;
+}
+var nonePass = [1, 2, 3].filter(alwaysFalse);
+console.log(nonePass);
+
+// Filter with index
+function greaterThanIndex(value, index) {
+  return value > index;
+}
+var indexFilter = [0, 2, 1, 3, 2].filter(greaterThanIndex);
+console.log(indexFilter);

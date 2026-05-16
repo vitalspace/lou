@@ -6,6 +6,7 @@ console.time("total")
 // import "./blocks.js";
 // import "./if.js";
 import "./arrays.js";
+import "./math.js";
 // import "./functions.js";
 // import "./strings.js";
 // import "./arrow.js";
