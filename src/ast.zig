@@ -7,6 +7,10 @@ pub const ClosureValue = @import("types/runtime.zig").ClosureValue;
 pub const ArrayObject = @import("types/runtime.zig").ArrayObject;
 pub const ArrayIterator = @import("types/runtime.zig").ArrayIterator;
 pub const ObjectValue = @import("types/runtime.zig").ObjectValue;
+pub const SymbolValue = @import("types/runtime.zig").SymbolValue;
+pub const WellKnownSymbol = @import("types/runtime.zig").WellKnownSymbol;
+pub const GeneratorObject = @import("types/runtime.zig").GeneratorObject;
+pub const symbolPropertyName = @import("types/runtime.zig").symbolPropertyName;
 
 pub const Property = struct {
     key: []const u8,
@@ -32,6 +36,7 @@ pub const NodeType = enum {
     LetDeclaration,
     BlockStatement,
     ForLoop,
+    ForOfLoop,
     WhileLoop,
     IfStatement,
     ReturnStatement,
@@ -42,6 +47,11 @@ pub const NodeType = enum {
     MethodCall, // Nuevo: Para console.log() (con llamada)
     ImportStatement,
     ExportStatement,
+    GeneratorDeclaration,
+    YieldExpression,
+    SpreadExpression,
+    NewExpression,
+    DirectCall,
 };
 
 pub const Node = union(NodeType) {
@@ -107,6 +117,12 @@ pub const Node = union(NodeType) {
         increment: ?*Node,
         body: *Node,
     },
+    ForOfLoop: struct {
+        kind: ForOfKind,
+        variable: []const u8,
+        iterable: *Node,
+        body: *Node,
+    },
     WhileLoop: struct {
         condition: *Node,
         body: *Node,
@@ -152,7 +168,29 @@ pub const Node = union(NodeType) {
         declaration: *Node,
         is_default: bool,
     },
+    GeneratorDeclaration: struct {
+        name: []const u8,
+        parameters: [][]const u8,
+        body: *Node,
+    },
+    YieldExpression: struct {
+        value: ?*Node, // null for bare yield
+        is_star: bool, // true for yield*
+    },
+    SpreadExpression: struct {
+        value: *Node, // The expression after ...
+    },
+    NewExpression: struct {
+        callee: *Node,
+        arguments: []*Node,
+    },
+    DirectCall: struct {
+        callee: *Node,
+        arguments: []*Node,
+    },
 };
+
+pub const ForOfKind = enum { Const, Var, Let };
 
 pub const NamedImport = struct {
     name: []const u8,
@@ -318,6 +356,19 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("Body:\n", .{});
             try printAst(f.body, depth + 2, writer);
         },
+        .ForOfLoop => |f| {
+            try writer.print("ForOfLoop:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Kind: {s}\n", .{@tagName(f.kind)});
+            try printIdent(writer, depth + 1);
+            try writer.print("Variable: {s}\n", .{f.variable});
+            try printIdent(writer, depth + 1);
+            try writer.print("Iterable:\n", .{});
+            try printAst(f.iterable, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Body:\n", .{});
+            try printAst(f.body, depth + 2, writer);
+        },
         .WhileLoop => |w| {
             try writer.print("WhileLoop:\n", .{});
             try printIdent(writer, depth + 1);
@@ -450,6 +501,61 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("Declaration:\n", .{});
             try printAst(e.declaration, depth + 2, writer);
         },
+        .GeneratorDeclaration => |g| {
+            try writer.print("GeneratorDeclaration:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Name: {s}\n", .{g.name});
+            try printIdent(writer, depth + 1);
+            try writer.print("Parameters: ", .{});
+            for (g.parameters, 0..) |param, i| {
+                if (i > 0) try writer.print(", ", .{});
+                try writer.print("{s}", .{param});
+            }
+            try writer.print("\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Body:\n", .{});
+            try printAst(g.body, depth + 2, writer);
+        },
+        .YieldExpression => |y| {
+            if (y.is_star) {
+                try writer.print("YieldStarExpression:\n", .{});
+            } else {
+                try writer.print("YieldExpression:\n", .{});
+            }
+            if (y.value) |val| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try printAst(val, depth + 2, writer);
+            }
+        },
+        .SpreadExpression => |s| {
+            try writer.print("SpreadExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Value:\n", .{});
+            try printAst(s.value, depth + 2, writer);
+        },
+        .NewExpression => |ne| {
+            try writer.print("NewExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Callee:\n", .{});
+            try printAst(ne.callee, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Arguments:\n", .{});
+            for (ne.arguments) |arg| {
+                try printAst(arg, depth + 2, writer);
+            }
+        },
+        .DirectCall => |dc| {
+            try writer.print("DirectCall:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Callee:\n", .{});
+            try printAst(dc.callee, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Arguments:\n", .{});
+            for (dc.arguments) |arg| {
+                try printAst(arg, depth + 2, writer);
+            }
+        },
     }
 }
 
@@ -512,6 +618,10 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
             }
             freeAst(allocator, f.body);
         },
+        .ForOfLoop => |f| {
+            freeAst(allocator, f.iterable);
+            freeAst(allocator, f.body);
+        },
         .WhileLoop => |w| {
             freeAst(allocator, w.condition);
             freeAst(allocator, w.body);
@@ -560,6 +670,32 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
             if (i.named_bindings) |nb| allocator.free(nb);
         },
         .ExportStatement => |e| freeAst(allocator, e.declaration),
+        .GeneratorDeclaration => |g| {
+            allocator.free(g.parameters);
+            freeAst(allocator, g.body);
+        },
+        .YieldExpression => |y| {
+            if (y.value) |val| {
+                freeAst(allocator, val);
+            }
+        },
+        .SpreadExpression => |s| {
+            freeAst(allocator, s.value);
+        },
+        .NewExpression => |ne| {
+            freeAst(allocator, ne.callee);
+            for (ne.arguments) |arg| {
+                freeAst(allocator, arg);
+            }
+            allocator.free(ne.arguments);
+        },
+        .DirectCall => |dc| {
+            freeAst(allocator, dc.callee);
+            for (dc.arguments) |arg| {
+                freeAst(allocator, arg);
+            }
+            allocator.free(dc.arguments);
+        },
     }
     allocator.destroy(node);
 }
