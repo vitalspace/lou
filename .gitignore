@@ -3,6 +3,5 @@ zig-out/**
 specs/
 http/
 optimizations/
-js/
 bench.sh
 profiler/
