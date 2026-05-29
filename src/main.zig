@@ -10,8 +10,9 @@ const Parser = @import("parser.zig").Parser;
 const VM = @import("vm.zig").VM;
 const Compiler = @import("vm.zig").Compiler;
 const Chunk = @import("vm.zig").Chunk;
+const initSimboloObject = @import("builtins/symbol.zig").initSimboloObject;
 
-const use_vm = true;
+const use_vm = false;
 
 test {
     _ = @import("builtins/console/log.zig");
@@ -31,11 +32,33 @@ test {
     _ = @import("builtins/array/every.zig");
     _ = @import("builtins/array/fill.zig");
     _ = @import("builtins/array/filter.zig");
+    _ = @import("builtins/array/find.zig");
+    _ = @import("builtins/array/findIndex.zig");
 }
 
 test {
     _ = @import("builtins/math/math.zig");
     _ = @import("builtins/math/abs.zig");
+}
+
+test {
+    _ = @import("builtins/string/string.zig");
+    _ = @import("builtins/string/toUpperCase.zig");
+    _ = @import("builtins/string/normalize.zig");
+    _ = @import("builtins/string/padEnd.zig");
+    _ = @import("builtins/string/padStart.zig");
+    _ = @import("builtins/string/repeat.zig");
+    _ = @import("builtins/string/replace.zig");
+    _ = @import("builtins/string/replaceAll.zig");
+    _ = @import("builtins/string/search.zig");
+    _ = @import("builtins/string/slice.zig");
+    _ = @import("builtins/string/split.zig");
+    _ = @import("builtins/string/startsWith.zig");
+}
+
+test {
+    _ = @import("builtins/set/set.zig");
+    _ = @import("builtins/map/map.zig");
 }
 
 fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const u8 {
@@ -47,8 +70,19 @@ fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const
 }
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
     const io = init.io;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        .thread_safe = true,
+        .never_unmap = true,
+        .retain_metadata = true,
+    }){};
+    defer {
+        if (gpa.deinit() == .leak) {
+            @panic("MEMORY LEAK DETECTED");
+        }
+    }
+    const allocator = gpa.allocator();
 
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
     defer args_it.deinit();
@@ -70,25 +104,28 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
-    const content = try openFile(filePath, gpa, io);
-    defer gpa.free(content);
+    const content = try openFile(filePath, allocator, io);
+    defer allocator.free(content);
 
     var lexer = Lexer.init(content);
-    var parser = try Parser.init(&lexer, gpa);
+    var parser = try Parser.init(&lexer, allocator);
     defer parser.deinit();
     const program = try parser.parseProgram();
 
-    var env_ = try Environment.initWithIo(gpa, null, io);
+    var env_ = try Environment.initWithIo(allocator, null, io);
     defer env_.deinit();
 
     var dir_buf: []const u8 = ".";
     if (std.mem.lastIndexOfScalar(u8, filePath, '/')) |idx| {
         dir_buf = filePath[0..idx];
     }
+    
     env_.module_dir = dir_buf;
 
+    try initSimboloObject(&env_);
+
     if (use_vm) {
-        var chunk = Chunk.init(gpa);
+        var chunk = Chunk.init(allocator);
         defer chunk.deinit();
         var comp = Compiler.init(&env_);
         comp.compile(program, &chunk);
