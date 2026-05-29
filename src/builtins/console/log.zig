@@ -58,6 +58,7 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
                 out.print("{s} ]{s}", .{ Gy, R }) catch {};
             }
         },
+        .hole => out.print("{s}<empty>{s}", .{ D, R }) catch {},
         .void => out.print("{s}undefined{s}", .{ D, R }) catch {},
         .null => out.print("{s}null{s}", .{ D, R }) catch {},
         .object => out.print("{s}[object]{s}", .{ C, R }) catch {},
