@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub const Reset = "\x1b[0m";
 pub const Bold = "\x1b[1m";
@@ -21,6 +22,11 @@ pub const BrightBlue = "\x1b[94m";
 pub const BrightMagenta = "\x1b[95m";
 pub const BrightCyan = "\x1b[96m";
 pub const BrightWhite = "\x1b[97m";
+
+pub fn supportsAnsi(io: Io) bool {
+    const file = Io.File.stdout();
+    return Io.File.supportsAnsiEscapeCodes(file, io) catch false;
+}
 
 pub fn colorize(comptime color: []const u8, text: []const u8) []const u8 {
     return color ++ text ++ Reset;
