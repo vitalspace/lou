@@ -28,7 +28,7 @@ fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinR
         env.arrays.append(env.allocator, arr) catch {};
         var i: usize = 0;
         while (i < @as(usize, @intCast(len))) : (i += 1) {
-            arr.elements.append(env.allocator, .{ .void = {} }) catch {};
+            arr.elements.append(env.allocator, .{ .hole = {} }) catch {};
         }
         return .{ .value = .{ .array = arr } };
     }
