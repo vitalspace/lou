@@ -35,7 +35,7 @@ pub const ArrayObject = struct {
     pub fn set(this: *ArrayObject, index: usize, value: Value) !void {
         if (index >= this.elements.items.len) {
             while (this.elements.items.len <= index) {
-                try this.elements.append(this.allocator, .{ .float = 0.0 });
+                try this.elements.append(this.allocator, .{ .hole = {} });
             }
         }
         this.elements.items[index] = value;
@@ -132,14 +132,16 @@ pub const ArrayIterator = struct {
             return .{ .js_object = result };
         }
 
+        const element: Value = if (this.source.elements.items[this.index] == .hole) Value{ .void = {} } else this.source.elements.items[this.index];
+
         if (this.value_mode) {
-            result.properties.put("value", this.source.elements.items[this.index]) catch { return .{ .void = {} }; };
+            result.properties.put("value", element) catch { return .{ .void = {} }; };
         } else if (this.key_mode) {
             result.properties.put("value", .{ .integer = @intCast(this.index) }) catch { return .{ .void = {} }; };
         } else {
             var pair = ArrayObject.init(allocator) catch return .{ .void = {} };
             pair.elements.append(allocator, .{ .integer = @intCast(this.index) }) catch { pair.deinit(); return .{ .void = {} }; };
-            pair.elements.append(allocator, this.source.elements.items[this.index]) catch { pair.deinit(); return .{ .void = {} }; };
+            pair.elements.append(allocator, element) catch { pair.deinit(); return .{ .void = {} }; };
             arrays.append(allocator, pair) catch { pair.deinit(); return .{ .void = {} }; };
             result.properties.put("value", .{ .array = pair }) catch { return .{ .void = {} }; };
         }
@@ -200,6 +202,7 @@ pub const Value = union(enum) {
     symbol: *SymbolValue,
     void: void,
     null: void,
+    hole: void,
 };
 
 pub const GeneratorObject = struct {
