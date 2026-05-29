@@ -25,6 +25,7 @@ fn valEq(l: Types.Value, r: Types.Value) bool {
         },
         .void => r == .void,
         .null => r == .null,
+        .hole => r == .void,
         else => false,
     };
 }
@@ -59,6 +60,7 @@ pub fn LastIndexOf(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
 
     var i: i64 = from_index;
     while (i >= 0) {
+        if (source.elements.items[@as(usize, @intCast(i))] == .hole) { i -= 1; continue; }
         if (valEq(source.elements.items[@as(usize, @intCast(i))], search_element)) {
             return .{ .value = .{ .integer = i } };
         }
