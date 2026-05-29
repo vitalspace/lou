@@ -15,6 +15,7 @@ fn flatten(source: *Ast.ArrayObject, depth: u64, allocator: std.mem.Allocator, a
 
 fn flattenRecursive(source: *Ast.ArrayObject, depth: u64, result: *Ast.ArrayObject, allocator: std.mem.Allocator) !void {
     for (source.elements.items) |elem| {
+        if (elem == .hole) continue;
         if (elem == .array and depth > 0) {
             try flattenRecursive(elem.array, depth - 1, result, allocator);
         } else {
