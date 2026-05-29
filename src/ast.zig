@@ -50,6 +50,7 @@ pub const NodeType = enum {
     GeneratorDeclaration,
     YieldExpression,
     SpreadExpression,
+    Elision,
     NewExpression,
     DirectCall,
 };
@@ -178,8 +179,9 @@ pub const Node = union(NodeType) {
         is_star: bool, // true for yield*
     },
     SpreadExpression: struct {
-        value: *Node, // The expression after ...
+        value: *Node,
     },
+    Elision: void,
     NewExpression: struct {
         callee: *Node,
         arguments: []*Node,
@@ -556,6 +558,9 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
                 try printAst(arg, depth + 2, writer);
             }
         },
+        .Elision => {
+            try writer.print("Elision\n", .{});
+        },
     }
 }
 
@@ -696,6 +701,7 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
             }
             allocator.free(dc.arguments);
         },
+        .Elision => {},
     }
     allocator.destroy(node);
 }
@@ -764,10 +770,10 @@ test "ArrayObject - set expands array" {
     try arr.set(3, Value{ .integer = 100 });
     try std.testing.expectEqual(@as(usize, 4), arr.elements.items.len);
 
-    // Check intermediate values are initialized to 0.0
+    // Check intermediate values are holes
     const val0 = arr.get(0);
     try std.testing.expect(val0 != null);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.0), val0.?.float, 0.001);
+    try std.testing.expect(val0.? == .hole);
 
     // Check set value
     const val3 = arr.get(3);
