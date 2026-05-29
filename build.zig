@@ -142,15 +142,21 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+    // Build ReleaseFast binary for benchmarking.
+    // Usage: zig build bench
+    // Installs to zig-out/bin/lou (same path as Debug, overwrites it).
+    const release_step = b.step("release", "Build ReleaseFast binary for benchmarking");
+    const exe_release = b.addExecutable(.{
+        .name = "lou",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "lou", .module = mod },
+            },
+        }),
+    });
+    const install_release = b.addInstallArtifact(exe_release, .{});
+    release_step.dependOn(&install_release.step);
 }
