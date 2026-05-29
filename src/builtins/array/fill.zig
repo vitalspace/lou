@@ -14,6 +14,18 @@ fn toInt(v: Types.Value, fallback: i64) i64 {
     };
 }
 
+fn clampStart(raw: i64, len: i64) i64 {
+    if (raw < -len) return 0;
+    if (raw < 0) return raw + len;
+    return raw;
+}
+
+fn clampEnd(raw: i64, len: i64) i64 {
+    if (raw < -len) return 0;
+    if (raw < 0) return raw + len;
+    return if (raw > len) len else raw;
+}
+
 pub fn Fill(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
     if (args.len < 2) return .{ .value = .{ .void = {} } };
@@ -23,20 +35,12 @@ pub fn Fill(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     const value = args[1];
     const len = @as(i64, @intCast(array.elements.items.len));
 
-    var start: i64 = 0;
-    if (args.len >= 3) start = toInt(args[2], 0);
-    if (start < -len) { start = 0; } else if (start < 0) { start += len; }
-
-    var end: i64 = len;
-    if (args.len >= 4) end = toInt(args[3], len);
-    if (end < -len) { end = 0; } else if (end < 0) { end += len; }
-    if (end > len) end = len;
+    const start = clampStart(if (args.len >= 3) toInt(args[2], 0) else 0, len);
+    const end = clampEnd(if (args.len >= 4) toInt(args[3], len) else len, len);
 
     if (start >= len or start >= end) return .{ .value = .{ .array = array } };
 
-    const s = @as(usize, @intCast(start));
-    const e = @as(usize, @intCast(end));
-    for (array.elements.items[s..e]) |*item| item.* = value;
+    @memset(array.elements.items[@as(usize, @intCast(start))..@as(usize, @intCast(end))], value);
 
     return .{ .value = .{ .array = array } };
 }

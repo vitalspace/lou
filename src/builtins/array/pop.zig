@@ -14,13 +14,10 @@ pub fn Pop(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
         return .{ .value = .{ .void = {} } }; // Error: el argumento no es un array
     }
 
-    // Remover y retornar el último elemento del array
-    if (array_val.array.elements.items.len == 0) {
-        return .{ .value = .{ .void = {} } }; // Array vacío, retornar undefined
-    }
-
-    const last_element = array_val.array.elements.pop();
-    return .{ .value = last_element.? };
+    const last_element = array_val.array.elements.pop() orelse {
+        return .{ .value = .{ .void = {} } };
+    };
+    return .{ .value = last_element };
 }
 
 test "pop returns last element" {

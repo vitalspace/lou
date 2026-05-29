@@ -1,10 +1,12 @@
 const std = @import("std");
 
 pub const BuiltinObject = opaque {};
+pub const AstNode = opaque {};
 
 pub const ArrayObject = struct {
     allocator: std.mem.Allocator,
     elements: std.ArrayListAligned(Value, null),
+    extras: ?*ObjectValue = null,
 
     pub fn init(allocator: std.mem.Allocator) !*ArrayObject {
         const obj = try allocator.create(ArrayObject);
@@ -12,8 +14,16 @@ pub const ArrayObject = struct {
         return obj;
     }
 
+    pub fn initExtras(allocator: std.mem.Allocator) !*ArrayObject {
+        const obj = try allocator.create(ArrayObject);
+        const extras = try ObjectValue.init(allocator);
+        obj.* = .{ .elements = .empty, .allocator = allocator, .extras = extras };
+        return obj;
+    }
+
     pub fn deinit(this: *ArrayObject) void {
         if (this.elements.capacity > 0) this.allocator.free(this.elements.allocatedSlice());
+        if (this.extras) |e| e.deinit();
         this.allocator.destroy(this);
     }
 
@@ -86,10 +96,24 @@ pub const ArrayIterator = struct {
     allocator: std.mem.Allocator,
     source: *ArrayObject,
     index: usize,
+    key_mode: bool,
+    value_mode: bool,
 
     pub fn init(allocator: std.mem.Allocator, source: *ArrayObject) !*ArrayIterator {
         const obj = try allocator.create(ArrayIterator);
-        obj.* = .{ .allocator = allocator, .source = source, .index = 0 };
+        obj.* = .{ .allocator = allocator, .source = source, .index = 0, .key_mode = false, .value_mode = false };
+        return obj;
+    }
+
+    pub fn initKeys(allocator: std.mem.Allocator, source: *ArrayObject) !*ArrayIterator {
+        const obj = try allocator.create(ArrayIterator);
+        obj.* = .{ .allocator = allocator, .source = source, .index = 0, .key_mode = true, .value_mode = false };
+        return obj;
+    }
+
+    pub fn initValues(allocator: std.mem.Allocator, source: *ArrayObject) !*ArrayIterator {
+        const obj = try allocator.create(ArrayIterator);
+        obj.* = .{ .allocator = allocator, .source = source, .index = 0, .key_mode = false, .value_mode = true };
         return obj;
     }
 
@@ -108,12 +132,17 @@ pub const ArrayIterator = struct {
             return .{ .js_object = result };
         }
 
-        var pair = ArrayObject.init(allocator) catch return .{ .void = {} };
-        pair.elements.append(allocator, .{ .integer = @intCast(this.index) }) catch { pair.deinit(); return .{ .void = {} }; };
-        pair.elements.append(allocator, this.source.elements.items[this.index]) catch { pair.deinit(); return .{ .void = {} }; };
-        arrays.append(allocator, pair) catch { pair.deinit(); return .{ .void = {} }; };
-
-        result.properties.put("value", .{ .array = pair }) catch { return .{ .void = {} }; };
+        if (this.value_mode) {
+            result.properties.put("value", this.source.elements.items[this.index]) catch { return .{ .void = {} }; };
+        } else if (this.key_mode) {
+            result.properties.put("value", .{ .integer = @intCast(this.index) }) catch { return .{ .void = {} }; };
+        } else {
+            var pair = ArrayObject.init(allocator) catch return .{ .void = {} };
+            pair.elements.append(allocator, .{ .integer = @intCast(this.index) }) catch { pair.deinit(); return .{ .void = {} }; };
+            pair.elements.append(allocator, this.source.elements.items[this.index]) catch { pair.deinit(); return .{ .void = {} }; };
+            arrays.append(allocator, pair) catch { pair.deinit(); return .{ .void = {} }; };
+            result.properties.put("value", .{ .array = pair }) catch { return .{ .void = {} }; };
+        }
         result.properties.put("done", .{ .boolean = false }) catch { return .{ .void = {} }; };
         objects.append(allocator, result) catch { result.deinit(); return .{ .void = {} }; };
 
@@ -121,6 +150,40 @@ pub const ArrayIterator = struct {
         return .{ .js_object = result };
     }
 };
+
+pub const SymbolValue = struct {
+    id: u64,
+    description: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, id: u64, description: []const u8) !*SymbolValue {
+        const sym = try allocator.create(SymbolValue);
+        sym.* = .{ .id = id, .description = try allocator.dupe(u8, description), .allocator = allocator };
+        return sym;
+    }
+
+    pub fn deinit(this: *SymbolValue) void {
+        this.allocator.free(this.description);
+        this.allocator.destroy(this);
+    }
+};
+
+pub const WellKnownSymbol = enum(u64) {
+    iterator = 0,
+    match = 1,
+    replace = 2,
+    search = 3,
+    split = 4,
+    hasInstance = 5,
+    toPrimitive = 6,
+    toStringTag = 7,
+    species = 8,
+};
+
+pub fn symbolPropertyName(allocator: std.mem.Allocator, description: []const u8) ![]const u8 {
+    const full = try std.fmt.allocPrint(allocator, "@@{s}", .{description});
+    return full;
+}
 
 pub const Value = union(enum) {
     float: f64,
@@ -132,8 +195,39 @@ pub const Value = union(enum) {
     closure: *ClosureValue,
     iterator: *ArrayIterator,
     js_object: *ObjectValue,
+    function: *AstNode,
+    generator: *GeneratorObject,
+    symbol: *SymbolValue,
     void: void,
     null: void,
+};
+
+pub const GeneratorObject = struct {
+    allocator: std.mem.Allocator,
+    func_node: *AstNode, // The GeneratorDeclaration AST node
+    params: []const []const u8,
+    gen_env: ?*anyopaque, // Opaque pointer to the generator's persistent environment
+    ip: usize, // Instruction pointer (index into body statements)
+    done: bool,
+
+    pub fn init(allocator: std.mem.Allocator, func_node: *AstNode, params: []const []const u8) !*GeneratorObject {
+        const obj = try allocator.create(GeneratorObject);
+        obj.* = .{
+            .allocator = allocator,
+            .func_node = func_node,
+            .params = params,
+            .gen_env = null,
+            .ip = 0,
+            .done = false,
+        };
+        return obj;
+    }
+
+    pub fn deinit(this: *GeneratorObject) void {
+        // Note: gen_env lifecycle is managed externally by the Environment deinit chain.
+        // See Environment.deinit() in environment.zig which frees gen_env before calling this.
+        this.allocator.destroy(this);
+    }
 };
 
 pub const BuiltinResult = union(enum) {

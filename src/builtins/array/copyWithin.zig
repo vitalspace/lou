@@ -2,6 +2,12 @@ const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
 
+fn normalizeIndex(raw: i64, len: i64) i64 {
+    if (raw < -len) return 0;
+    if (raw < 0) return raw + len;
+    return raw;
+}
+
 pub fn CopyWithin(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
 
@@ -21,16 +27,8 @@ pub fn CopyWithin(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         .float => |f| @intFromFloat(f),
         else => return .{ .value = .{ .void = {} } },
     };
-
-    var target = target_raw;
-    if (target < -len) {
-        target = 0;
-    } else if (target < 0) {
-        target += len;
-    }
-    if (target >= len) {
-        return .{ .value = .{ .array = array } };
-    }
+    const target = normalizeIndex(target_raw, len);
+    if (target >= len) return .{ .value = .{ .array = array } };
 
     var start: i64 = 0;
     if (args.len > 2) {
@@ -39,15 +37,8 @@ pub fn CopyWithin(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
             .float => |f| @intFromFloat(f),
             else => return .{ .value = .{ .void = {} } },
         };
-        start = start_raw;
-        if (start < -len) {
-            start = 0;
-        } else if (start < 0) {
-            start += len;
-        }
-        if (start >= len) {
-            return .{ .value = .{ .array = array } };
-        }
+        start = normalizeIndex(start_raw, len);
+        if (start >= len) return .{ .value = .{ .array = array } };
     }
 
     var end: i64 = len;
@@ -57,40 +48,29 @@ pub fn CopyWithin(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
             .float => |f| @intFromFloat(f),
             else => return .{ .value = .{ .void = {} } },
         };
-        end = end_raw;
-        if (end < -len) {
+        if (end_raw < -len) {
             end = 0;
-        } else if (end < 0) {
-            end += len;
+        } else if (end_raw < 0) {
+            end = end_raw + len;
+        } else {
+            end = end_raw;
         }
-        if (end > len) {
-            end = len;
-        }
+        if (end > len) end = len;
     }
 
     var count = end - start;
-    if (count <= 0) {
-        return .{ .value = .{ .array = array } };
-    }
-    if (target + count > len) {
-        count = len - target;
-    }
+    if (count <= 0) return .{ .value = .{ .array = array } };
+    if (target + count > len) count = len - target;
 
-    const src = @as(usize, @intCast(start));
-    const dst = @as(usize, @intCast(target));
     const n = @as(usize, @intCast(count));
+    const dst = @as(usize, @intCast(target));
+    const src = @as(usize, @intCast(start));
 
+    const items = array.elements.items;
     if (target <= start) {
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            array.elements.items[dst + i] = array.elements.items[src + i];
-        }
+        std.mem.copyForwards(Types.Value, items[dst..][0..n], items[src..][0..n]);
     } else {
-        var i: usize = n;
-        while (i > 0) {
-            i -= 1;
-            array.elements.items[dst + i] = array.elements.items[src + i];
-        }
+        std.mem.copyBackwards(Types.Value, items[dst..][0..n], items[src..][0..n]);
     }
 
     return .{ .value = .{ .array = array } };

@@ -9,6 +9,9 @@ pub const ArrayObject = rt.ArrayObject;
 pub const ArrayIterator = rt.ArrayIterator;
 pub const ObjectValue = rt.ObjectValue;
 pub const ClosureValue = rt.ClosureValue;
+pub const SymbolValue = rt.SymbolValue;
+pub const WellKnownSymbol = rt.WellKnownSymbol;
+pub const symbolPropertyName = rt.symbolPropertyName;
 pub const BuiltinResult = rt.BuiltinResult;
 pub const Environment = env.Environment;
 

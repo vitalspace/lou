@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const Environment = @import("../../evaluator.zig").Environment;
 
 pub fn Entries(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 1) return .{ .value = .{ .void = {} } };
@@ -73,6 +74,34 @@ test "iterator next returns pairs" {
     try std.testing.expect(v3.js_object.properties.get("value").? == .void);
 }
 
+test "iterator next .value returns pair array" {
+    const allocator = std.testing.allocator;
+    var env = try Environment.init(allocator, null);
+    defer env.deinit();
+
+    const array = try Ast.ArrayObject.init(allocator);
+    defer array.deinit();
+    try array.elements.append(allocator, .{ .string = "a" });
+    try array.elements.append(allocator, .{ .string = "b" });
+
+    var iter = try Ast.ArrayIterator.init(allocator, array);
+    defer iter.deinit();
+
+    const r0 = iter.next(env.allocator, &env.arrays, &env.objects);
+    const r0_val = r0.js_object.properties.get("value").?.array;
+    try std.testing.expectEqual(@as(i64, 0), r0_val.elements.items[0].integer);
+    try std.testing.expectEqualSlices(u8, "a", r0_val.elements.items[1].string);
+
+    const r1 = iter.next(env.allocator, &env.arrays, &env.objects);
+    const r1_val = r1.js_object.properties.get("value").?.array;
+    try std.testing.expectEqual(@as(i64, 1), r1_val.elements.items[0].integer);
+    try std.testing.expectEqualSlices(u8, "b", r1_val.elements.items[1].string);
+
+    const r2 = iter.next(env.allocator, &env.arrays, &env.objects);
+    try std.testing.expect(r2.js_object.properties.get("done").?.boolean);
+    try std.testing.expect(r2.js_object.properties.get("value").? == .void);
+}
+
 test "iterator next on empty array returns done" {
     const allocator = std.testing.allocator;
     var env = try Environment.init(allocator, null);
@@ -101,5 +130,3 @@ test "entries no args returns void" {
     try std.testing.expect(result == .value);
     try std.testing.expect(result.value == .void);
 }
-
-const Environment = @import("../../evaluator.zig").Environment;

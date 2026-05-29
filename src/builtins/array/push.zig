@@ -6,31 +6,26 @@ pub fn Push(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
 
     if (args.len < 2) {
-        return .{ .value = .{ .float = 0.0 } }; // Error: push necesita al menos 2 argumentos (array + elemento)
+        return .{ .value = .{ .integer = 0 } };
     }
 
     const array_val = args[0];
     if (array_val != .array) {
-        return .{ .value = .{ .float = 0.0 } }; // Error: primer argumento no es un array
+        return .{ .value = .{ .integer = 0 } };
     }
 
-    // OPTIMIZACIÓN: Pre-alocar capacidad para todos los elementos a insertar
-    const elements_to_add = args.len - 1;
-    const current_len = array_val.array.elements.items.len;
-    const new_total_len = current_len + elements_to_add;
+    const arr = array_val.array;
+    const items_to_add = args[1..];
+    const current_len = arr.elements.items.len;
+    const new_len = current_len + items_to_add.len;
 
-    // Reservar capacidad exacta para evitar múltiples realocaciones
-    array_val.array.elements.ensureTotalCapacity(array_val.array.allocator, new_total_len) catch {
-        return .{ .value = .{ .float = 0.0 } };
+    arr.elements.ensureTotalCapacity(arr.allocator, new_len) catch {
+        return .{ .value = .{ .integer = 0 } };
     };
 
-    // Agregar elementos usando appendAssumeCapacity (sin checks de capacidad)
-    for (args[1..]) |arg| {
-        array_val.array.elements.appendAssumeCapacity(arg);
-    }
+    arr.elements.appendSliceAssumeCapacity(items_to_add);
 
-    // Retornar la nueva longitud (como en JavaScript)
-    return .{ .value = .{ .float = @floatFromInt(array_val.array.elements.items.len) } };
+    return .{ .value = .{ .integer = @intCast(new_len) } };
 }
 
 test "push one element returns new length" {
@@ -41,7 +36,7 @@ test "push one element returns new length" {
 
     var args = [_]Types.Value{ .{ .array = array }, .{ .integer = 2 } };
     const result = Push(&args, undefined);
-    try std.testing.expect(result == .value and result.value.float == 2.0);
+    try std.testing.expect(result == .value and result.value.integer == 2);
 }
 
 test "push multiple elements returns length" {
@@ -50,7 +45,7 @@ test "push multiple elements returns length" {
 
     var args = [_]Types.Value{ .{ .array = array }, .{ .integer = 1 }, .{ .integer = 2 }, .{ .integer = 3 } };
     const result = Push(&args, undefined);
-    try std.testing.expect(result == .value and result.value.float == 3.0);
+    try std.testing.expect(result == .value and result.value.integer == 3);
 }
 
 test "push actually adds element" {
@@ -65,13 +60,13 @@ test "push actually adds element" {
 
 test "push no args returns 0" {
     const result = Push(&[_]Types.Value{}, undefined);
-    try std.testing.expect(result == .value and result.value.float == 0.0);
+    try std.testing.expect(result == .value and result.value.integer == 0);
 }
 
 test "push non-array returns 0" {
     var args = [_]Types.Value{ .{ .float = 42.0 }, .{ .integer = 1 } };
     const result = Push(&args, undefined);
-    try std.testing.expect(result == .value and result.value.float == 0.0);
+    try std.testing.expect(result == .value and result.value.integer == 0);
 }
 
 test "push to empty array" {
@@ -80,7 +75,7 @@ test "push to empty array" {
 
     var args = [_]Types.Value{ .{ .array = array }, .{ .boolean = true } };
     const result = Push(&args, undefined);
-    try std.testing.expect(result == .value and result.value.float == 1.0);
+    try std.testing.expect(result == .value and result.value.integer == 1);
 }
 
 test "push multiple elements in sequence" {
@@ -95,7 +90,7 @@ test "push multiple elements in sequence" {
 
     var args3 = [_]Types.Value{ .{ .array = array }, .{ .integer = 30 } };
     const result = Push(&args3, undefined);
-    try std.testing.expect(result == .value and result.value.float == 3.0);
+    try std.testing.expect(result == .value and result.value.integer == 3);
     try std.testing.expectEqual(@as(usize, 3), array.elements.items.len);
     try std.testing.expectEqual(@as(i64, 10), array.elements.items[0].integer);
     try std.testing.expectEqual(@as(i64, 20), array.elements.items[1].integer);

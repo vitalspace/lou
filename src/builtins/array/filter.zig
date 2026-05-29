@@ -1,8 +1,17 @@
 const std = @import("std");
+const testing = std.testing;
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
+
+fn getFuncNode(arg: Types.Value, env: *Types.Environment) ?*Ast.Node {
+    return switch (arg) {
+        .string => |s| env.getFunction(s),
+        .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        else => null,
+    };
+}
 
 pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 2) return .{ .value = .{ .void = {} } };
@@ -10,12 +19,7 @@ pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
 
     const source = args[0].array;
 
-    const func_name = switch (args[1]) {
-        .string => |s| s,
-        else => return .{ .value = .{ .void = {} } },
-    };
-
-    const func_node = env.getFunction(func_name) orelse {
+    const func_node = getFuncNode(args[1], env) orelse {
         return .{ .value = .{ .void = {} } };
     };
 
@@ -33,16 +37,20 @@ pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
     var result = Ast.ArrayObject.init(env.allocator) catch {
         return .{ .value = .{ .void = {} } };
     };
+    result.elements.ensureTotalCapacity(env.allocator, source.elements.items.len) catch {
+        return .{ .value = .{ .void = {} } };
+    };
     env.arrays.append(env.allocator, result) catch {
         return .{ .value = .{ .void = {} } };
     };
 
-    for (source.elements.items, 0..) |element, i| {
-        var func_env = Environment.init(env.allocator, env) catch {
-            return .{ .value = .{ .void = {} } };
-        };
-        defer func_env.deinit();
+    var func_env = Environment.init(env.allocator, env) catch {
+        return .{ .value = .{ .void = {} } };
+    };
+    defer func_env.deinit();
 
+    for (source.elements.items, 0..) |element, i| {
+        func_env.return_hit = false;
         if (func_params.len > 0) func_env.setVar(func_params[0], element) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], .{ .integer = @intCast(i) }) catch {};
         if (func_params.len > 2) func_env.setVar(func_params[2], args[0]) catch {};
@@ -52,9 +60,7 @@ pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
         };
 
         if (truthy(ret)) {
-            result.elements.append(env.allocator, element) catch {
-                return .{ .value = .{ .void = {} } };
-            };
+            result.elements.appendAssumeCapacity(element);
         }
     }
 
@@ -99,8 +105,6 @@ fn destroyTestFunc(allocator: std.mem.Allocator, func_node: *Ast.Node) void {
     allocator.destroy(body);
     allocator.destroy(func_node);
 }
-
-const testing = std.testing;
 
 test "filter returns elements that pass test" {
     const allocator = testing.allocator;
