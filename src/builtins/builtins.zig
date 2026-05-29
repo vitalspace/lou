@@ -2,6 +2,8 @@ const std = @import("std");
 const Types = @import("../types/types.zig");
 const Ast = @import("../ast.zig");
 const BUILTIN_OBJECTS = @import("./builtinObjects.zig").BUILTIN_OBJECTS;
+const SetConstructor = @import("./set/set.zig").SetConstructor;
+const MapConstructor = @import("./map/map.zig").MapConstructor;
 
 fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -41,6 +43,8 @@ fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinR
 
 const BUILTIN_FUNCTIONS = [_]struct { name: []const u8, func: Types.BuiltinFn }{
     .{ .name = "Array", .func = arrayConstructor },
+    .{ .name = "Set", .func = SetConstructor },
+    .{ .name = "Map", .func = MapConstructor },
 };
 
 pub fn initBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(Types.BuiltinFn) {
