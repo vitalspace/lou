@@ -25,6 +25,7 @@ fn valEq(l: Types.Value, r: Types.Value) bool {
         },
         .void => r == .void,
         .null => r == .null,
+        .hole => r == .void,
         else => false,
     };
 }
@@ -56,6 +57,7 @@ pub fn IndexOf(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult
 
     var i: usize = @as(usize, @intCast(from_index));
     while (i < source.elements.items.len) : (i += 1) {
+        if (source.elements.items[i] == .hole) continue;
         if (valEq(source.elements.items[i], search_element)) {
             return .{ .value = .{ .integer = @intCast(i) } };
         }
