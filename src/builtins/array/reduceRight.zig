@@ -52,13 +52,24 @@ pub fn ReduceRight(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
         accumulator = args[2];
         i = source.elements.items.len;
     } else {
-        accumulator = source.elements.items[source.elements.items.len - 1];
-        i = source.elements.items.len - 1;
+        // Find first non-hole element from the right
+        var found = false;
+        i = source.elements.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (source.elements.items[i] != .hole) {
+                accumulator = source.elements.items[i];
+                found = true;
+                break;
+            }
+        }
+        if (!found) return .{ .value = .{ .void = {} } };
     }
 
     while (i > 0) {
         i -= 1;
         const element = source.elements.items[i];
+        if (element == .hole) continue;
         func_env.return_hit = false;
         if (func_params.len > 0) func_env.setVar(func_params[0], accumulator) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], element) catch {};
