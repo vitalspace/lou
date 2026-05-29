@@ -4,6 +4,10 @@ const Value = ast.Value;
 const Environment = @import("evaluator.zig").Environment;
 const builtinsTypes = @import("./types/types.zig");
 const evaluate = @import("evaluator.zig").evaluate;
+const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
+const evaluateGeneratorNext = @import("evaluator.zig").evaluateGeneratorNext;
+const evaluateGeneratorReturn = @import("evaluator.zig").evaluateGeneratorReturn;
+const evaluateGeneratorThrow = @import("evaluator.zig").evaluateGeneratorThrow;
 
 pub const Op = enum(u8) {
     constant, add, sub, mul, div, mod_, negate,
@@ -16,7 +20,7 @@ pub const Op = enum(u8) {
     jump, jump_if_false, loop,
     make_array, index_get, get_prop, make_object, set_prop,
     bit_and, bit_or, bit_xor, bit_not, left_shift, right_shift,
-    builtin, method_call, call, ret,
+    eval_node, builtin, method_call, call, ret,
 };
 
 pub const Chunk = struct {
@@ -82,8 +86,13 @@ pub const Compiler = struct {
             .IfStatement => self.ifStmt(n),
             .WhileLoop => self.whileStmt(n),
             .ForLoop => self.forStmt(n),
+            .ForOfLoop => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                self.c.op(.pop);
+            },
             .ReturnStatement => { if (n.ReturnStatement.value) |v| self.expr(v); self.c.op(.ret); },
             .FunctionDeclaration => self.fnDecl(n),
+            .GeneratorDeclaration => self.genDecl(n),
             .ImportStatement => { _ = evaluate(n, self.env) catch {}; },
             .ExportStatement => |e| { self.stmt(e.declaration); },
             .Assignment => { self.expr(n); },
@@ -101,7 +110,7 @@ pub const Compiler = struct {
     fn decl(self: *Compiler, n: *ast.Node) void {
         const name = switch (n.*) { .ConstantDeclaration => |c| c.name, .VariableDeclaration => |v| v.name, .LetDeclaration => |v| v.name, else => unreachable };
         const val = switch (n.*) { .ConstantDeclaration => |c| c.value, .VariableDeclaration => |v| v.value, .LetDeclaration => |v| v.value, else => unreachable };
-        if (val.* == .FunctionDeclaration or val.* == .ArrowFunction) {
+        if (val.* == .FunctionDeclaration or val.* == .ArrowFunction or val.* == .GeneratorDeclaration) {
             self.env.setFunction(name, val) catch {};
             return;
         }
@@ -234,6 +243,11 @@ pub const Compiler = struct {
         // Skip compiling body for now — calls fallback to evaluator
     }
 
+    fn genDecl(self: *Compiler, n: *ast.Node) void {
+        const f = n.GeneratorDeclaration;
+        self.env.setFunction(f.name, n) catch {};
+    }
+
     fn expr(self: *Compiler, n: *ast.Node) void {
         switch (n.*) {
             .IntegerLiteral => |v| self.c.emitC(.{ .integer = v.value }),
@@ -291,28 +305,92 @@ pub const Compiler = struct {
                 },
             },
             .Assignment => |a| { self.expr(a.value); self.c.op2w(.set_global, self.c.emitS(a.name)); },
-            .ArrayLiteral => |a| { for (a.elements) |e| self.expr(e); self.c.op2(.make_array, @intCast(a.elements.len)); },
+            .ArrayLiteral => |a| {
+                var has_spread = false;
+                for (a.elements) |e| {
+                    if (e.* == .SpreadExpression) {
+                        has_spread = true;
+                        break;
+                    }
+                }
+                if (has_spread) {
+                    // Defer evaluation to runtime via eval_node opcode
+                    // (variables referenced by spread may not exist at compile time)
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                } else {
+                    for (a.elements) |e| self.expr(e);
+                    self.c.op2(.make_array, @intCast(a.elements.len));
+                }
+            },
             .ObjectLiteral => |o| {
-                self.c.op(.make_object);
+                var has_spread = false;
                 for (o.properties) |prop| {
-                    self.c.op(.dup);
-                    self.expr(prop.value);
-                    self.c.op2w(.set_prop, self.c.emitS(prop.key));
-                    self.c.op(.pop);
+                    if (prop.value.* == .SpreadExpression) {
+                        has_spread = true;
+                        break;
+                    }
+                }
+                if (has_spread) {
+                    // Defer evaluation to runtime via eval_node opcode
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                } else {
+                    self.c.op(.make_object);
+                    for (o.properties) |prop| {
+                        self.c.op(.dup);
+                        self.expr(prop.value);
+                        self.c.op2w(.set_prop, self.c.emitS(prop.key));
+                        self.c.op(.pop);
+                    }
                 }
             },
             .PropertySet => |p| { self.expr(p.object); self.expr(p.value); self.c.op2w(.set_prop, self.c.emitS(p.key)); },
             .ArrayIndex => |ai| { self.expr(ai.array); self.expr(ai.index); self.c.op(.index_get); },
             .FunctionCall => |fc| {
-                for (fc.arguments) |a| self.expr(a);
-                self.c.op(.builtin); self.c.w16(self.c.emitS(fc.name)); self.c.w8(@intCast(fc.arguments.len));
+                var has_spread = false;
+                for (fc.arguments) |a| {
+                    if (a.* == .SpreadExpression) {
+                        has_spread = true;
+                        break;
+                    }
+                }
+                if (has_spread) {
+                    // Defer to runtime via eval_node for spread args
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                } else {
+                    for (fc.arguments) |a| self.expr(a);
+                    self.c.op(.builtin); self.c.w16(self.c.emitS(fc.name)); self.c.w8(@intCast(fc.arguments.len));
+                }
             },
-            .MethodCall => |mc| { self.expr(mc.object); for (mc.arguments) |a| self.expr(a); self.c.op(.method_call); self.c.w16(self.c.emitS(mc.method)); self.c.w8(@intCast(mc.arguments.len)); },
+            .NewExpression => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
+            .MethodCall => |mc| {
+                var has_spread = false;
+                for (mc.arguments) |a| {
+                    if (a.* == .SpreadExpression) {
+                        has_spread = true;
+                        break;
+                    }
+                }
+                if (has_spread) {
+                    // Defer to runtime via eval_node for spread args
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                } else {
+                    self.expr(mc.object);
+                    for (mc.arguments) |a| self.expr(a);
+                    self.c.op(.method_call); self.c.w16(self.c.emitS(mc.method)); self.c.w8(@intCast(mc.arguments.len));
+                }
+            },
             .MemberAccess => |m| { self.expr(m.object); self.c.op2w(.get_prop, self.c.emitS(m.property)); },
             .ArrowFunction => {
-                // Arrow function as expression — compile inline with evaluator's help
-                // For now, just push void
-                self.c.op(.void_);
+                self.c.emitC(.{ .function = @ptrCast(n) });
+            },
+            .FunctionDeclaration => {
+                const f = n.FunctionDeclaration;
+                if (f.name.len > 0) {
+                    self.env.setFunction(f.name, n) catch {};
+                }
+                self.c.emitC(.{ .function = @ptrCast(n) });
             },
             else => {},
         }
@@ -390,8 +468,8 @@ pub const VM = struct {
                 .get_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string;
                     if (self.env.get(n)) |v| { self.push(v); }
                     else if (self.env.getFunction(n)) |_| { self.push(.{ .string = n }); }
-                    else if (self.env.getBuiltin(n)) |_| { self.push(.{ .void = {} }); }
                     else if (self.env.getBuiltinObject(n)) |obj| { self.push(.{ .object = @ptrCast(obj) }); }
+                    else if (self.env.getBuiltin(n)) |_| { self.push(.{ .void = {} }); }
                     else { return error.UndefinedVariable; }
                 },
                 .set_global => { const ci = self.readU16(); const n = self.c.consts.items[ci].string; const v = self.peek(0); self.sp -= 1; self.env.setInScope(n, v) catch {}; },
@@ -413,9 +491,39 @@ pub const VM = struct {
                 },
                 .index_get => {
                     const idx = self.pop(); const arr = self.pop();
-                    if (arr != .array) return error.NotAnArray;
-                    const i: usize = switch (idx) { .integer => |n| @intCast(n), .float => |n| @intFromFloat(n), else => return error.InvalidIndex };
-                    self.push(arr.array.get(i) orelse return error.IndexOutOfBounds);
+                    if (arr == .array) {
+                        if (idx == .symbol) {
+                            const prop_name = try std.fmt.allocPrint(self.env.allocator, "@@{s}", .{idx.symbol.description});
+                            defer self.env.allocator.free(prop_name);
+                            if (arr.array.extras) |extras| {
+                                if (extras.properties.get(prop_name)) |v| {
+                                    self.push(v);
+                                } else {
+                                    self.push(.{ .void = {} });
+                                }
+                            } else if (std.mem.eql(u8, prop_name, "@@iterator")) {
+                                const iter = try ast.ArrayIterator.initValues(self.env.allocator, arr.array);
+                                try self.env.iterators.append(self.env.allocator, iter);
+                                self.push(.{ .iterator = iter });
+                            } else {
+                                self.push(.{ .void = {} });
+                            }
+                        } else {
+                            const i: usize = switch (idx) { .integer => |n| @intCast(n), .float => |n| @intFromFloat(n), else => return error.InvalidIndex };
+                            self.push(arr.array.get(i) orelse return error.IndexOutOfBounds);
+                        }
+                    } else if (arr == .js_object) {
+                        if (idx == .symbol) {
+                            const prop_name = try std.fmt.allocPrint(self.env.allocator, "@@{s}", .{idx.symbol.description});
+                            defer self.env.allocator.free(prop_name);
+                            self.push(arr.js_object.properties.get(prop_name) orelse .{ .void = {} });
+                        } else {
+                            const key = switch (idx) { .string => |s| s, else => return error.InvalidIndex };
+                            self.push(arr.js_object.properties.get(key) orelse .{ .void = {} });
+                        }
+                    } else {
+                        return error.NotAnArray;
+                    }
                 },
                 .get_prop => {
                     const ci = self.readU16();
@@ -424,7 +532,34 @@ pub const VM = struct {
                     if (obj == .array and std.mem.eql(u8, p, "length")) {
                         self.push(.{ .integer = @intCast(obj.array.elements.items.len) });
                     } else if (obj == .js_object) {
-                        if (obj.js_object.properties.get(p)) |v| {
+                        const type_tag = obj.js_object.properties.get("@@type");
+                        if (type_tag != null and type_tag.? == .string) {
+                            if (std.mem.eql(u8, type_tag.?.string, "Set") and std.mem.eql(u8, p, "size")) {
+                                if (obj.js_object.properties.get("values")) |vals| {
+                                    if (vals == .array) {
+                                        self.push(.{ .integer = @intCast(vals.array.elements.items.len) });
+                                    } else {
+                                        self.push(.{ .integer = 0 });
+                                    }
+                                } else {
+                                    self.push(.{ .integer = 0 });
+                                }
+                            } else if (std.mem.eql(u8, type_tag.?.string, "Map") and std.mem.eql(u8, p, "size")) {
+                                if (obj.js_object.properties.get("entries")) |ents| {
+                                    if (ents == .array) {
+                                        self.push(.{ .integer = @intCast(ents.array.elements.items.len) });
+                                    } else {
+                                        self.push(.{ .integer = 0 });
+                                    }
+                                } else {
+                                    self.push(.{ .integer = 0 });
+                                }
+                            } else if (obj.js_object.properties.get(p)) |v| {
+                                self.push(v);
+                            } else {
+                                self.push(.{ .void = {} });
+                            }
+                        } else if (obj.js_object.properties.get(p)) |v| {
                             self.push(v);
                         } else {
                             self.push(.{ .void = {} });
@@ -457,19 +592,24 @@ pub const VM = struct {
                         const r = fnPtr(args.items, self.env);
                         switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                     } else if (self.env.getFunction(name)) |funcNode| {
-                        var func_env = try Environment.init(self.env.allocator, self.env);
-                        defer func_env.deinit();
-                        if (funcNode.* == .FunctionDeclaration) {
-                            const f = funcNode.FunctionDeclaration;
-                            for (f.parameters, 0..) |p, j| { if (j < args.items.len) try func_env.setVar(p, args.items[j]); }
-                            const r = try evaluate(f.body, &func_env);
-                            self.push(r);
-                        } else if (funcNode.* == .ArrowFunction) {
-                            const f = funcNode.ArrowFunction;
-                            for (f.parameters, 0..) |p, j| { if (j < args.items.len) try func_env.setVar(p, args.items[j]); }
-                            const r = try evaluate(f.body, &func_env);
-                            self.push(r);
-                        } else { self.push(.{ .void = {} }); }
+                        if (funcNode.* == .GeneratorDeclaration) {
+                            const gen_obj = GeneratorObject.init(self.env.allocator, @ptrCast(funcNode), funcNode.GeneratorDeclaration.parameters) catch { self.push(.{ .void = {} }); break; };
+                            self.push(.{ .generator = gen_obj });
+                        } else {
+                            var func_env = try Environment.init(self.env.allocator, self.env);
+                            defer func_env.deinit();
+                            if (funcNode.* == .FunctionDeclaration) {
+                                const f = funcNode.FunctionDeclaration;
+                                for (f.parameters, 0..) |p, j| { if (j < args.items.len) try func_env.setVar(p, args.items[j]); }
+                                const r = try evaluate(f.body, &func_env);
+                                self.push(r);
+                            } else if (funcNode.* == .ArrowFunction) {
+                                const f = funcNode.ArrowFunction;
+                                for (f.parameters, 0..) |p, j| { if (j < args.items.len) try func_env.setVar(p, args.items[j]); }
+                                const r = try evaluate(f.body, &func_env);
+                                self.push(r);
+                            } else { self.push(.{ .void = {} }); }
+                        }
                     } else { return error.UndefinedFunction; }
                 },
                 .method_call => {
@@ -495,10 +635,62 @@ pub const VM = struct {
                         } else if (obj == .iterator) {
                             const v = obj.iterator.next(self.env.allocator, &self.env.arrays, &self.env.objects);
                             self.push(v);
+                        } else if (obj == .js_object) {
+                            const type_tag = obj.js_object.properties.get("@@type");
+                            if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "Set")) {
+                                args.insert(self.env.allocator, 0, obj) catch {};
+                                const sObj = self.env.getBuiltinObject("Set") orelse { self.push(.{ .void = {} }); break; };
+                                const md = sObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                                const r = md(args.items, self.env);
+                                switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                            } else if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "Map")) {
+                                args.insert(self.env.allocator, 0, obj) catch {};
+                                const mObj = self.env.getBuiltinObject("Map") orelse { self.push(.{ .void = {} }); break; };
+                                const md = mObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                                const r = md(args.items, self.env);
+                                switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                            } else {
+                                args.insert(self.env.allocator, 0, obj) catch {};
+                                const bObj = self.env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                                const md = bObj.getMethod(m) orelse return error.UndefinedMethod;
+                                const r = md(args.items, self.env);
+                                switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                            }
+                        } else if (obj == .generator) {
+                            if (std.mem.eql(u8, m, "next")) {
+                                const r: Value = evaluateGeneratorNext(obj.generator, self.env) catch .{ .void = {} };
+                                self.push(r);
+                            } else if (std.mem.eql(u8, m, "return")) {
+                                var r: Value = .{ .void = {} };
+                                // args already on stack before obj
+                                const r_val = evaluateGeneratorReturn(obj.generator, self.env, args.items) catch .{ .void = {} };
+                                r = r_val;
+                                self.push(r);
+                            } else if (std.mem.eql(u8, m, "throw")) {
+                                const r_val = evaluateGeneratorThrow(obj.generator, self.env, args.items) catch .{ .void = {} };
+                                self.push(r_val);
+                            } else { self.push(.{ .void = {} }); }
+                        } else if (obj == .string) {
+                            args.insert(self.env.allocator, 0, obj) catch {};
+                            const bObj = self.env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                            const md = bObj.getMethod(m) orelse return error.UndefinedMethod;
+                            const r = md(args.items, self.env);
+                            switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                         } else { self.push(.{ .void = {} }); }
                     } else {
                         const obj = self.pop();
-                        if (obj == .object) {
+                        if (obj == .generator) {
+                            if (std.mem.eql(u8, m, "next")) {
+                                const r: Value = evaluateGeneratorNext(obj.generator, self.env) catch .{ .void = {} };
+                                self.push(r);
+                            } else if (std.mem.eql(u8, m, "return")) {
+                                const r_val = evaluateGeneratorReturn(obj.generator, self.env, &.{}) catch .{ .void = {} };
+                                self.push(r_val);
+                            } else if (std.mem.eql(u8, m, "throw")) {
+                                const r_val = evaluateGeneratorThrow(obj.generator, self.env, &.{}) catch .{ .void = {} };
+                                self.push(r_val);
+                            } else { self.push(.{ .void = {} }); }
+                        } else if (obj == .object) {
                             const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @alignCast(@ptrCast(obj.object));
                             const md = bObjPtr.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
                             const r = md(&.{}, self.env);
@@ -512,8 +704,40 @@ pub const VM = struct {
                         } else if (obj == .iterator) {
                             const v = obj.iterator.next(self.env.allocator, &self.env.arrays, &self.env.objects);
                             self.push(v);
+                        } else if (obj == .js_object) {
+                            const type_tag = obj.js_object.properties.get("@@type");
+                            if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "Set")) {
+                                const sObj = self.env.getBuiltinObject("Set") orelse { self.push(.{ .void = {} }); break; };
+                                const md = sObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                                var tmp = [_]Value{obj};
+                                const r = md(tmp[0..], self.env);
+                                switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                            } else if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "Map")) {
+                                const mObj = self.env.getBuiltinObject("Map") orelse { self.push(.{ .void = {} }); break; };
+                                const md = mObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                                var tmp = [_]Value{obj};
+                                const r = md(tmp[0..], self.env);
+                                switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
+                            } else {
+                                self.push(.{ .void = {} });
+                            }
+                        } else if (obj == .string) {
+                            const bObj = self.env.getBuiltinObject("String") orelse { self.push(.{ .void = {} }); break; };
+                            const md = bObj.getMethod(m) orelse { self.push(.{ .void = {} }); break; };
+                            var tmp = [_]Value{obj};
+                            const r = md(tmp[0..], self.env);
+                            switch (r) { .value => |v| self.push(v), .void => self.push(.{ .void = {} }) }
                         } else { self.push(.{ .void = {} }); }
                     }
+                },
+                .eval_node => {
+                    const ci = self.readU16();
+                    const node = self.c.consts.items[ci].function;
+                    const val = evaluate(@as(*ast.Node, @alignCast(@ptrCast(node))), self.env) catch {
+                        self.push(.{ .void = {} });
+                        break;
+                    };
+                    self.push(val);
                 },
                 .ret => return,
                 .call => {
@@ -539,7 +763,15 @@ fn valEq(l: Value, r: Value) bool { return switch (l) {
 fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { switch (v) {
     .string => |s| buf.appendSlice(a, s) catch {},
     .integer => |i| { var tmp: [32]u8 = undefined; const w = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch unreachable; buf.appendSlice(a, tmp[0..w.len]) catch {}; },
-    .float => |f| { var tmp: [64]u8 = undefined; const w = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch unreachable; buf.appendSlice(a, tmp[0..w.len]) catch {}; },
+    .float => |f| {
+        if (std.math.isNan(f)) {
+            buf.appendSlice(a, "NaN") catch {};
+        } else {
+            var tmp: [64]u8 = undefined;
+            const w = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch unreachable;
+            buf.appendSlice(a, tmp[0..w.len]) catch {};
+        }
+    },
     .boolean => |b| buf.appendSlice(a, if (b) "true" else "false") catch {},
     .void => buf.appendSlice(a, "undefined") catch {},
     .null => buf.appendSlice(a, "null") catch {},
