@@ -51,11 +51,22 @@ pub fn Reduce(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
     if (has_initial) {
         accumulator = args[2];
     } else {
-        accumulator = source.elements.items[0];
-        start_index = 1;
+        // Find first non-hole element
+        start_index = 0;
+        var found = false;
+        for (source.elements.items, 0..) |elem, idx| {
+            if (elem != .hole) {
+                accumulator = elem;
+                start_index = idx + 1;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return .{ .value = .{ .void = {} } };
     }
 
     for (source.elements.items[start_index..], start_index..) |element, i| {
+        if (element == .hole) continue;
         func_env.return_hit = false;
         if (func_params.len > 0) func_env.setVar(func_params[0], accumulator) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], element) catch {};
