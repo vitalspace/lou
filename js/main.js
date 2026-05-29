@@ -5,8 +5,8 @@ console.time("total")
 // import "./loops.js";
 // import "./blocks.js";
 // import "./if.js";
-import "./arrays.js";
-import "./math.js";
+import "./arrays/arrays.js";
+import "./lang/math.js";
 // import "./functions.js";
 // import "./strings.js";
 // import "./arrow.js";
