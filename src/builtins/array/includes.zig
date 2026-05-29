@@ -25,6 +25,7 @@ fn valEq(l: Types.Value, r: Types.Value) bool {
         },
         .void => r == .void,
         .null => r == .null,
+        .hole => r == .void,
         else => false,
     };
 }
