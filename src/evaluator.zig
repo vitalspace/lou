@@ -1,361 +1,84 @@
 const std = @import("std");
 const ast = @import("ast.zig");
-const builtins = @import("./builtins/builtins.zig");
 const builtinsTypes = @import("./types/types.zig");
+const env_mod = @import("environment.zig");
+const debugPrint = env_mod.debugPrint;
+const optimizations = @import("optimizations.zig");
+const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
 
-const builtin = @import("builtin");
-const Io = std.Io;
-const DEBUG_OPTIMIZATION = false;
+pub const Environment = env_mod.Environment;
 
-inline fn debugPrint(comptime fmt: []const u8, args: anytype) void {
-    if (DEBUG_OPTIMIZATION) {
-        std.debug.print(fmt, args);
-    }
-}
+fn evaluateArgs(args_nodes: []*ast.Node, env: *Environment) anyerror!std.ArrayList(ast.Value) {
+    var result = try std.ArrayList(ast.Value).initCapacity(env.allocator, args_nodes.len);
+    errdefer result.deinit(env.allocator);
 
-inline fn freeValue(value: ast.Value) void {
-    switch (value) {
-        .array => |arr| arr.deinit(),
-        .closure => |cl| cl.deinit(),
-        .iterator => |it| it.deinit(),
-        .js_object => |obj| obj.deinit(),
-        else => {},
-    }
-}
-
-pub const ModuleCacheEntry = struct {
-    exports: std.StringHashMap(ast.Value),
-    functions: std.StringHashMap(*ast.Node),
-
-    pub fn deinit(self: *ModuleCacheEntry) void {
-        self.exports.deinit();
-        self.functions.deinit();
-    }
-};
-
-pub const Environment = struct {
-    allocator: std.mem.Allocator,
-    io: ?std.Io,
-    values: std.StringHashMap(ast.Value),
-    constants: std.StringHashMap(void),
-    functions: std.StringHashMap(*ast.Node),
-    builtins: std.StringHashMap(builtinsTypes.BuiltinFn),
-    builtin_objects: std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl),
-    timers: std.StringHashMap(i128),
-    arrays: std.ArrayList(*ast.ArrayObject),
-    iterators: std.ArrayList(*ast.ArrayIterator),
-    objects: std.ArrayList(*ast.ObjectValue),
-    owned_strings: std.ArrayList([]const u8),
-    outer: ?*Environment,
-    scope_kind: enum { block, function } = .function,
-    exports: std.StringHashMap(ast.Value),
-    module_dir: ?[]const u8,
-    module_contents: std.ArrayList([]const u8),
-    module_arenas: std.ArrayList(*std.heap.ArenaAllocator),
-    module_cache: std.StringHashMap(ModuleCacheEntry),
-
-    pub fn init(allocator: std.mem.Allocator, outer: ?*Environment) !Environment {
-        return initWithIo(allocator, outer, null);
-    }
-
-    pub fn initModule(allocator: std.mem.Allocator, module_dir: []const u8) !Environment {
-        var env = try initWithIo(allocator, null, null);
-        env.module_dir = module_dir;
-        return env;
-    }
-
-    pub fn initWithIo(allocator: std.mem.Allocator, outer: ?*Environment, io: ?std.Io) !Environment {
-        const arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0);
-        const iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0);
-        const objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0);
-        const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
-
-        const env = Environment{
-            .allocator = allocator,
-            .io = io,
-            .values = std.StringHashMap(ast.Value).init(allocator),
-            .constants = std.StringHashMap(void).init(allocator),
-            .functions = std.StringHashMap(*ast.Node).init(allocator),
-            .builtins = try builtins.initBuiltins(allocator),
-            .builtin_objects = try builtins.initBuiltinObjects(allocator),
-            .timers = std.StringHashMap(i128).init(allocator),
-            .arrays = arrays,
-            .iterators = iterators,
-            .objects = objects,
-            .owned_strings = owned_strings,
-            .outer = outer,
-            .exports = std.StringHashMap(ast.Value).init(allocator),
-            .module_dir = null,
-            .module_contents = try std.ArrayList([]const u8).initCapacity(allocator, 0),
-            .module_arenas = try std.ArrayList(*std.heap.ArenaAllocator).initCapacity(allocator, 0),
-            .module_cache = std.StringHashMap(ModuleCacheEntry).init(allocator),
-        };
-
-        return env;
-    }
-
-    pub fn initBlock(allocator: std.mem.Allocator, outer: *Environment) !Environment {
-        const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
-        const env = Environment{
-            .allocator = allocator,
-            .io = outer.io,
-            .values = std.StringHashMap(ast.Value).init(allocator),
-            .constants = std.StringHashMap(void).init(allocator),
-            .functions = std.StringHashMap(*ast.Node).init(allocator),
-            .builtins = std.StringHashMap(builtinsTypes.BuiltinFn).init(allocator),
-            .builtin_objects = std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl).init(allocator),
-            .timers = std.StringHashMap(i128).init(allocator),
-            .arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0),
-            .iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0),
-            .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
-            .owned_strings = owned_strings,
-            .outer = outer,
-            .scope_kind = .block,
-            .exports = std.StringHashMap(ast.Value).init(allocator),
-            .module_dir = null,
-            .module_contents = try std.ArrayList([]const u8).initCapacity(allocator, 0),
-            .module_arenas = try std.ArrayList(*std.heap.ArenaAllocator).initCapacity(allocator, 0),
-            .module_cache = std.StringHashMap(ModuleCacheEntry).init(allocator),
-        };
-        return env;
-    }
-
-    pub fn getFunction(self: *Environment, name: []const u8) ?*ast.Node {
-        if (self.functions.get(name)) |node| {
-            return node;
-        }
-        if (self.outer) |outer| {
-            return outer.getFunction(name);
-        }
-        return null;
-    }
-
-    pub fn getFunctionWithModuleFallback(self: *Environment, name: []const u8) ?*ast.Node {
-        if (self.getFunction(name)) |node| return node;
-        // Check module cache for functions defined in imported modules
-        var root = self;
-        while (root.outer) |outer| root = outer;
-        var it = root.module_cache.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.functions.get(name)) |node| return node;
-        }
-        return null;
-    }
-
-    pub fn setFunction(self: *Environment, name: []const u8, node: *ast.Node) !void {
-        var env = self;
-        while (env.scope_kind == .block) {
-            if (env.outer) |outer| {
-                env = outer;
-            } else {
-                break;
+    for (args_nodes) |arg_node| {
+        if (arg_node.* == .SpreadExpression) {
+            const spread_val = try evaluate(arg_node.SpreadExpression.value, env);
+            switch (spread_val) {
+                .array => |arr| {
+                    for (arr.elements.items) |item| {
+                        try result.append(env.allocator, item);
+                    }
+                },
+                .js_object => |obj| {
+                    const type_tag = obj.properties.get("@@type");
+                    if (type_tag != null and type_tag.? == .string) {
+                        if (std.mem.eql(u8, type_tag.?.string, "Set")) {
+                            if (obj.properties.get("values")) |vals| {
+                                if (vals == .array) {
+                                    for (vals.array.elements.items) |item| {
+                                        try result.append(env.allocator, item);
+                                    }
+                                }
+                            }
+                        } else if (std.mem.eql(u8, type_tag.?.string, "Map")) {
+                            if (obj.properties.get("entries")) |ents| {
+                                if (ents == .array) {
+                                    for (ents.array.elements.items) |item| {
+                                        try result.append(env.allocator, item);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                .string => |s| {
+                    for (s, 0..) |_, i| {
+                        const char_val = s[i..i+1];
+                        try result.append(env.allocator, .{ .string = char_val });
+                    }
+                },
+                        .generator => |gen| {
+                            while (true) {
+                                const next_val = try evaluateGeneratorNext(gen, env);
+                                if (next_val != .js_object) break;
+                                const done = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                                if (done == .boolean and done.boolean) break;
+                                const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                                try result.append(env.allocator, val);
+                            }
+                        },
+                        .iterator => |it| {
+                            while (true) {
+                                const next_val = it.next(env.allocator, &env.arrays, &env.objects);
+                                if (next_val != .js_object) break;
+                                const done = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                                if (done == .boolean and done.boolean) break;
+                                const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                                try result.append(env.allocator, val);
+                            }
+                        },
+                        else => {},
+                    }
+                } else {
+                    const val = try evaluate(arg_node, env);
+                    try result.append(env.allocator, val);
+                }
             }
-        }
-        try env.functions.put(name, node);
-    }
 
-    pub fn getBuiltin(self: *Environment, name: []const u8) ?builtinsTypes.BuiltinFn {
-        if (self.builtins.get(name)) |fn_ptr| {
-            return fn_ptr;
+            return result;
         }
-        if (self.outer) |outer| {
-            return outer.getBuiltin(name);
-        }
-        return null;
-    }
-
-    pub fn getBuiltinObject(self: *Environment, name: []const u8) ?*const builtinsTypes.BuiltinObjectImpl {
-        if (self.builtin_objects.get(name)) |obj| {
-            return obj;
-        }
-        if (self.outer) |outer| {
-            return outer.getBuiltinObject(name);
-        }
-        return null;
-    }
-
-    pub fn getTimer(self: *Environment, name: []const u8) ?i64 {
-        if (self.timers.get(name)) |t| {
-            return t;
-        }
-        if (self.outer) |outer| {
-            return outer.getTimer(name);
-        }
-        return null;
-    }
-
-    pub fn setTimer(self: *Environment, name: []const u8, value: i64) !void {
-        var env = self;
-        while (env.scope_kind == .block) {
-            if (env.outer) |outer| {
-                env = outer;
-            } else {
-                break;
-            }
-        }
-        try env.timers.put(name, value);
-    }
-
-    pub fn setVar(self: *Environment, name: []const u8, value: ast.Value) !void {
-        var env = self;
-        while (env.scope_kind == .block) {
-            if (env.outer) |outer| {
-                env = outer;
-            } else {
-                break;
-            }
-        }
-        if (env.constants.contains(name)) {
-            return error.ConstantReassignment;
-        }
-        try env.values.put(name, value);
-    }
-
-    pub fn setLet(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.values.contains(name)) {
-            return error.LetRedeclaration;
-        }
-        if (self.constants.contains(name)) {
-            return error.ConstantReassignment;
-        }
-        try self.values.put(name, value);
-    }
-
-    pub fn deinit(self: *Environment) void {
-        // Bubble up owned_strings to parent (prevent dangling on return)
-        if (self.outer) |outer| {
-            for (self.owned_strings.items) |s| {
-                outer.owned_strings.append(outer.allocator, s) catch {};
-            }
-        } else {
-            for (self.owned_strings.items) |s| {
-                self.allocator.free(s);
-            }
-        }
-        self.owned_strings.deinit(self.allocator);
-
-        // Bubble up arrays to parent
-        if (self.outer) |outer| {
-            for (self.arrays.items) |arr| {
-                outer.arrays.append(outer.allocator, arr) catch {};
-            }
-        } else {
-            for (self.arrays.items) |array_obj| {
-                array_obj.deinit();
-            }
-        }
-        self.arrays.deinit(self.allocator);
-
-        // Bubble up iterators to parent
-        if (self.outer) |outer| {
-            for (self.iterators.items) |it| {
-                outer.iterators.append(outer.allocator, it) catch {};
-            }
-        } else {
-            for (self.iterators.items) |it| {
-                it.deinit();
-            }
-        }
-        self.iterators.deinit(self.allocator);
-
-        // Bubble up objects to parent
-        if (self.outer) |outer| {
-            for (self.objects.items) |obj| {
-                outer.objects.append(outer.allocator, obj) catch {};
-            }
-        } else {
-            for (self.objects.items) |obj| {
-                obj.deinit();
-            }
-        }
-        self.objects.deinit(self.allocator);
-
-        self.exports.deinit();
-        self.values.deinit();
-        self.constants.deinit();
-        self.functions.deinit();
-        self.builtins.deinit();
-        self.builtin_objects.deinit();
-        self.timers.deinit();
-
-        // Free module file contents
-        for (self.module_contents.items) |c| {
-            self.allocator.free(c);
-        }
-        self.module_contents.deinit(self.allocator);
-
-        // Free module parser arenas
-        for (self.module_arenas.items) |a| {
-            a.deinit();
-            self.allocator.destroy(a);
-        }
-        self.module_arenas.deinit(self.allocator);
-
-        // Free module cache entries (keys + values)
-        var cache_it = self.module_cache.iterator();
-        while (cache_it.next()) |entry| {
-            entry.value_ptr.deinit();
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.module_cache.deinit();
-    }
-
-    pub fn get(self: *Environment, name: []const u8) ?ast.Value {
-        if (self.values.get(name)) |value| {
-            return value;
-        }
-        if (self.outer) |outer| {
-            return outer.get(name);
-        }
-        return null;
-    }
-
-    pub fn findEnv(self: *Environment, name: []const u8) ?*Environment {
-        if (self.values.contains(name)) {
-            return self;
-        }
-        if (self.outer) |outer| {
-            return outer.findEnv(name);
-        }
-        return null;
-    }
-
-    pub fn setInScope(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.findEnv(name)) |target| {
-            if (target.constants.contains(name)) {
-                return error.ConstantReassignment;
-            }
-            try target.values.put(name, value);
-        } else {
-            return error.UndefinedVariable;
-        }
-    }
-
-    pub fn set(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.isConstant(name)) {
-            return error.ConstantReassignment;
-        }
-        try self.values.put(name, value);
-    }
-
-    pub fn setConstant(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.values.contains(name)) {
-            return error.ConstantReassignment;
-        }
-        try self.values.put(name, value);
-        try self.constants.put(name, {});
-    }
-
-    pub fn isConstant(self: *Environment, name: []const u8) bool {
-        if (self.constants.contains(name)) {
-            return true;
-        }
-        if (self.outer) |outer| {
-            return outer.isConstant(name);
-        }
-        return false;
-    }
-};
 
 fn valuesEqual(left: ast.Value, right: ast.Value) bool {
     return switch (left) {
@@ -385,569 +108,24 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
             .object => |ro| lo == ro,
             else => false,
         },
+        .function => |lf| switch (right) {
+            .function => |rf| lf == rf,
+            else => false,
+        },
         .void => right == .void,
         .null => right == .null,
         .closure => right == .closure,
         .iterator => right == .iterator,
         .js_object => right == .js_object,
-    };
-}
-
-fn getFloatValue(node: *ast.Node) ?f64 {
-    return switch (node.*) {
-        .FloatLiteral => |v| v.value,
-        .IntegerLiteral => |v| @floatFromInt(v.value),
-        else => null,
-    };
-}
-
-// Optimized fast path for simple for loops with DEBUGGING
-// Fast path optimization for array push loops
-// Pattern: while (i < N) { arr.push(i); i++; }
-// Fast path optimization for array push loops
-// Pattern: while (i < N) { arr.push(i); i++; }
-fn optimizeArrayPushLoop(w: @TypeOf(@as(ast.Node, undefined).WhileLoop), env: *Environment) !?ast.Value {
-    // debugPrint("[ARRAY PUSH OPTIMIZATION] Attempting to optimize array push loop\n", .{});
-
-    // 1. Check condition: i < N
-    if (w.condition.* != .BinaryExpression) return null;
-    const cond = w.condition.BinaryExpression;
-    if (cond.operator != .LessThan) return null;
-    if (cond.left.* != .Identifier) return null;
-    if (cond.right.* != .FloatLiteral) return null;
-
-    const loop_var = cond.left.Identifier.name;
-    const limit = cond.right.FloatLiteral.value;
-
-    // 2. Check body: must have exactly 2 statements
-    if (w.body.* != .BlockStatement) return null;
-    const body_stmts = w.body.BlockStatement.statements;
-    if (body_stmts.len != 2) return null;
-
-    // 3. First statement must be: arr.push(something)
-    if (body_stmts[0].* != .MethodCall) return null;
-    const method_call = body_stmts[0].MethodCall;
-
-    if (method_call.object.* != .Identifier) return null;
-    const array_name = method_call.object.Identifier.name;
-
-    if (!std.mem.eql(u8, method_call.method, "push")) return null;
-    if (method_call.arguments.len != 1) return null;
-
-    // The argument to push should be the loop variable
-    if (method_call.arguments[0].* != .Identifier) return null;
-    const push_arg = method_call.arguments[0].Identifier.name;
-    if (!std.mem.eql(u8, push_arg, loop_var)) return null;
-
-    // 4. Second statement must be: i++ (as i = i + 1 or similar)
-    var increment_value: f64 = 1.0;
-    const inc_stmt = body_stmts[1];
-
-    if (inc_stmt.* == .Assignment) {
-        const assign = inc_stmt.Assignment;
-        if (!std.mem.eql(u8, assign.name, loop_var)) return null;
-        if (assign.value.* != .BinaryExpression) return null;
-
-        const add_expr = assign.value.BinaryExpression;
-        if (add_expr.operator != .Plus) return null;
-        if (add_expr.left.* != .Identifier) return null;
-        if (!std.mem.eql(u8, add_expr.left.Identifier.name, loop_var)) return null;
-        increment_value = getFloatValue(add_expr.right) orelse return null;
-    } else if (inc_stmt.* == .BinaryExpression) {
-        const inc_expr = inc_stmt.BinaryExpression;
-        if (inc_expr.operator != .Assign) return null;
-        if (inc_expr.left.* != .Identifier) return null;
-        if (!std.mem.eql(u8, inc_expr.left.Identifier.name, loop_var)) return null;
-        if (inc_expr.right.* != .BinaryExpression) return null;
-
-        const add_expr = inc_expr.right.BinaryExpression;
-        if (add_expr.operator != .Plus) return null;
-        if (add_expr.left.* != .Identifier) return null;
-        if (!std.mem.eql(u8, add_expr.left.Identifier.name, loop_var)) return null;
-
-        increment_value = getFloatValue(add_expr.right) orelse return null;
-    } else {
-        return null;
-    }
-
-    // 5. Get initial value from the loop variable in environment
-    const initial_val = env.get(loop_var) orelse return null;
-    if (initial_val != .float) return null;
-    const initial_value = initial_val.float;
-
-    const array_val = env.get(array_name) orelse return null;
-    if (array_val != .array) return null;
-
-    // debugPrint("[ARRAY PUSH OPTIMIZATION] ✓ Pattern matched!\n", .{});
-    // debugPrint("[ARRAY PUSH OPTIMIZATION] Array: {s}, Loop: {d} to {d}, step {d}\n", .{ array_name, initial_value, limit, increment_value });
-
-    // 6. Calculate number of iterations - FIXED VERSION
-    const iterations_i64 = @divFloor(@as(i64, @intFromFloat(limit - initial_value)), @as(i64, @intFromFloat(increment_value)));
-    const iterations = @as(usize, @intCast(iterations_i64));
-
-    // debugPrint("[ARRAY PUSH OPTIMIZATION] Will push {d} elements\n", .{iterations});
-
-    // 7. PRE-ALLOCATE ARRAY CAPACITY (KEY OPTIMIZATION!)
-    const current_len = array_val.array.elements.items.len;
-    const new_total_capacity = current_len + iterations;
-
-    // Reserve exact capacity to avoid reallocations
-    try array_val.array.elements.ensureTotalCapacity(array_val.array.allocator, new_total_capacity);
-
-    // debugPrint("[ARRAY PUSH OPTIMIZATION] Pre-allocated capacity: {d}\n", .{new_total_capacity});
-
-    // 8. Fast loop: push elements without reallocation
-    var i = initial_value;
-    while (i < limit) : (i += increment_value) {
-        // appendAssumeCapacity is MUCH faster than append
-        // because it doesn't check capacity on every iteration
-        array_val.array.elements.appendAssumeCapacity(.{ .float = i });
-    }
-
-    debugPrint("[ARRAY PUSH OPTIMIZATION] ✓ Completed, pushed {d} elements\n", .{iterations});
-
-    // 9. Update loop variable
-    try env.values.put(loop_var, .{ .float = i });
-
-    return .{ .float = 0.0 };
-}
-
-// Optimized fast path for simple for loops - FIXED VERSION
-fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: *Environment, pre_limit: ?f64) !?ast.Value {
-    std.debug.print("", .{}); // [OPT] START pre_limit={?}\n", .{pre_limit});
-    
-    // Check if init is: let identifier = number
-    if (f.init == null) {
-        std.debug.print("", .{}); // [OPT] init is null\n", .{});
-        return null;
-    }
-
-    if (f.init.?.* != .VariableDeclaration and f.init.?.* != .LetDeclaration) {
-        return null;
-    }
-
-    const init_name: []const u8 = if (f.init.?.* == .VariableDeclaration)
-        f.init.?.VariableDeclaration.name
-    else
-        f.init.?.LetDeclaration.name;
-
-    debugPrint("[OPTIMIZATION] init_name: {s}\n", .{init_name});
-
-    const init_value_node: *ast.Node = if (f.init.?.* == .VariableDeclaration)
-        f.init.?.VariableDeclaration.value
-    else
-        f.init.?.LetDeclaration.value;
-
-    const initial_value: f64 = switch (init_value_node.*) {
-        .FloatLiteral => |v| v.value,
-        .IntegerLiteral => |v| @floatFromInt(v.value),
-        else => {
-            debugPrint("[OPTIMIZATION] FAIL: init value not number, it is: {s}\n", .{@tagName(init_value_node.*)});
-            return null;
+        .symbol => |ls| switch (right) {
+            .symbol => |rs| ls.id == rs.id,
+            else => false,
+        },
+        .generator => |lg| switch (right) {
+            .generator => |rg| lg == rg,
+            else => false,
         },
     };
-    debugPrint("[OPTIMIZATION] initial_value: {d}\n", .{initial_value});
-
-    const loop_var = init_name;
-
-// Check condition
-    if (f.condition == null) {
-        return null;
-    }
-
-    if (f.condition.?.* != .BinaryExpression) {
-        return null;
-    }
-
-    const cond = f.condition.?.BinaryExpression;
-
-    if (cond.left.* != .Identifier) {
-        return null;
-    }
-
-    if (!std.mem.eql(u8, cond.left.Identifier.name, loop_var)) {
-        return null;
-    }
-
-    const limit: f64 = pre_limit orelse blk: {
-        if (cond.right.* != .FloatLiteral and cond.right.* != .IntegerLiteral) {
-            std.debug.print("", .{}); // [OPT] FAIL: cond.right not literal\n", .{});
-            return null;
-        }
-        break :blk switch (cond.right.*) {
-            .FloatLiteral => |v| v.value,
-            .IntegerLiteral => |v| @floatFromInt(v.value),
-            else => return null,
-        };
-    };
-
-    // Check operator
-    const is_less_than = cond.operator == .LessThan;
-
-    if (!is_less_than) {
-        debugPrint("[OPTIMIZATION] FAILED: operator is not LessThan, it is: {any}\n", .{cond.operator});
-        return null;
-    }
-
-    // ========== FIX: Handle increment as BinaryExpression ==========
-    if (f.increment == null) {
-        debugPrint("[OPTIMIZATION] FAILED: increment is null\n", .{});
-        return null;
-    }
-
-    debugPrint("[OPTIMIZATION] Increment type: {s}\n", .{@tagName(f.increment.?.*)});
-
-    // The increment can be EITHER Assignment OR BinaryExpression with Assign operator
-    var increment_value: f64 = undefined;
-
-    if (f.increment.?.* == .Assignment) {
-        // Handle: i = i + 1 as Assignment node
-        const inc = f.increment.?.Assignment;
-
-        if (!std.mem.eql(u8, inc.name, loop_var)) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment var mismatch: {s} != {s}\n", .{ inc.name, loop_var });
-            return null;
-        }
-
-        if (inc.value.* != .BinaryExpression) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment value is not BinaryExpression, it is: {s}\n", .{@tagName(inc.value.*)});
-            return null;
-        }
-
-        const inc_expr = inc.value.BinaryExpression;
-
-        if (inc_expr.operator != .Plus) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment operator is not Plus, it is: {any}\n", .{inc_expr.operator});
-            return null;
-        }
-
-        if (inc_expr.left.* != .Identifier) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment left is not Identifier, it is: {s}\n", .{@tagName(inc_expr.left.*)});
-            return null;
-        }
-
-        if (!std.mem.eql(u8, inc_expr.left.Identifier.name, loop_var)) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment left identifier mismatch\n", .{});
-            return null;
-        }
-
-        increment_value = getFloatValue(inc_expr.right) orelse return null;
-    } else if (f.increment.?.* == .BinaryExpression) {
-        // Handle: i = i + 1 as BinaryExpression with Assign operator
-        const inc_expr = f.increment.?.BinaryExpression;
-
-        // debugPrint("[OPTIMIZATION] Increment is BinaryExpression with operator: {any}\n", .{inc_expr.operator});
-
-        // Check if it's an assignment: i = ...
-        if (inc_expr.operator != .Assign) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment operator is not Assign, it is: {any}\n", .{inc_expr.operator});
-            return null;
-        }
-
-        // Left side must be the loop variable
-        if (inc_expr.left.* != .Identifier) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment left is not Identifier, it is: {s}\n", .{@tagName(inc_expr.left.*)});
-            return null;
-        }
-
-        if (!std.mem.eql(u8, inc_expr.left.Identifier.name, loop_var)) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment left identifier mismatch: {s} != {s}\n", .{ inc_expr.left.Identifier.name, loop_var });
-            return null;
-        }
-
-        // Right side must be: i + number
-        if (inc_expr.right.* != .BinaryExpression) {
-            // debugPrint("[OPTIMIZATION] FAILED: increment right is not BinaryExpression, it is: {s}\n", .{@tagName(inc_expr.right.*)});
-            return null;
-        }
-
-        const add_expr = inc_expr.right.BinaryExpression;
-
-        if (add_expr.operator != .Plus) {
-            // debugPrint("[OPTIMIZATION] FAILED: add operator is not Plus, it is: {any}\n", .{add_expr.operator});
-            return null;
-        }
-
-        if (add_expr.left.* != .Identifier) {
-            // debugPrint("[OPTIMIZATION] FAILED: add left is not Identifier, it is: {s}\n", .{@tagName(add_expr.left.*)});
-            return null;
-        }
-
-        if (!std.mem.eql(u8, add_expr.left.Identifier.name, loop_var)) {
-            // debugPrint("[OPTIMIZATION] FAILED: add left identifier mismatch: {s} != {s}\n", .{ add_expr.left.Identifier.name, loop_var });
-            return null;
-        }
-
-        increment_value = getFloatValue(add_expr.right) orelse return null;
-    } else {
-        // debugPrint("[OPTIMIZATION] FAILED: increment is neither Assignment nor BinaryExpression, it is: {s}\n", .{@tagName(f.increment.?.*)});
-        return null;
-    }
-
-    // debugPrint("[OPTIMIZATION] Increment OK: {d}\n", .{increment_value});
-
-    // Check body
-    if (f.body.* != .BlockStatement) {
-        // debugPrint("[OPTIMIZATION] FAILED: body is not BlockStatement, it is: {s}\n", .{@tagName(f.body.*)});
-        return null;
-    }
-
-    const body_statements = f.body.BlockStatement.statements;
-
-    // OPTIMIZATION 1: Empty body — direct calculation
-    if (body_statements.len == 0) {
-        const iterations = @divFloor(@as(i64, @intFromFloat(limit - initial_value)), @as(i64, @intFromFloat(increment_value)));
-        const final_value = initial_value + (@as(f64, @floatFromInt(iterations)) * increment_value);
-        try env.values.put(loop_var, .{ .float = final_value });
-        return .{ .float = 0.0 };
-    }
-
-    // OPTIMIZATION 2: Body is `acc = acc + X` or `acc += X` where X is loop_var or constant
-    if (body_statements.len == 1) {
-        const body_stmt = body_statements[0];
-        std.debug.print("", .{}); // [OPT] body_statements.len=1, body_stmt type={s}\n", .{@tagName(body_stmt.*)});
-        const iterations = @divFloor(@as(i64, @intFromFloat(limit - initial_value)), @as(i64, @intFromFloat(increment_value)));
-        const n = @as(f64, @floatFromInt(iterations));
-
-        // Detect: acc = acc + X (Assignment)
-        if (body_stmt.* == .Assignment) {
-            const assign = body_stmt.Assignment;
-            const acc_name = assign.name;
-            std.debug.print("", .{}); // [OPTIMIZATION] checking assignment for acc={s}\n", .{acc_name});
-
-            if (assign.value.* == .BinaryExpression) {
-                const add = assign.value.BinaryExpression;
-                std.debug.print("", .{}); // [OPTIMIZATION] add operator={any}\n", .{add.operator});
-                if (add.operator == .Plus and
-                    add.left.* == .Identifier and
-                    std.mem.eql(u8, add.left.Identifier.name, acc_name))
-                {
-                    std.debug.print("", .{}); // [OPTIMIZATION] Found acc=acc+X pattern, acc={s}\n", .{acc_name});
-                    const acc_val = env.get(acc_name) orelse {
-                        debugPrint("[OPTIMIZATION] acc {s} not in env\n", .{acc_name});
-                        return null;
-                    };
-                    const acc_start = switch (acc_val) {
-                        .integer => |v| @as(f64, @floatFromInt(v)),
-                        .float => |v| v,
-                        else => return null,
-                    };
-
-                    // acc = acc + loop_var
-                    if (add.right.* == .Identifier and
-                        std.mem.eql(u8, add.right.Identifier.name, loop_var))
-                    {
-                        const sum = n * (initial_value + (initial_value + (n - 1.0) * increment_value)) / 2.0;
-                        try env.setInScope(acc_name, .{ .float = acc_start + sum });
-                        try env.values.put(loop_var, .{ .float = initial_value + n * increment_value });
-                        return .{ .float = 0.0 };
-                    }
-
-                    // acc = acc + constant
-                    if (getFloatValue(add.right)) |constant| {
-                        try env.setInScope(acc_name, .{ .float = acc_start + n * constant });
-                        try env.values.put(loop_var, .{ .float = initial_value + n * increment_value });
-                        return .{ .float = 0.0 };
-                    }
-                }
-            }
-        }
-
-        // Detect: acc += X (BinaryExpression with PlusAssign)
-        if (body_stmt.* == .BinaryExpression) {
-            const be = body_stmt.BinaryExpression;
-            if (be.operator == .PlusAssign and
-                be.left.* == .Identifier)
-            {
-                const acc_name = be.left.Identifier.name;
-                const acc_val = env.get(acc_name) orelse return null;
-                const acc_start = switch (acc_val) {
-                    .integer => |v| @as(f64, @floatFromInt(v)),
-                    .float => |v| v,
-                    else => return null,
-                };
-
-                // acc += loop_var
-                if (be.right.* == .Identifier and
-                    std.mem.eql(u8, be.right.Identifier.name, loop_var))
-                {
-                    const sum = n * (initial_value + (initial_value + (n - 1.0) * increment_value)) / 2.0;
-                    try env.setInScope(acc_name, .{ .float = acc_start + sum });
-                    try env.values.put(loop_var, .{ .float = initial_value + n * increment_value });
-                    return .{ .float = 0.0 };
-                }
-
-                // acc += constant
-                if (getFloatValue(be.right)) |constant| {
-                    try env.setInScope(acc_name, .{ .float = acc_start + n * constant });
-                    try env.values.put(loop_var, .{ .float = initial_value + n * increment_value });
-                    return .{ .float = 0.0 };
-                }
-            }
-        }
-    }
-
-    return null;
-}
-
-// Optimized fast path for while loops - with direct calculation
-fn optimizeSimpleWhileLoop(w: @TypeOf(@as(ast.Node, undefined).WhileLoop), env: *Environment) !?ast.Value {
-    if (w.condition.* != .BinaryExpression) return null;
-    const cond = w.condition.BinaryExpression;
-    if (cond.operator != .LessThan) return null;
-    if (cond.left.* != .Identifier) return null;
-    if (cond.right.* != .FloatLiteral and cond.right.* != .IntegerLiteral) return null;
-
-    const loop_var = cond.left.Identifier.name;
-    const limit: f64 = switch (cond.right.*) {
-        .FloatLiteral => |v| v.value,
-        .IntegerLiteral => |v| @floatFromInt(v.value),
-        else => unreachable,
-    };
-
-    if (w.body.* != .BlockStatement) return null;
-    const body_stmts = w.body.BlockStatement.statements;
-
-    if (body_stmts.len == 0) {
-        const initial_val = env.get(loop_var) orelse return null;
-        const initial_value: f64 = switch (initial_val) {
-            .float => |v| v,
-            .integer => |v| @floatFromInt(v),
-            else => return null,
-        };
-        _ = initial_value;
-        return .{ .float = 0.0 };
-    }
-
-    if (body_stmts.len != 1 and body_stmts.len != 2) return null;
-
-    var increment_value: f64 = undefined;
-    var acc_stmt: ?@TypeOf(body_stmts[0]) = null;
-
-    if (body_stmts.len == 2) {
-        for (body_stmts) |stmt| {
-            const is_inc = switch (stmt.*) {
-                .Assignment => |a| std.mem.eql(u8, a.name, loop_var),
-                .BinaryExpression => |be| (be.operator == .Assign or
-                    be.operator == .PlusAssign or be.operator == .MinusAssign) and
-                    be.left.* == .Identifier and
-                    std.mem.eql(u8, be.left.Identifier.name, loop_var),
-                else => false,
-            };
-            if (is_inc) {
-                if (stmt.* == .Assignment) {
-                    const assign = stmt.Assignment;
-                    if (assign.value.* != .BinaryExpression) return null;
-                    const ae = assign.value.BinaryExpression;
-                    if (ae.operator != .Plus) return null;
-                    if (ae.left.* != .Identifier) return null;
-                    if (!std.mem.eql(u8, ae.left.Identifier.name, loop_var)) return null;
-                    increment_value = getFloatValue(ae.right) orelse return null;
-                } else {
-                    const be = stmt.BinaryExpression;
-                    if (be.operator == .Assign) {
-                        if (be.right.* != .BinaryExpression) return null;
-                        const add = be.right.BinaryExpression;
-                        if (add.operator != .Plus) return null;
-                        if (add.left.* != .Identifier) return null;
-                        if (!std.mem.eql(u8, add.left.Identifier.name, loop_var)) return null;
-                        increment_value = getFloatValue(add.right) orelse return null;
-                    } else if (be.operator == .PlusAssign) {
-                        increment_value = getFloatValue(be.right) orelse return null;
-                    } else if (be.operator == .MinusAssign) {
-                        increment_value = getFloatValue(be.right) orelse return null;
-                        increment_value = -increment_value;
-                    } else {
-                        return null;
-                    }
-                }
-            } else {
-                acc_stmt = stmt;
-            }
-        }
-    } else {
-        if (body_stmts[0].* == .Assignment) {
-            const assign = body_stmts[0].Assignment;
-            if (!std.mem.eql(u8, assign.name, loop_var)) return null;
-            if (assign.value.* != .BinaryExpression) return null;
-            const ae = assign.value.BinaryExpression;
-            if (ae.operator != .Plus) return null;
-            if (ae.left.* != .Identifier) return null;
-            if (!std.mem.eql(u8, ae.left.Identifier.name, loop_var)) return null;
-            increment_value = getFloatValue(ae.right) orelse return null;
-        } else if (body_stmts[0].* == .BinaryExpression) {
-            const be = body_stmts[0].BinaryExpression;
-            if (be.operator != .Assign) return null;
-            if (be.left.* != .Identifier) return null;
-            if (!std.mem.eql(u8, be.left.Identifier.name, loop_var)) return null;
-            if (be.right.* != .BinaryExpression) return null;
-            const add = be.right.BinaryExpression;
-            if (add.operator != .Plus) return null;
-            if (add.left.* != .Identifier) return null;
-            if (!std.mem.eql(u8, add.left.Identifier.name, loop_var)) return null;
-            increment_value = getFloatValue(add.right) orelse return null;
-        } else {
-            return null;
-        }
-    }
-
-    const initial_val = env.get(loop_var) orelse return null;
-    const initial_value: f64 = switch (initial_val) {
-        .float => |v| v,
-        .integer => |v| @floatFromInt(v),
-        else => return null,
-    };
-
-    const iterations = @divFloor(@as(i64, @intFromFloat(limit - initial_value)), @as(i64, @intFromFloat(increment_value)));
-    const final_value = initial_value + (@as(f64, @floatFromInt(iterations)) * increment_value);
-    const n = @as(f64, @floatFromInt(iterations));
-
-    try env.values.put(loop_var, .{ .float = final_value });
-
-    if (acc_stmt) |stmt| {
-        if (stmt.* == .Assignment) {
-            const assign = stmt.Assignment;
-            if (assign.value.* == .BinaryExpression) {
-                const add = assign.value.BinaryExpression;
-                if (add.operator == .Plus and
-                    add.left.* == .Identifier and
-                    std.mem.eql(u8, add.left.Identifier.name, assign.name))
-                {
-                    const acc_val = env.get(assign.name) orelse return .{ .float = 0.0 };
-                    const acc_start = switch (acc_val) {
-                        .integer => |v| @as(f64, @floatFromInt(v)),
-                        .float => |v| v,
-                        else => return .{ .float = 0.0 },
-                    };
-                    if (add.right.* == .Identifier and std.mem.eql(u8, add.right.Identifier.name, loop_var)) {
-                        const sum = n * (initial_value + (initial_value + (n - 1.0) * increment_value)) / 2.0;
-                        try env.values.put(assign.name, .{ .float = acc_start + sum });
-                    } else if (getFloatValue(add.right)) |constant| {
-                        try env.values.put(assign.name, .{ .float = acc_start + n * constant });
-                    }
-                }
-            }
-        } else if (stmt.* == .BinaryExpression) {
-            const be = stmt.BinaryExpression;
-            if (be.operator == .PlusAssign and be.left.* == .Identifier) {
-                const acc_name = be.left.Identifier.name;
-                const acc_val = env.get(acc_name) orelse return .{ .float = 0.0 };
-                const acc_start = switch (acc_val) {
-                    .integer => |v| @as(f64, @floatFromInt(v)),
-                    .float => |v| v,
-                    else => return .{ .float = 0.0 },
-                };
-                if (be.right.* == .Identifier and std.mem.eql(u8, be.right.Identifier.name, loop_var)) {
-                    const sum = n * (initial_value + (initial_value + (n - 1.0) * increment_value)) / 2.0;
-                    try env.values.put(acc_name, .{ .float = acc_start + sum });
-                } else if (getFloatValue(be.right)) |constant| {
-                    try env.values.put(acc_name, .{ .float = acc_start + n * constant });
-                }
-            }
-        }
-    }
-
-    return .{ .float = 0.0 };
 }
 
 pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
@@ -962,11 +140,69 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             const array_obj = try ast.ArrayObject.init(env.allocator);
             errdefer array_obj.deinit();
 
-            try array_obj.elements.ensureTotalCapacityPrecise(env.allocator, a.elements.len);
-
             for (a.elements) |elem| {
-                const val = try evaluate(elem, env);
-                array_obj.elements.appendAssumeCapacity(val);
+                if (elem.* == .SpreadExpression) {
+                    const spread_val = try evaluate(elem.SpreadExpression.value, env);
+                    switch (spread_val) {
+                        .array => |src_arr| {
+                            for (src_arr.elements.items) |item| {
+                                try array_obj.elements.append(env.allocator, item);
+                            }
+                        },
+                        .js_object => |obj| {
+                            const type_tag = obj.properties.get("@@type");
+                            if (type_tag != null and type_tag.? == .string) {
+                                if (std.mem.eql(u8, type_tag.?.string, "Set")) {
+                                    if (obj.properties.get("values")) |vals| {
+                                        if (vals == .array) {
+                                            for (vals.array.elements.items) |item| {
+                                                try array_obj.elements.append(env.allocator, item);
+                                            }
+                                        }
+                                    }
+                                } else if (std.mem.eql(u8, type_tag.?.string, "Map")) {
+                                    if (obj.properties.get("entries")) |ents| {
+                                        if (ents == .array) {
+                                            for (ents.array.elements.items) |item| {
+                                                try array_obj.elements.append(env.allocator, item);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        .string => |s| {
+                            for (s, 0..) |_, i| {
+                                const char_val = s[i..i+1];
+                                try array_obj.elements.append(env.allocator, .{ .string = char_val });
+                            }
+                        },
+                        .generator => |gen| {
+                            while (true) {
+                                const next_val = try evaluateGeneratorNext(gen, env);
+                                if (next_val != .js_object) break;
+                                const done = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                                if (done == .boolean and done.boolean) break;
+                                const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                                try array_obj.elements.append(env.allocator, val);
+                            }
+                        },
+                        .iterator => |it| {
+                            while (true) {
+                                const next_val = it.next(env.allocator, &env.arrays, &env.objects);
+                                if (next_val != .js_object) break;
+                                const done = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                                if (done == .boolean and done.boolean) break;
+                                const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                                try array_obj.elements.append(env.allocator, val);
+                            }
+                        },
+                        else => {},
+                    }
+                } else {
+                    const val = try evaluate(elem, env);
+                    try array_obj.elements.append(env.allocator, val);
+                }
             }
 
             try env.arrays.append(env.allocator, array_obj);
@@ -978,8 +214,20 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             errdefer obj.deinit();
 
             for (o.properties) |prop| {
-                const val = try evaluate(prop.value, env);
-                try obj.properties.put(prop.key, val);
+                if (prop.value.* == .SpreadExpression) {
+                    const spread_val = try evaluate(prop.value.SpreadExpression.value, env);
+                    if (spread_val == .js_object) {
+                        var it = spread_val.js_object.properties.iterator();
+                        while (it.next()) |entry| {
+                            // Skip internal @@type keys, copy all others
+                            if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
+                            try obj.properties.put(entry.key_ptr.*, entry.value_ptr.*);
+                        }
+                    }
+                } else {
+                    const val = try evaluate(prop.value, env);
+                    try obj.properties.put(prop.key, val);
+                }
             }
 
             try env.objects.append(env.allocator, obj);
@@ -990,10 +238,26 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             if (array_val == .iterator) {
                 return .{ .void = {} };
             }
+            if (array_val == .generator) {
+                const index_val = try evaluate(a.index, env);
+                if (index_val == .symbol) {
+                    const prop_name = try ast.symbolPropertyName(env.allocator, index_val.symbol.description);
+                    env.owned_strings.append(env.allocator, prop_name) catch {};
+                    if (std.mem.eql(u8, prop_name, "@@iterator")) {
+                        return array_val;
+                    }
+                }
+                return .{ .void = {} };
+            }
             if (array_val == .js_object) {
                 const index_val = try evaluate(a.index, env);
                 const key = switch (index_val) {
                     .string => |s| s,
+                    .symbol => |sym| blk: {
+                        const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
+                        env.owned_strings.append(env.allocator, prop_name) catch {};
+                        break :blk prop_name;
+                    },
                     else => return error.InvalidIndex,
                 };
                 if (array_val.js_object.properties.get(key)) |v| {
@@ -1005,6 +269,29 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return error.NotAnArray;
             }
             const index_val = try evaluate(a.index, env);
+            const key_str: ?[]const u8 = switch (index_val) {
+                .symbol => |sym| blk: {
+                    const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
+                    env.owned_strings.append(env.allocator, prop_name) catch {};
+                    break :blk prop_name;
+                },
+                else => null,
+            };
+
+            if (key_str) |k| {
+                if (array_val.array.extras) |extras| {
+                    if (extras.properties.get(k)) |v| {
+                        return v;
+                    }
+                }
+                if (std.mem.eql(u8, k, "@@iterator")) {
+                    const iter = try ast.ArrayIterator.initValues(env.allocator, array_val.array);
+                    try env.iterators.append(env.allocator, iter);
+                    return .{ .iterator = iter };
+                }
+                return .{ .void = {} };
+            }
+
             const index: usize = switch (index_val) {
                 .integer => |i| @intCast(i),
                 .float => |f| @intFromFloat(f),
@@ -1026,10 +313,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return val;
         },
         .Identifier => |i| {
-            if (env.get(i.name)) |value| {
-                return value;
-            } else if (env.getFunction(i.name)) |_| {
+            if (env.getFunction(i.name)) |_| {
                 return .{ .string = i.name };
+            } else if (env.get(i.name)) |value| {
+                return value;
             } else {
                 return error.UndefinedVariable;
             }
@@ -1043,6 +330,26 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     try obj_val.js_object.properties.put(b.left.MemberAccess.property, val);
                     return val;
                 }
+                if (b.left.* == .ArrayIndex) {
+                    const ai = b.left.ArrayIndex;
+                    const obj_val = try evaluate(ai.array, env);
+                    if (obj_val != .js_object) return error.InvalidAssignment;
+                    const key_val = try evaluate(ai.index, env);
+                    const key: []const u8 = switch (key_val) {
+                        .string => |s| s,
+                        .integer => |i| blk: {
+                            var buf: [32]u8 = undefined;
+                            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                            const owned = try env.allocator.dupe(u8, s);
+                            env.owned_strings.append(env.allocator, owned) catch {};
+                            break :blk owned;
+                        },
+                        else => return error.InvalidIndex,
+                    };
+                    const val = try evaluate(b.right, env);
+                    try obj_val.js_object.properties.put(key, val);
+                    return val;
+                }
                 if (b.left.* != .Identifier) {
                     return error.InvalidAssignment;
                 }
@@ -1052,7 +359,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return value;
             }
 
-            // Compound assignment operators: x += y  =>  x = x + y
             if (b.operator == .PlusAssign or b.operator == .MinusAssign or
                 b.operator == .MultiplyAssign or b.operator == .DivideAssign or
                 b.operator == .ModuloAssign)
@@ -1135,7 +441,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return result;
             }
 
-            // Logical NOT: !x  (parsed as BinaryExpression with left=false, op=Not, right=x)
             if (b.operator == .Not) {
                 const val = try evaluate(b.right, env);
                 const result = switch (val) {
@@ -1149,7 +454,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .boolean = result };
             }
 
-            // Bitwise NOT: ~x  (parsed as BinaryExpression with left=0, op=BitNot, right=x)
             if (b.operator == .BitNot) {
                 const val = try evaluate(b.right, env);
                 return switch (val) {
@@ -1159,7 +463,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
-            // Nullish coalescing: x ?? y (only null/undefined trigger fallback, not falsy values)
             if (b.operator == .Nullish) {
                 const left = try evaluate(b.left, env);
                 return switch (left) {
@@ -1168,7 +471,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
-            // Pipeline: x |> f
             if (b.operator == .Pipe) {
                 const left_val = try evaluate(b.left, env);
                 switch (b.right.*) {
@@ -1184,20 +486,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             };
                         }
                         const func_node = env.getFunction(ident.name) orelse return error.UndefinedFunction;
-                        var func_env = try Environment.init(env.allocator, env);
-                        defer func_env.deinit();
-                        if (func_node.* == .FunctionDeclaration) {
-                            const func = func_node.FunctionDeclaration;
-                            if (func.parameters.len != 1) return error.InvalidArgumentCount;
-                            try func_env.set(func.parameters[0], left_val);
-                            return try evaluate(func.body, &func_env);
-                        } else if (func_node.* == .ArrowFunction) {
-                            const func = func_node.ArrowFunction;
-                            if (func.parameters.len != 1) return error.InvalidArgumentCount;
-                            try func_env.set(func.parameters[0], left_val);
-                            return try evaluate(func.body, &func_env);
-                        }
-                        return error.NotAFunction;
+                        var pipe_ident_args = [_]ast.Value{left_val};
+                        return try invokeFunctionNode(func_node, &pipe_ident_args, env, .{ .void = {} });
                     },
                     .FunctionCall => |fc| {
                         var func_env = try Environment.init(env.allocator, env);
@@ -1219,34 +509,19 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             }
                             return error.UndefinedFunction;
                         };
-                        if (func_node.* == .FunctionDeclaration) {
-                            const func = func_node.FunctionDeclaration;
-                            try func_env.set(func.parameters[0], left_val);
-                            for (func.parameters[1..], 0..) |param, idx| {
-                                if (idx < fc.arguments.len) {
-                                    const val = try evaluate(fc.arguments[idx], env);
-                                    try func_env.set(param, val);
-                                }
-                            }
-                            return try evaluate(func.body, &func_env);
-                        } else if (func_node.* == .ArrowFunction) {
-                            const func = func_node.ArrowFunction;
-                            try func_env.set(func.parameters[0], left_val);
-                            for (func.parameters[1..], 0..) |param, idx| {
-                                if (idx < fc.arguments.len) {
-                                    const val = try evaluate(fc.arguments[idx], env);
-                                    try func_env.set(param, val);
-                                }
-                            }
-                            return try evaluate(func.body, &func_env);
+
+                        var pipe_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + fc.arguments.len);
+                        defer pipe_args.deinit(env.allocator);
+                        try pipe_args.append(env.allocator, left_val);
+                        for (fc.arguments) |arg| {
+                            try pipe_args.append(env.allocator, try evaluate(arg, env));
                         }
-                        return error.NotAFunction;
+                        return try invokeFunctionNode(func_node, pipe_args.items, env, .{ .void = {} });
                     },
                     else => return error.InvalidPipeline,
                 }
             }
 
-            // Equality operators (before arithmetic)
             if (b.operator == .Equal or b.operator == .NotEqual or
                 b.operator == .StrictEqual or b.operator == .StrictNotEqual)
             {
@@ -1260,7 +535,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .boolean = result };
             }
 
-            // Logical operators: &&, ||
             if (b.operator == .And or b.operator == .Or) {
                 const left = try evaluate(b.left, env);
                 const left_truthy = switch (left) {
@@ -1302,7 +576,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             const left = try evaluate(b.left, env);
             const right = try evaluate(b.right, env);
 
-            // String concatenation
             if (b.operator == .Plus and (left == .string or right == .string)) {
                 var buf = std.ArrayList(u8).initCapacity(env.allocator, 64) catch return error.OutOfMemory;
                 defer buf.deinit(env.allocator);
@@ -1314,9 +587,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         buf.appendSlice(env.allocator, written) catch return error.OutOfMemory;
                     },
                     .float => |f| {
-                        var tmp: [64]u8 = undefined;
-                        const written = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
-                        buf.appendSlice(env.allocator, written) catch return error.OutOfMemory;
+                        const s = if (std.math.isNan(f)) "NaN" else blk: {
+                            var tmp: [64]u8 = undefined;
+                            break :blk std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+                        };
+                        buf.appendSlice(env.allocator, s) catch return error.OutOfMemory;
                     },
                     .boolean => |bl| {
                         const s = if (bl) "true" else "false";
@@ -1333,9 +608,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         buf.appendSlice(env.allocator, written) catch return error.OutOfMemory;
                     },
                     .float => |f| {
-                        var tmp: [64]u8 = undefined;
-                        const written = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
-                        buf.appendSlice(env.allocator, written) catch return error.OutOfMemory;
+                        const s = if (std.math.isNan(f)) "NaN" else blk: {
+                            var tmp: [64]u8 = undefined;
+                            break :blk std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+                        };
+                        buf.appendSlice(env.allocator, s) catch return error.OutOfMemory;
                     },
                     .boolean => |bl| {
                         const s = if (bl) "true" else "false";
@@ -1349,14 +626,34 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .string = owned };
             }
 
-            // Si ambos son enteros, retornar entero
             if (left == .integer and right == .integer) {
                 const left_int = left.integer;
                 const right_int = right.integer;
+
+                // Handle overflow for arithmetic ops — fall back to float
+                if (b.operator == .Plus) {
+                    const ov = @addWithOverflow(left_int, right_int);
+                    if (ov[1] != 0) {
+                        return .{ .float = @as(f64, @floatFromInt(left_int)) + @as(f64, @floatFromInt(right_int)) };
+                    }
+                    return .{ .integer = ov[0] };
+                }
+                if (b.operator == .Minus) {
+                    const ov = @subWithOverflow(left_int, right_int);
+                    if (ov[1] != 0) {
+                        return .{ .float = @as(f64, @floatFromInt(left_int)) - @as(f64, @floatFromInt(right_int)) };
+                    }
+                    return .{ .integer = ov[0] };
+                }
+                if (b.operator == .Multiply) {
+                    const ov = @mulWithOverflow(left_int, right_int);
+                    if (ov[1] != 0) {
+                        return .{ .float = @as(f64, @floatFromInt(left_int)) * @as(f64, @floatFromInt(right_int)) };
+                    }
+                    return .{ .integer = ov[0] };
+                }
+
                 return switch (b.operator) {
-                    .Plus => .{ .integer = left_int + right_int },
-                    .Minus => .{ .integer = left_int - right_int },
-                    .Multiply => .{ .integer = left_int * right_int },
                     .Divide => .{ .float = @as(f64, @floatFromInt(left_int)) / @as(f64, @floatFromInt(right_int)) },
                     .Modulo => .{ .integer = @mod(left_int, right_int) },
                     .LessThan => .{ .boolean = left_int < right_int },
@@ -1376,9 +673,20 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
-            // Si alguno es número (f64), convertir ambos a f64
-            const left_num = if (left == .integer) @as(f64, @floatFromInt(left.integer)) else left.float;
-            const right_num = if (right == .integer) @as(f64, @floatFromInt(right.integer)) else right.float;
+            const toNum = struct {
+                fn convert(val: ast.Value) f64 {
+                    return switch (val) {
+                        .integer => |i| @floatFromInt(i),
+                        .float => |f| f,
+                        .void => std.math.nan(f64),
+                        .boolean => |bv| if (bv) 1.0 else 0.0,
+                        .string => |s| std.fmt.parseFloat(f64, s) catch std.math.nan(f64),
+                        else => std.math.nan(f64),
+                    };
+                }
+            }.convert;
+            const left_num = toNum(left);
+            const right_num = toNum(right);
 
             return switch (b.operator) {
                 .Plus => .{ .float = left_num + right_num },
@@ -1407,8 +715,157 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             try env.setInScope(a.name, value);
             return value;
         },
+        .YieldExpression => |y| {
+            if (y.is_star) {
+                // yield* — delegate to another generator or iterable
+                // On re-entry after a yield, cached delegate state may persist
+                
+                // First entry: evaluate the expression and set up delegation
+                const yield_star_active = env.yield_star_gen != null or env.yield_star_array != null or env.yield_star_iterator != null or env.yield_star_string != null or env.yield_star_js_iterator != null;
+                if (!yield_star_active) {
+                    const iterable = if (y.value) |v| try evaluate(v, env) else @as(ast.Value, .{ .void = {} });
+                    switch (iterable) {
+                        .generator => |gen| {
+                            env.yield_star_gen = gen;
+                        },
+                        .array => |arr| {
+                            env.yield_star_array = arr;
+                            env.yield_star_index = 0;
+                        },
+                        .string => |s| {
+                            env.yield_star_string = s;
+                            env.yield_star_index = 0;
+                        },
+                        .iterator => |it| {
+                            env.yield_star_iterator = it;
+                        },
+                        .js_object => |obj| {
+                            if (obj.properties.get("@@iterator")) |iterator_fn| {
+                                const iterator_val = try callFunctionValue(iterator_fn, &.{}, env, .{ .js_object = obj });
+                                if (iterator_val == .js_object) {
+                                    env.yield_star_js_iterator = iterator_val.js_object;
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                
+                // Handle generator delegation (cached or fresh)
+                if (env.yield_star_gen) |delegate| {
+                    while (true) {
+                        const next_val = try evaluateGeneratorNext(delegate, env);
+                        if (next_val != .js_object) break;
+                        const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                        const is_done = switch (done_val) {
+                            .boolean => |b| b,
+                            else => true,
+                        };
+                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        if (is_done) {
+                            env.yield_star_gen = null;
+                            return val;
+                        }
+                        env.yield_caught_by_loop = true;
+                        env.yield_hit = true;
+                        env.yield_value = val;
+                        return val;
+                    }
+                    env.yield_star_gen = null;
+                    return .{ .void = {} };
+                }
+                
+                // Handle array delegation (cached across re-entries)
+                if (env.yield_star_array) |delegate| {
+                    const i = env.yield_star_index;
+                    while (i < delegate.elements.items.len) {
+                        const elem = delegate.elements.items[i];
+                        env.yield_star_index = i + 1;
+                        env.yield_caught_by_loop = true;
+                        env.yield_hit = true;
+                        env.yield_value = elem;
+                        return elem;
+                    }
+                    env.yield_star_array = null;
+                    env.yield_star_index = 0;
+                    return .{ .void = {} };
+                }
+                
+                // Handle string delegation
+                if (env.yield_star_string) |delegate| {
+                    const i = env.yield_star_index;
+                    while (i < delegate.len) {
+                        const cp_len = std.unicode.utf8ByteSequenceLength(delegate[i]) catch 1;
+                        const char = delegate[i .. i + cp_len];
+                        env.yield_star_index = i + cp_len;
+                        env.yield_caught_by_loop = true;
+                        env.yield_hit = true;
+                        env.yield_value = .{ .string = char };
+                        return .{ .string = char };
+                    }
+                    env.yield_star_string = null;
+                    env.yield_star_index = 0;
+                    return .{ .void = {} };
+                }
+                
+                // Handle iterator delegation
+                if (env.yield_star_iterator) |delegate| {
+                    const next_val = delegate.next(env.allocator, &env.arrays, &env.objects);
+                    if (next_val == .js_object) {
+                        const done = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                        if (done != .boolean or !done.boolean) {
+                            const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                            env.yield_caught_by_loop = true;
+                            env.yield_hit = true;
+                            env.yield_value = val;
+                            return val;
+                        }
+                    }
+                    env.yield_star_iterator = null;
+                    return .{ .void = {} };
+                }
+                
+                // Handle js_object iterator delegation (from @@iterator protocol)
+                if (env.yield_star_js_iterator) |delegate| {
+                    while (true) {
+                        const next_fn = delegate.properties.get("next") orelse {
+                            env.yield_star_js_iterator = null;
+                            return .{ .void = {} };
+                        };
+                        const next_val = try callFunctionValue(next_fn, &.{}, env, .{ .js_object = delegate });
+                        if (next_val != .js_object) {
+                            env.yield_star_js_iterator = null;
+                            return .{ .void = {} };
+                        }
+                        const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                        const is_done = switch (done_val) {
+                            .boolean => |b| b,
+                            else => true,
+                        };
+                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        if (is_done) {
+                            env.yield_star_js_iterator = null;
+                            return val;
+                        }
+                        env.yield_caught_by_loop = true;
+                        env.yield_hit = true;
+                        env.yield_value = val;
+                        return val;
+                    }
+                    env.yield_star_js_iterator = null;
+                    return .{ .void = {} };
+                }
+                
+                return .{ .void = {} };
+            } else {
+                const val: ast.Value = if (y.value) |v| try evaluate(v, env) else .{ .void = {} };
+                env.yield_hit = true;
+                env.yield_value = val;
+                return val;
+            }
+        },
         .ConstantDeclaration => |c| {
-            if (c.value.* == .FunctionDeclaration or c.value.* == .ArrowFunction) {
+            if (c.value.* == .FunctionDeclaration or c.value.* == .ArrowFunction or c.value.* == .GeneratorDeclaration) {
                 try env.setFunction(c.name, c.value);
                 try env.setConstant(c.name, .{ .float = 0.0 });
                 return .{ .float = 0.0 };
@@ -1419,7 +876,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .VariableDeclaration => |v| {
-            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction) {
+            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction or v.value.* == .GeneratorDeclaration) {
                 try env.setFunction(v.name, v.value);
                 try env.setVar(v.name, .{ .float = 0.0 });
                 return .{ .float = 0.0 };
@@ -1430,7 +887,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .LetDeclaration => |v| {
-            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction) {
+            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction or v.value.* == .GeneratorDeclaration) {
                 try env.setFunction(v.name, v.value);
                 try env.setLet(v.name, .{ .float = 0.0 });
                 return .{ .float = 0.0 };
@@ -1461,6 +918,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         }
                     }
                     result = try evaluate(stmt, env);
+                    if (env.return_hit) break;
                 }
                 return result;
             }
@@ -1480,11 +938,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
 
                 result = try evaluate(stmt, &block_env);
+                if (block_env.return_hit) break;
             }
             return result;
         },
         .ForLoop => |f| {
-            // Pre-evaluate condition limit for non-literal RHS
             var pre_limit: ?f64 = null;
             if (f.condition) |cond| {
                 if (cond.* == .BinaryExpression) {
@@ -1509,7 +967,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
             }
             debugPrint("[OPTIMIZATION] Trying optimizeSimpleForLoop, pre_limit={?}\n", .{pre_limit});
-            if (try optimizeSimpleForLoop(f, env, pre_limit)) |result| {
+            if (try optimizations.optimizeSimpleForLoop(f, env, pre_limit)) |result| {
                 debugPrint("[OPTIMIZATION] SUCCESS!\n", .{});
                 return result;
             }
@@ -1526,8 +984,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             var result: ast.Value = .{ .float = 0.0 };
 
+            // Run init on first entry; skip on generator yield re-entry
             if (f.init) |init| {
-                _ = try evaluate(init, eval_env);
+                if (env.for_yield_node != @as(?*const anyopaque, @ptrCast(node))) {
+                    _ = try evaluate(init, eval_env);
+                }
             }
 
             const loop_var_name: ?[]const u8 = if (f.condition) |cond|
@@ -1562,20 +1023,369 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
 
                 result = try evaluate(f.body, eval_env);
-
+                if (eval_env.yield_hit) {
+                    // Track which for-loop node yielded so init is skipped on re-entry
+                    env.for_yield_node = @ptrCast(node);
+                    // If yield came from an active yield*, don't advance the loop variable.
+                    // yield* spans multiple generator.next() calls — the loop should not
+                    // advance until yield* completes and the body finishes normally.
+                    if (eval_env.yield_star_gen == null and eval_env.yield_star_array == null) {
+                        if (f.increment) |inc| {
+                            _ = try evaluate(inc, eval_env);
+                        }
+                    }
+                    eval_env.yield_caught_by_loop = true;
+                    result = eval_env.yield_value;
+                    eval_env.yield_hit = false; // Consume so outer loops don't also catch it
+                    break;
+                }
                 if (f.increment) |inc| {
                     _ = try evaluate(inc, eval_env);
                 }
+                if (eval_env.return_hit) break;
+            }
+
+            // For-loop completed without yielding — clear for_yield_node
+            if (env.for_yield_node == @as(?*const anyopaque, @ptrCast(node))) {
+                env.for_yield_node = null;
+            }
+            return result;
+        },
+        .ForOfLoop => |f| {
+            var result: ast.Value = .{ .float = 0.0 };
+
+    const setLoopVar = struct {
+        fn set(scope: *Environment, kind: ast.ForOfKind, name: []const u8, val: ast.Value) !void {
+            switch (kind) {
+                .Const => {
+                    try scope.values.put(name, val);
+                    if (!scope.constants.contains(name)) {
+                        try scope.constants.put(name, {});
+                    }
+                },
+                .Let => {
+                    try scope.values.put(name, val);
+                },
+                .Var => {
+                    try scope.setVar(name, val);
+                },
+            }
+        }
+    }.set;
+
+            // On re-entry after yield, check for cached iteration state first
+            // (these fields persist in the generator's environment)
+            if (env.for_of_gen) |cached_gen| {
+                var block_env_buf: Environment = undefined;
+                const loop_env: *Environment = if (f.kind == .Let or f.kind == .Const) blk: {
+                    block_env_buf = try Environment.initBlock(env.allocator, env);
+                    break :blk &block_env_buf;
+                } else env;
+                defer if (f.kind == .Let or f.kind == .Const) block_env_buf.deinit();
+
+                // If yield_star is active from a previous body evaluation,
+                // DON'T advance the cached generator — let yield* continue delegating.
+                if (env.yield_star_gen == null and env.yield_star_array == null and env.yield_star_iterator == null and env.yield_star_string == null) {
+                    const next_val = try evaluateGeneratorNext(cached_gen, env);
+                    if (next_val != .js_object) {
+                        env.for_of_gen = null;
+                        return result;
+                    }
+                    const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                    const is_done = switch (done_val) {
+                        .boolean => |b| b,
+                        else => true,
+                    };
+                    if (is_done) {
+                        env.for_of_gen = null;
+                        return result;
+                    }
+                    const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                    try setLoopVar(loop_env, f.kind, f.variable, val);
+                }
+                result = try evaluate(f.body, loop_env);
+                if (loop_env.yield_hit) {
+                    // Propagate yield_star state from loop_env to outer env
+                    if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                    if (loop_env.yield_star_array != null) {
+                        env.yield_star_array = loop_env.yield_star_array;
+                        env.yield_star_index = loop_env.yield_star_index;
+                    }
+                    env.yield_hit = true;
+                    env.yield_value = loop_env.yield_value;
+                    env.yield_caught_by_loop = true;
+                    result = loop_env.yield_value;
+                    loop_env.yield_hit = false;
+                }
+                return result;
+            }
+
+            if (env.for_of_array) |cached_arr| {
+                var block_env_buf: Environment = undefined;
+                const loop_env: *Environment = if (f.kind == .Let or f.kind == .Const) blk: {
+                    block_env_buf = try Environment.initBlock(env.allocator, env);
+                    break :blk &block_env_buf;
+                } else env;
+                defer if (f.kind == .Let or f.kind == .Const) block_env_buf.deinit();
+
+                var i = env.for_of_array_index;
+                while (i < cached_arr.elements.items.len) {
+                    // If yield_star is still active from a previous body evaluation,
+                    // DON'T set the loop variable — keep the old value so yield*
+                    // continues delegating from the SAME element.
+                    const yield_star_active = env.yield_star_gen != null or env.yield_star_array != null;
+                    if (!yield_star_active) {
+                        const val = cached_arr.elements.items[i];
+                        try setLoopVar(loop_env, f.kind, f.variable, val);
+                    }
+                    // Restore yield_star state to loop_env before body evaluation
+                    // (loop_env is freshly created, so yield_star_* starts null)
+                    if (env.yield_star_gen != null) loop_env.yield_star_gen = env.yield_star_gen;
+                    if (env.yield_star_array != null) {
+                        loop_env.yield_star_array = env.yield_star_array;
+                        loop_env.yield_star_index = env.yield_star_index;
+                    }
+                    result = try evaluate(f.body, loop_env);
+                    if (loop_env.yield_hit) {
+                        // Propagate yield_star state from loop_env back to outer env
+                        if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                        if (loop_env.yield_star_array != null) {
+                            env.yield_star_array = loop_env.yield_star_array;
+                            env.yield_star_index = loop_env.yield_star_index;
+                        } else if (env.yield_star_array != null) {
+                            // yield* exhausted: clear stale state on env
+                            env.yield_star_array = null;
+                            env.yield_star_index = 0;
+                        }
+                        env.yield_hit = true;
+                        env.yield_value = loop_env.yield_value;
+                        env.yield_caught_by_loop = true;
+                        result = loop_env.yield_value;
+                        loop_env.yield_hit = false;
+                        // Always persist current array position for re-entry
+                        // If yield* is still active, keep position (don't advance).
+                        // Otherwise advance to next element.
+                        const still_active = env.yield_star_gen != null or env.yield_star_array != null;
+                        if (still_active) {
+                            env.for_of_array_index = i;
+                        } else {
+                            env.for_of_array_index = i + 1;
+                        }
+                        return result;
+                    }
+                    // Body completed without yield — clear yield_star state on env
+                    // (yield* was exhausted or wasn't used)
+                    env.yield_star_array = loop_env.yield_star_array;
+                    env.yield_star_gen = loop_env.yield_star_gen;
+                    if (loop_env.return_hit) break;
+                    i += 1;
+                    // Persist current position across re-entries
+                    env.for_of_array_index = i;
+                }
+                // Array exhausted
+                env.for_of_array = null;
+                return result;
+            }
+
+            // First entry: evaluate iterable and start fresh
+            const iterable = try evaluate(f.iterable, env);
+
+            var block_env_buf: Environment = undefined;
+            const loop_env: *Environment = if (f.kind == .Let or f.kind == .Const) blk: {
+                block_env_buf = try Environment.initBlock(env.allocator, env);
+                break :blk &block_env_buf;
+            } else env;
+            defer if (f.kind == .Let or f.kind == .Const) block_env_buf.deinit();
+
+            switch (iterable) {
+                .array => |arr| {
+                    var i: usize = 0;
+                    while (i < arr.elements.items.len) {
+                        const val = arr.elements.items[i];
+                        try setLoopVar(loop_env, f.kind, f.variable, val);
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.yield_hit) {
+                            // Propagate yield_star state from loop_env to outer env
+                            if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                            if (loop_env.yield_star_array != null) {
+                                env.yield_star_array = loop_env.yield_star_array;
+                                env.yield_star_index = loop_env.yield_star_index;
+                            } else if (env.yield_star_array != null) {
+                                // yield* exhausted: clear stale state on env
+                                env.yield_star_array = null;
+                                env.yield_star_index = 0;
+                            }
+                            env.yield_hit = true;
+                            env.yield_value = loop_env.yield_value;
+                            env.yield_caught_by_loop = true;
+                            result = loop_env.yield_value;
+                            loop_env.yield_hit = false;
+                            env.for_of_array = arr;
+                            // Always persist current array position for re-entry
+                            const still_active = env.yield_star_gen != null or env.yield_star_array != null;
+                            if (still_active) {
+                                env.for_of_array_index = i;
+                            } else {
+                                env.for_of_array_index = i + 1;
+                            }
+                            break;
+                        }
+                        if (loop_env.return_hit) break;
+                        // Clear stale yield_star state after body completes without yield
+                        env.yield_star_array = loop_env.yield_star_array;
+                        env.yield_star_gen = loop_env.yield_star_gen;
+                        i += 1;
+                    }
+                },
+                .string => |s| {
+                    var i: usize = 0;
+                    while (i < s.len) {
+                        const cp_len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+                        const char = s[i .. i + cp_len];
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = char });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.yield_hit) {
+                            // Propagate yield_star state from loop_env to outer env
+                            if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                            if (loop_env.yield_star_array != null) {
+                                env.yield_star_array = loop_env.yield_star_array;
+                                env.yield_star_index = loop_env.yield_star_index;
+                            } else if (env.yield_star_array != null) {
+                                // yield* exhausted: clear stale state on env
+                                env.yield_star_array = null;
+                                env.yield_star_index = 0;
+                            }
+                            env.yield_hit = true;
+                            env.yield_value = loop_env.yield_value;
+                            env.yield_caught_by_loop = true;
+                            result = loop_env.yield_value;
+                            loop_env.yield_hit = false;
+                            break;
+                        }
+                        if (loop_env.return_hit) break;
+                        i += cp_len;
+                    }
+                },
+                .js_object => |obj| {
+                    const type_tag = obj.properties.get("@@type");
+                    if (type_tag != null and type_tag.? == .string) {
+                        if (std.mem.eql(u8, type_tag.?.string, "Set")) {
+                            if (obj.properties.get("values")) |vals| {
+                                if (vals == .array) {
+                                    for (vals.array.elements.items) |val| {
+                                        try setLoopVar(loop_env, f.kind, f.variable, val);
+                                        result = try evaluate(f.body, loop_env);
+                                        if (loop_env.yield_hit) {
+                                            env.yield_hit = true;
+                                            env.yield_value = loop_env.yield_value;
+                                            env.yield_caught_by_loop = true;
+                                            result = loop_env.yield_value;
+                                            loop_env.yield_hit = false;
+                                            break;
+                                        }
+                                        if (loop_env.return_hit) break;
+                                    }
+                                }
+                            }
+                        } else if (std.mem.eql(u8, type_tag.?.string, "Map")) {
+                            if (obj.properties.get("entries")) |ents| {
+                                if (ents == .array) {
+                                    for (ents.array.elements.items) |entry| {
+                                        try setLoopVar(loop_env, f.kind, f.variable, entry);
+                                        result = try evaluate(f.body, loop_env);
+                                        if (loop_env.yield_hit) {
+                                            env.yield_hit = true;
+                                            env.yield_value = loop_env.yield_value;
+                                            env.yield_caught_by_loop = true;
+                                            result = loop_env.yield_value;
+                                            loop_env.yield_hit = false;
+                                            break;
+                                        }
+                                        if (loop_env.return_hit) break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                .generator => |gen| {
+                    // Cache the generator for re-entry
+                    env.for_of_gen = gen;
+                    while (true) {
+                        const next_val = try evaluateGeneratorNext(gen, env);
+                        if (next_val != .js_object) {
+                            env.for_of_gen = null;
+                            break;
+                        }
+                        const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                        const is_done = switch (done_val) {
+                            .boolean => |b| b,
+                            else => true,
+                        };
+                        if (is_done) {
+                            env.for_of_gen = null;
+                            break;
+                        }
+                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        try setLoopVar(loop_env, f.kind, f.variable, val);
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.yield_hit) {
+                            // Propagate yield_star state from loop_env to outer env
+                            if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                            if (loop_env.yield_star_array != null) {
+                                env.yield_star_array = loop_env.yield_star_array;
+                                env.yield_star_index = loop_env.yield_star_index;
+                            }
+                            env.yield_hit = true;
+                            env.yield_value = loop_env.yield_value;
+                            env.yield_caught_by_loop = true;
+                            result = loop_env.yield_value;
+                            loop_env.yield_hit = false;
+                            break;
+                        }
+                        if (loop_env.return_hit) break;
+                    }
+                },
+                .iterator => |iter| {
+                    while (true) {
+                        const next_val = iter.next(env.allocator, &env.arrays, &env.objects);
+                        if (next_val != .js_object) break;
+                        const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                        const is_done = switch (done_val) {
+                            .boolean => |b| b,
+                            else => true,
+                        };
+                        if (is_done) break;
+                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        try setLoopVar(loop_env, f.kind, f.variable, val);
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.yield_hit) {
+                            if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                            if (loop_env.yield_star_array != null) {
+                                env.yield_star_array = loop_env.yield_star_array;
+                                env.yield_star_index = loop_env.yield_star_index;
+                            }
+                            env.yield_hit = true;
+                            env.yield_value = loop_env.yield_value;
+                            env.yield_caught_by_loop = true;
+                            result = loop_env.yield_value;
+                            loop_env.yield_hit = false;
+                            break;
+                        }
+                        if (loop_env.return_hit) break;
+                    }
+                },
+                else => {},
             }
 
             return result;
         },
         .WhileLoop => |w| {
-            if (try optimizeArrayPushLoop(w, env)) |result| {
+            if (try optimizations.optimizeArrayPushLoop(w, env)) |result| {
                 return result;
             }
 
-            if (try optimizeSimpleWhileLoop(w, env)) |result| {
+            if (try optimizations.optimizeSimpleWhileLoop(w, env)) |result| {
                 return result;
             }
 
@@ -1639,6 +1449,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
 
                 result = try evaluate(w.body, env);
+                if (env.yield_hit) {
+                    env.yield_caught_by_loop = true;
+                    result = env.yield_value;
+                    env.yield_hit = false;
+                    break;
+                }
+                if (env.return_hit) break;
             }
 
             return result;
@@ -1654,38 +1471,55 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 else => true,
             };
 
-            // debugPrint("[IF] Condition is truthy: {}\n", .{is_truthy});
-
             if (is_truthy) {
-                // debugPrint("[IF] Evaluating consequence\n", .{});
                 const result = try evaluate(i.consequence, env);
-                // debugPrint("[IF] Consequence result: {any}\n", .{result});
                 return result;
             } else if (i.alternative) |alt| {
-                // debugPrint("[IF] Evaluating alternative\n", .{});
                 const result = try evaluate(alt, env);
-                // debugPrint("[IF] Alternative result: {any}\n", .{result});
                 return result;
             } else {
-                // debugPrint("[IF] No consequence or alternative\n", .{});
                 return .{ .float = 0.0 };
             }
         },
         .ReturnStatement => |r| {
-            // This case is primarily handled in BlockStatement for proper control flow
-            // But we keep this as a fallback for standalone return statements
+            env.return_hit = true;
             if (r.value) |val| {
-                return try evaluate(val, env);
+                const v = try evaluate(val, env);
+                return v;
             } else {
                 return .{ .void = {} };
             }
         },
+        .GeneratorDeclaration => |g| {
+            try env.setFunction(g.name, node);
+            return .{ .function = @ptrCast(node) };
+        },
         .FunctionDeclaration => |f| {
             try env.setFunction(f.name, node);
-            return .{ .float = 0.0 };
+            return .{ .function = @ptrCast(node) };
         },
         .FunctionCall => |f| {
+            const has_spread_args = blk: {
+                var found = false;
+                for (f.arguments) |arg| {
+                    if (arg.* == .SpreadExpression) {
+                        found = true;
+                        break;
+                    }
+                }
+                break :blk found;
+            };
+
             if (env.getBuiltin(f.name)) |builtin_fn| {
+                if (has_spread_args) {
+                    var expanded = try evaluateArgs(f.arguments, env);
+                    defer expanded.deinit(env.allocator);
+                    const result = builtin_fn(expanded.items, env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .{ .float = 0.0 },
+                    };
+                }
                 var stack_buf: [16]ast.Value = undefined;
                 const total = f.arguments.len;
                 if (total <= 16) {
@@ -1712,31 +1546,187 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
-            const func_node = env.getFunctionWithModuleFallback(f.name) orelse return error.UndefinedFunction;
-
-            var func_env = try Environment.init(env.allocator, env);
-            defer func_env.deinit();
-
-            if (func_node.* == .FunctionDeclaration) {
-                const func = func_node.FunctionDeclaration;
-                for (func.parameters, f.arguments) |param, arg| {
-                    const arg_val = try evaluate(arg, env);
-                    try func_env.set(param, arg_val);
+            const func_node = env.getFunctionWithModuleFallback(f.name) orelse blk: {
+                // Not a named function — try variable value (e.g. anonymous function passed as arg)
+                const val = env.get(f.name) orelse return error.UndefinedFunction;
+                switch (val) {
+                    .function => |fn_ptr| break :blk @as(*ast.Node, @alignCast(@ptrCast(fn_ptr))),
+                    .generator => |gen| {
+                        // Evaluate args for side effects, then return the generator
+                        for (f.arguments) |arg| {
+                            _ = try evaluate(arg, env);
+                        }
+                        return .{ .generator = gen };
+                    },
+                    else => return error.NotAFunction,
                 }
-                return try evaluate(func.body, &func_env);
-            } else if (func_node.* == .ArrowFunction) {
-                const func = func_node.ArrowFunction;
-                for (func.parameters, f.arguments) |param, arg| {
-                    const arg_val = try evaluate(arg, env);
-                    try func_env.set(param, arg_val);
+            };
+
+            // Invoke the function via the shared helper
+            const fc_this = ast.Value{ .void = {} };
+            if (has_spread_args) {
+                var expanded = try evaluateArgs(f.arguments, env);
+                defer expanded.deinit(env.allocator);
+                return try invokeFunctionNode(func_node, expanded.items, env, fc_this);
+            }
+            var fc_stack: [16]ast.Value = undefined;
+            const fc_total = f.arguments.len;
+            if (fc_total <= 16) {
+                for (f.arguments, 0..) |arg, idx| {
+                    fc_stack[idx] = try evaluate(arg, env);
                 }
-                return try evaluate(func.body, &func_env);
-            } else {
-                return error.NotAFunction;
+                return try invokeFunctionNode(func_node, fc_stack[0..fc_total], env, fc_this);
+            }
+            {
+                var fc_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, fc_total);
+                defer fc_args.deinit(env.allocator);
+                for (f.arguments) |arg| {
+                    try fc_args.append(env.allocator, try evaluate(arg, env));
+                }
+                return try invokeFunctionNode(func_node, fc_args.items, env, fc_this);
             }
         },
         .ArrowFunction => {
-            return .{ .float = 0.0 };
+            return .{ .function = @ptrCast(node) };
+        },
+        .NewExpression => |ne| {
+            const func_name = switch (ne.callee.*) {
+                .Identifier => |id| id.name,
+                else => return error.InvalidCallee,
+            };
+
+            const has_spread_args = blk: {
+                var found = false;
+                for (ne.arguments) |arg| {
+                    if (arg.* == .SpreadExpression) {
+                        found = true;
+                        break;
+                    }
+                }
+                break :blk found;
+            };
+
+            if (env.getBuiltin(func_name)) |builtin_fn| {
+                if (has_spread_args) {
+                    var expanded = try evaluateArgs(ne.arguments, env);
+                    defer expanded.deinit(env.allocator);
+                    const result = builtin_fn(expanded.items, env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .{ .float = 0.0 },
+                    };
+                }
+                var stack_buf: [16]ast.Value = undefined;
+                const total = ne.arguments.len;
+                if (total <= 16) {
+                    for (ne.arguments, 0..) |arg, idx| {
+                        stack_buf[idx] = try evaluate(arg, env);
+                    }
+                    const result = builtin_fn(stack_buf[0..total], env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .{ .float = 0.0 },
+                    };
+                }
+                var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
+                defer args.deinit(env.allocator);
+                for (ne.arguments) |arg| {
+                    const val = try evaluate(arg, env);
+                    try args.append(env.allocator, val);
+                }
+                const result = builtin_fn(args.items, env);
+                args.clearAndFree(env.allocator);
+                return switch (result) {
+                    .value => |val| val,
+                    .void => .{ .float = 0.0 },
+                };
+            }
+
+            const func_node = env.getFunctionWithModuleFallback(func_name) orelse return error.UndefinedFunction;
+
+            // Create 'this' object for constructor calls
+            const new_obj = try ast.ObjectValue.init(env.allocator);
+            try env.objects.append(env.allocator, new_obj);
+            const ne_this = ast.Value{ .js_object = new_obj };
+
+            const checkResult = struct {
+                fn check(r: ast.Value, t: ast.Value) ast.Value {
+                    return switch (r) {
+                        .void, .null, .boolean, .integer, .float, .string => t,
+                        else => r,
+                    };
+                }
+            }.check;
+
+            if (has_spread_args) {
+                var expanded = try evaluateArgs(ne.arguments, env);
+                defer expanded.deinit(env.allocator);
+                return checkResult(try invokeFunctionNode(func_node, expanded.items, env, ne_this), ne_this);
+            }
+            var ne_stack: [16]ast.Value = undefined;
+            const ne_total = ne.arguments.len;
+            if (ne_total <= 16) {
+                for (ne.arguments, 0..) |arg, idx| {
+                    ne_stack[idx] = try evaluate(arg, env);
+                }
+                return checkResult(try invokeFunctionNode(func_node, ne_stack[0..ne_total], env, ne_this), ne_this);
+            }
+            {
+                var ne_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, ne_total);
+                defer ne_args.deinit(env.allocator);
+                for (ne.arguments) |arg| {
+                    try ne_args.append(env.allocator, try evaluate(arg, env));
+                }
+                return checkResult(try invokeFunctionNode(func_node, ne_args.items, env, ne_this), ne_this);
+            }
+        },
+        .DirectCall => |dc| {
+            const callee_val = try evaluate(dc.callee, env);
+            if (callee_val == .generator) {
+                // Evaluate args for side effects, then return the generator
+                for (dc.arguments) |arg| {
+                    _ = try evaluate(arg, env);
+                }
+                return callee_val;
+            }
+            if (callee_val != .function) {
+                return error.NotAFunction;
+            }
+            const func_node: *ast.Node = @alignCast(@ptrCast(callee_val.function));
+
+            const has_spread_args = blk: {
+                var found = false;
+                for (dc.arguments) |arg| {
+                    if (arg.* == .SpreadExpression) {
+                        found = true;
+                        break;
+                    }
+                }
+                break :blk found;
+            };
+
+            const dc_this = ast.Value{ .void = {} };
+            if (has_spread_args) {
+                var expanded = try evaluateArgs(dc.arguments, env);
+                defer expanded.deinit(env.allocator);
+                return try invokeFunctionNode(func_node, expanded.items, env, dc_this);
+            }
+            var dc_stack: [16]ast.Value = undefined;
+            const dc_total = dc.arguments.len;
+            if (dc_total <= 16) {
+                for (dc.arguments, 0..) |arg, idx| {
+                    dc_stack[idx] = try evaluate(arg, env);
+                }
+                return try invokeFunctionNode(func_node, dc_stack[0..dc_total], env, dc_this);
+            }
+            {
+                var dc_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, dc_total);
+                defer dc_args.deinit(env.allocator);
+                for (dc.arguments) |arg| {
+                    try dc_args.append(env.allocator, try evaluate(arg, env));
+                }
+                return try invokeFunctionNode(func_node, dc_args.items, env, dc_this);
+            }
         },
         .MemberAccess => |m| {
             const value = try evaluate(m.object, env);
@@ -1767,17 +1757,42 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .MethodCall => |m| {
+            const has_spread_args = blk: {
+                var found = false;
+                for (m.arguments) |arg| {
+                    if (arg.* == .SpreadExpression) {
+                        found = true;
+                        break;
+                    }
+                }
+                break :blk found;
+            };
+
+            var expanded_method_args: ?std.ArrayList(ast.Value) = null;
+            defer if (expanded_method_args) |*ema| ema.deinit(env.allocator);
+
+            if (has_spread_args) {
+                expanded_method_args = try evaluateArgs(m.arguments, env);
+            }
+
             if (m.object.* == .Identifier) {
                 const obj_name = m.object.Identifier.name;
 
                 if (env.get(obj_name)) |value| {
                     if (value == .array) {
-                        const builtin_obj = env.getBuiltinObject("Array") orelse {
-                            return error.UndefinedObject;
-                        };
-                        const method = builtin_obj.getMethod(m.method) orelse {
-                            return error.UndefinedMethod;
-                        };
+                        if (expanded_method_args) |ema| {
+                            var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                            defer ma.deinit(env.allocator);
+                            try ma.append(env.allocator, value);
+                            try ma.appendSlice(env.allocator, ema.items);
+                            const arr_builtin = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                            const method_fn = arr_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const result = method_fn(ma.items, env);
+                            return switch (result) {
+                                .value => |val| val,
+                                .void => .void,
+                            };
+                        }
                         var stack_buf: [16]ast.Value = undefined;
                         stack_buf[0] = value;
                         const total = 1 + m.arguments.len;
@@ -1785,32 +1800,145 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             for (m.arguments, 0..) |arg, idx| {
                                 stack_buf[idx + 1] = try evaluate(arg, env);
                             }
-                            const result = method(stack_buf[0..total], env);
+                            const arr_builtin = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                            const method_fn = arr_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const result = method_fn(stack_buf[0..total], env);
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .void,
                             };
                         }
-                        var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
-                        defer args.deinit(env.allocator);
-                        for (m.arguments) |arg| {
-                            const val = try evaluate(arg, env);
-                            try args.append(env.allocator, val);
-                        }
-                        var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
+                        var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total);
                         defer method_args.deinit(env.allocator);
                         try method_args.append(env.allocator, value);
-                        try method_args.appendSlice(env.allocator, args.items);
-                        const result = method(method_args.items, env);
-                        args.clearAndFree(env.allocator);
-                        method_args.clearAndFree(env.allocator);
-                        return switch (result) {
+                        for (m.arguments) |arg| {
+                            const val = try evaluate(arg, env);
+                            try method_args.append(env.allocator, val);
+                        }
+                        const arr_builtin2 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                        const method_fn2 = arr_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                        const result2 = method_fn2(method_args.items, env);
+                        return switch (result2) {
+                            .value => |val| val,
+                            .void => .void,
+                        };
+                    } else if (value == .string) {
+                        if (expanded_method_args) |ema| {
+                            var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                            defer ma.deinit(env.allocator);
+                            try ma.append(env.allocator, value);
+                            try ma.appendSlice(env.allocator, ema.items);
+                            const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                            const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const result = method_fn(ma.items, env);
+                            return switch (result) {
+                                .value => |val| val,
+                                .void => .void,
+                            };
+                        }
+                        var stack_buf: [16]ast.Value = undefined;
+                        stack_buf[0] = value;
+                        const total = 1 + m.arguments.len;
+                        if (total <= 16) {
+                            for (m.arguments, 0..) |arg, idx| {
+                                stack_buf[idx + 1] = try evaluate(arg, env);
+                            }
+                            const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                            const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const result = method_fn(stack_buf[0..total], env);
+                            return switch (result) {
+                                .value => |val| val,
+                                .void => .void,
+                            };
+                        }
+                        var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total);
+                        defer method_args.deinit(env.allocator);
+                        try method_args.append(env.allocator, value);
+                        for (m.arguments) |arg| {
+                            const val = try evaluate(arg, env);
+                            try method_args.append(env.allocator, val);
+                        }
+                        const str_builtin2 = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                        const method_fn2 = str_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                        const result2 = method_fn2(method_args.items, env);
+                        return switch (result2) {
                             .value => |val| val,
                             .void => .void,
                         };
                     } else if (value == .iterator) {
                         if (std.mem.eql(u8, m.method, "next")) {
                             return value.iterator.next(env.allocator, &env.arrays, &env.objects);
+                        }
+                        return .{ .void = {} };
+                    } else if (value == .generator) {
+                        if (std.mem.eql(u8, m.method, "next")) {
+                            return try evaluateGeneratorNext(value.generator, env);
+                        } else if (std.mem.eql(u8, m.method, "return")) {
+                            var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                            defer method_args.deinit(env.allocator);
+                            for (m.arguments) |arg| {
+                                try method_args.append(env.allocator, try evaluate(arg, env));
+                            }
+                            return try evaluateGeneratorReturn(value.generator, env, method_args.items);
+                        } else if (std.mem.eql(u8, m.method, "throw")) {
+                            var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                            defer method_args.deinit(env.allocator);
+                            for (m.arguments) |arg| {
+                                try method_args.append(env.allocator, try evaluate(arg, env));
+                            }
+                            return try evaluateGeneratorThrow(value.generator, env, method_args.items);
+                        }
+                        return .{ .void = {} };
+                    } else if (value == .js_object) {
+                        if (value.js_object.properties.get(m.method)) |method_val| {
+                            var js_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                            defer js_args.deinit(env.allocator);
+                            for (m.arguments) |arg| {
+                                try js_args.append(env.allocator, try evaluate(arg, env));
+                            }
+                            return try callFunctionValue(method_val, js_args.items, env, value);
+                        }
+                        if (value.js_object.properties.get("@@type")) |type_val| {
+                            if (type_val == .string) {
+                                const builtin_obj = env.getBuiltinObject(type_val.string) orelse return .{ .void = {} };
+                                const method_fn = builtin_obj.getMethod(m.method) orelse return .{ .void = {} };
+                                if (expanded_method_args) |ema| {
+                                    var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                                    defer ma.deinit(env.allocator);
+                                    try ma.append(env.allocator, value);
+                                    try ma.appendSlice(env.allocator, ema.items);
+                                    const result = method_fn(ma.items, env);
+                                    return switch (result) {
+                                        .value => |val| val,
+                                        .void => .void,
+                                    };
+                                }
+                                var stack_buf: [16]ast.Value = undefined;
+                                stack_buf[0] = value;
+                                const total = 1 + m.arguments.len;
+                                if (total <= 16) {
+                                    for (m.arguments, 0..) |arg, idx| {
+                                        stack_buf[idx + 1] = try evaluate(arg, env);
+                                    }
+                                    const result = method_fn(stack_buf[0..total], env);
+                                    return switch (result) {
+                                        .value => |val| val,
+                                        .void => .void,
+                                    };
+                                }
+                                var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total);
+                                defer method_args.deinit(env.allocator);
+                                try method_args.append(env.allocator, value);
+                                for (m.arguments) |arg| {
+                                    const val = try evaluate(arg, env);
+                                    try method_args.append(env.allocator, val);
+                                }
+                                const result = method_fn(method_args.items, env);
+                                return switch (result) {
+                                    .value => |val| val,
+                                    .void => .void,
+                                };
+                            }
                         }
                         return .{ .void = {} };
                     }
@@ -1822,40 +1950,54 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 const method = builtin_obj.getMethod(m.method) orelse {
                     return error.UndefinedMethod;
                 };
+                if (expanded_method_args) |ema| {
+                    const result = method(ema.items, env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
                 var stack_buf2: [16]ast.Value = undefined;
                 const total2 = m.arguments.len;
                 if (total2 <= 16) {
                     for (m.arguments, 0..) |arg, idx| {
                         stack_buf2[idx] = try evaluate(arg, env);
                     }
-const result = method(stack_buf2[0..total2], env);
-                     return switch (result) {
-                         .value => |val| val,
-                         .void => .void,
-                     };
-                 }
+                    const result = method(stack_buf2[0..total2], env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
                 var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
                 defer args.deinit(env.allocator);
                 for (m.arguments) |arg| {
                     const val = try evaluate(arg, env);
                     try args.append(env.allocator, val);
                 }
-const result = method(args.items, env);
-                 args.clearAndFree(env.allocator);
-                 return switch (result) {
-                     .value => |val| val,
-                     .void => .void,
-                 };
-             }
+                const result = method(args.items, env);
+                args.clearAndFree(env.allocator);
+                return switch (result) {
+                    .value => |val| val,
+                    .void => .void,
+                };
+            }
 
             const value = try evaluate(m.object, env);
             if (value == .array) {
-                const builtin_obj = env.getBuiltinObject("Array") orelse {
-                    return error.UndefinedObject;
-                };
-                const method = builtin_obj.getMethod(m.method) orelse {
-                    return error.UndefinedMethod;
-                };
+                if (expanded_method_args) |ema| {
+                    var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                    defer ma.deinit(env.allocator);
+                    try ma.append(env.allocator, value);
+                    try ma.appendSlice(env.allocator, ema.items);
+                    const arr_obj = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                    const method_fn = arr_obj.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const result = method_fn(ma.items, env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
                 var stack_buf3: [16]ast.Value = undefined;
                 stack_buf3[0] = value;
                 const total3 = 1 + m.arguments.len;
@@ -1863,25 +2005,25 @@ const result = method(args.items, env);
                     for (m.arguments, 0..) |arg, idx| {
                         stack_buf3[idx + 1] = try evaluate(arg, env);
                     }
-                    const result = method(stack_buf3[0..total3], env);
-                    return switch (result) {
+                    const arr_obj3 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                    const method_fn3 = arr_obj3.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const result3 = method_fn3(stack_buf3[0..total3], env);
+                    return switch (result3) {
                         .value => |val| val,
                         .void => .void,
                     };
                 }
-                var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
-                for (m.arguments) |arg| {
-                    const val = try evaluate(arg, env);
-                    try args.append(env.allocator, val);
-                }
-                var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 0);
+                var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total3);
                 defer method_args.deinit(env.allocator);
                 try method_args.append(env.allocator, value);
-                try method_args.appendSlice(env.allocator, args.items);
-                const result = method(method_args.items, env);
-                method_args.clearAndFree(env.allocator);
-                args.clearAndFree(env.allocator);
-                return switch (result) {
+                for (m.arguments) |arg| {
+                    const val = try evaluate(arg, env);
+                    try method_args.append(env.allocator, val);
+                }
+                const arr_obj4 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+                const method_fn4 = arr_obj4.getMethod(m.method) orelse return error.UndefinedMethod;
+                const result4 = method_fn4(method_args.items, env);
+                return switch (result4) {
                     .value => |val| val,
                     .void => .void,
                 };
@@ -1890,8 +2032,37 @@ const result = method(args.items, env);
                     return value.iterator.next(env.allocator, &env.arrays, &env.objects);
                 }
                 return .{ .void = {} };
+            } else if (value == .generator) {
+                if (std.mem.eql(u8, m.method, "next")) {
+                    return try evaluateGeneratorNext(value.generator, env);
+                } else if (std.mem.eql(u8, m.method, "return")) {
+                    var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                    defer method_args.deinit(env.allocator);
+                    for (m.arguments) |arg| {
+                        try method_args.append(env.allocator, try evaluate(arg, env));
+                    }
+                    return try evaluateGeneratorReturn(value.generator, env, method_args.items);
+                } else if (std.mem.eql(u8, m.method, "throw")) {
+                    var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                    defer method_args.deinit(env.allocator);
+                    for (m.arguments) |arg| {
+                        try method_args.append(env.allocator, try evaluate(arg, env));
+                    }
+                    return try evaluateGeneratorThrow(value.generator, env, method_args.items);
+                }
+                return .{ .void = {} };
+            } else if (value == .js_object) {
+                if (value.js_object.properties.get(m.method)) |method_val| {
+                    var js_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                    defer js_args.deinit(env.allocator);
+                    for (m.arguments) |arg| {
+                        try js_args.append(env.allocator, try evaluate(arg, env));
+                    }
+                    return try callFunctionValue(method_val, js_args.items, env, value);
+                }
+                return .{ .void = {} };
             } else if (value == .object) {
-                const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @alignCast(@ptrCast(value.object));
+                const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(value.object));
                 const method = bObjPtr.getMethod(m.method) orelse {
                     return error.UndefinedMethod;
                 };
@@ -1910,6 +2081,74 @@ const result = method(args.items, env);
                     .value => |val| val,
                     .void => .void,
                 };
+            } else if (value == .string) {
+                if (expanded_method_args) |ema| {
+                    var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                    defer ma.deinit(env.allocator);
+                    try ma.append(env.allocator, value);
+                    try ma.appendSlice(env.allocator, ema.items);
+                    const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                    const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const result = method_fn(ma.items, env);
+                    return switch (result) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
+                var stack_buf5: [16]ast.Value = undefined;
+                stack_buf5[0] = value;
+                const total5 = 1 + m.arguments.len;
+                if (total5 <= 16) {
+                    for (m.arguments, 0..) |arg, idx| {
+                        stack_buf5[idx + 1] = try evaluate(arg, env);
+                    }
+                    const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                    const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const result5 = method_fn(stack_buf5[0..total5], env);
+                    return switch (result5) {
+                        .value => |val| val,
+                        .void => .void,
+                    };
+                }
+                var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total5);
+                defer method_args.deinit(env.allocator);
+                try method_args.append(env.allocator, value);
+                for (m.arguments) |arg| {
+                    const val = try evaluate(arg, env);
+                    try method_args.append(env.allocator, val);
+                }
+                const str_builtin2 = env.getBuiltinObject("String") orelse return error.UndefinedObject;
+                const method_fn2 = str_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                const result5 = method_fn2(method_args.items, env);
+                return switch (result5) {
+                    .value => |val| val,
+                    .void => .void,
+                };
+            } else if (value == .function) {
+                const func_node: *ast.Node = @alignCast(@ptrCast(value.function));
+
+                const has_spread = if (expanded_method_args) |ema| ema.items.len > 0 else false;
+                _ = has_spread;
+
+                if (expanded_method_args) |ema| {
+                    return try invokeFunctionNode(func_node, ema.items, env, value);
+                }
+                var mc_stack: [16]ast.Value = undefined;
+                const mc_total = m.arguments.len;
+                if (mc_total <= 16) {
+                    for (m.arguments, 0..) |arg, idx| {
+                        mc_stack[idx] = try evaluate(arg, env);
+                    }
+                    return try invokeFunctionNode(func_node, mc_stack[0..mc_total], env, value);
+                }
+                {
+                    var mc_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, mc_total);
+                    defer mc_args.deinit(env.allocator);
+                    for (m.arguments) |arg| {
+                        try mc_args.append(env.allocator, try evaluate(arg, env));
+                    }
+                    return try invokeFunctionNode(func_node, mc_args.items, env, value);
+                }
             } else {
                 return error.InvalidMethodCall;
             }
@@ -1933,7 +2172,6 @@ const result = method(args.items, env);
             var root = env;
             while (root.outer) |outer| root = outer;
 
-            // Check cache first
             var cached_exports: ?*const std.StringHashMap(ast.Value) = null;
             var cached_functions: ?*const std.StringHashMap(*ast.Node) = null;
 
@@ -1943,8 +2181,7 @@ const result = method(args.items, env);
             }
 
             if (cached_exports == null) {
-                // First import: load, parse, evaluate, cache
-                const content = try Io.Dir.cwd().readFileAlloc(io, full_path, allocator, Io.Limit.limited(10 * 1024 * 1024));
+                const content = try env_mod.Io.Dir.cwd().readFileAlloc(io, full_path, allocator, env_mod.Io.Limit.limited(10 * 1024 * 1024));
                 var resources_stored = false;
                 errdefer if (!resources_stored) allocator.free(content);
 
@@ -1972,8 +2209,7 @@ const result = method(args.items, env);
                     _ = try evaluate(stmt, &module_env);
                 }
 
-                // Store in cache
-                var cache_entry = ModuleCacheEntry{
+                var cache_entry = env_mod.ModuleCacheEntry{
                     .exports = std.StringHashMap(ast.Value).init(allocator),
                     .functions = std.StringHashMap(*ast.Node).init(allocator),
                 };
@@ -1997,7 +2233,6 @@ const result = method(args.items, env);
                 cached_functions = &root.module_cache.get(cache_key).?.functions;
             }
 
-            // Bind exports from cache
             if (i.named_bindings) |bindings| {
                 for (bindings) |binding| {
                     const export_name = binding.name;
@@ -2069,6 +2304,11 @@ const result = method(args.items, env);
 
             return result;
         },
+        .SpreadExpression => {
+            // SpreadExpression should only appear inside array/object literals and function call arguments.
+            // It should never be evaluated as a standalone expression.
+            return error.UnexpectedSpreadExpression;
+        },
     }
 }
 
@@ -2099,11 +2339,249 @@ fn parseAndEvaluateProgram(source: []const u8, env_: *Environment) !ast.Value {
     return result;
 }
 
+fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
+        if (func_node.* == .GeneratorDeclaration) {
+            const gen_decl = func_node.GeneratorDeclaration;
+            const gen_obj = try GeneratorObject.init(env.allocator, @ptrCast(func_node), gen_decl.parameters);
+            errdefer gen_obj.deinit();
+            var gen_env = try Environment.init(env.allocator, env);
+            errdefer gen_env.deinit();
+            for (gen_decl.parameters, 0..) |param, idx| {
+                try gen_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
+            }
+            if (this_val) |tv| {
+                try gen_env.set("this", tv);
+            }
+        gen_obj.gen_env = @ptrCast(try env.allocator.create(Environment));
+        const stored_env: *Environment = @alignCast(@ptrCast(gen_obj.gen_env.?));
+        stored_env.* = gen_env;
+        try env.generators.append(env.allocator, gen_obj);
+        return .{ .generator = gen_obj };
+    }
+        if (func_node.* == .FunctionDeclaration) {
+            const func = func_node.FunctionDeclaration;
+            var func_env = try Environment.init(env.allocator, env);
+            defer func_env.deinit();
+            for (func.parameters, 0..) |param, idx| {
+                try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
+            }
+            if (this_val) |tv| {
+                try func_env.set("this", tv);
+            }
+            return try evaluate(func.body, &func_env);
+        }
+        if (func_node.* == .ArrowFunction) {
+            const func = func_node.ArrowFunction;
+            var func_env = try Environment.init(env.allocator, env);
+            defer func_env.deinit();
+            for (func.parameters, 0..) |param, idx| {
+                try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
+            }
+            return try evaluate(func.body, &func_env);
+        }
+    return error.NotAFunction;
+}
+
+fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
+    switch (val) {
+        .function => |fn_ptr| {
+            const func_node: *ast.Node = @alignCast(@ptrCast(fn_ptr));
+            return try invokeFunctionNode(func_node, args, env, this_val);
+        },
+        .generator => |gen| {
+            return .{ .generator = gen };
+        },
+        else => return error.NotAFunction,
+    }
+}
+
 fn parseProgramNoFree(source: []const u8, env_: *Environment) !struct { statements: []*ast.Node, parser: Parser } {
     var lexer = Lexer.init(source);
     var parser = try Parser.init(&lexer, env_.allocator);
     const statements = try parser.parseProgram();
     return .{ .statements = statements, .parser = parser };
+}
+
+pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) anyerror!ast.Value {
+    if (gen.done) {
+        // Return {value: undefined, done: true}
+        var result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+        errdefer result.deinit();
+        result.properties.put("value", .{ .void = {} }) catch {};
+        result.properties.put("done", .{ .boolean = true }) catch {};
+        caller_env.objects.append(caller_env.allocator, result) catch { result.deinit(); return .{ .void = {} }; };
+        return .{ .js_object = result };
+    }
+
+    const gen_node = @as(*ast.Node, @alignCast(@ptrCast(gen.func_node)));
+    const gen_decl = gen_node.GeneratorDeclaration;
+    const body = gen_decl.body;
+
+    // Get or create the generator's persistent environment
+    var gen_env: *Environment = undefined;
+    if (gen.gen_env) |existing_env| {
+        gen_env = @alignCast(@ptrCast(existing_env));
+    } else {
+        // First call: create and store the environment
+        var new_env = try Environment.init(caller_env.allocator, caller_env);
+        for (gen_decl.parameters, 0..) |param, idx| {
+            _ = idx;
+            try new_env.set(param, .{ .void = {} });
+        }
+        gen.gen_env = @ptrCast(try caller_env.allocator.create(Environment));
+        gen_env = @alignCast(@ptrCast(gen.gen_env.?));
+        gen_env.* = new_env;
+    }
+
+    // Reset flags for this next() call
+    gen_env.return_hit = false;
+    gen_env.yield_hit = false;
+    // yield_star_* are NOT reset here — managed by the yield* handler
+
+    // Get statements from body
+    const statements: []const *ast.Node = switch (body.*) {
+        .BlockStatement => |b| b.statements,
+        else => &[_]*ast.Node{body},
+    };
+
+    var result: ast.Value = .{ .void = {} };
+
+    // Evaluate statements starting from current IP.
+    while (gen.ip < statements.len) {
+        const stmt = statements[gen.ip];
+
+        if (stmt.* == .ReturnStatement) {
+            const ret_stmt = stmt.ReturnStatement;
+            if (ret_stmt.value) |val| {
+                result = try evaluate(val, gen_env);
+            } else {
+                result = .{ .void = {} };
+            }
+            gen.done = true;
+            break;
+        }
+
+        // Reset loop-caught flag before evaluating — loops that catch yield will set it.
+        gen_env.yield_caught_by_loop = false;
+        result = try evaluate(stmt, gen_env);
+
+        // Check if a yield happened. A loop handler may have consumed yield_hit
+        // (reset it to false) and set yield_caught_by_loop=true instead, so we
+        // save the flag before any resets.
+        const yield_caught = gen_env.yield_caught_by_loop;
+
+        if (gen_env.yield_hit or yield_caught) {
+            const yielded = gen_env.yield_value;
+            gen_env.yield_hit = false;
+            gen_env.yield_caught_by_loop = false;
+
+            if (!yield_caught) {
+                // Simple yield not inside a loop — advance past this statement.
+                gen.ip += 1;
+            }
+            // else: loop caught the yield — gen.ip stays on the same statement
+            // so the next next() re-enters the loop.
+
+            var result_obj = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+            errdefer result_obj.deinit();
+            result_obj.properties.put("value", yielded) catch {};
+            result_obj.properties.put("done", .{ .boolean = false }) catch {};
+            caller_env.objects.append(caller_env.allocator, result_obj) catch { result_obj.deinit(); return .{ .void = {} }; };
+            return .{ .js_object = result_obj };
+        }
+
+        // Statement completed without yielding — check for stale yield_caught_by_loop
+        // from nested loops that completed normally, then advance past it.
+        gen_env.yield_caught_by_loop = false;
+        gen.ip += 1;
+
+        if (gen_env.return_hit) {
+            // A return occurred inside the generator — generator is done.
+            // result holds the return value.
+            gen.done = true;
+            // Free gen_env immediately when generator completes
+            if (gen.gen_env) |done_env_ptr| {
+                const done_env: *Environment = @alignCast(@ptrCast(done_env_ptr));
+                done_env.deinit();
+                gen.allocator.destroy(done_env);
+                gen.gen_env = null;
+            }
+            var done_result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+            errdefer done_result.deinit();
+            done_result.properties.put("value", result) catch {};
+            done_result.properties.put("done", .{ .boolean = true }) catch {};
+            caller_env.objects.append(caller_env.allocator, done_result) catch { done_result.deinit(); return .{ .void = {} }; };
+            return .{ .js_object = done_result };
+        }
+    }
+
+    // No more statements - generator is done
+    if (gen.ip >= statements.len) {
+        gen.done = true;
+    }
+
+    // Free gen_env immediately when generator completes
+    if (gen.gen_env) |done_env_ptr| {
+        const done_env: *Environment = @alignCast(@ptrCast(done_env_ptr));
+        done_env.deinit();
+        gen.allocator.destroy(done_env);
+        gen.gen_env = null;
+    }
+
+    // Return {value: result, done: true} — result holds the return value if a ReturnStatement was hit
+    var done_result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+    errdefer done_result.deinit();
+    done_result.properties.put("value", result) catch {};
+    done_result.properties.put("done", .{ .boolean = true }) catch {};
+    caller_env.objects.append(caller_env.allocator, done_result) catch { done_result.deinit(); return .{ .void = {} }; };
+    return .{ .js_object = done_result };
+}
+
+pub fn evaluateGeneratorReturn(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    const value = if (args.len > 0) args[0] else @as(ast.Value, .{ .void = {} });
+
+    if (gen.done) {
+        var result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+        errdefer result.deinit();
+        result.properties.put("value", value) catch {};
+        result.properties.put("done", .{ .boolean = true }) catch {};
+        caller_env.objects.append(caller_env.allocator, result) catch { result.deinit(); return .{ .void = {} }; };
+        return .{ .js_object = result };
+    }
+
+    gen.done = true;
+    if (gen.gen_env) |env_ptr| {
+        const done_env: *Environment = @alignCast(@ptrCast(env_ptr));
+        done_env.deinit();
+        gen.allocator.destroy(done_env);
+        gen.gen_env = null;
+    }
+
+    var result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
+    errdefer result.deinit();
+    result.properties.put("value", value) catch {};
+    result.properties.put("done", .{ .boolean = true }) catch {};
+    caller_env.objects.append(caller_env.allocator, result) catch { result.deinit(); return .{ .void = {} }; };
+    return .{ .js_object = result };
+}
+
+pub fn evaluateGeneratorThrow(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    _ = caller_env;
+    _ = args;
+
+    if (gen.done) {
+        return error.ExceptionThrown;
+    }
+
+    gen.done = true;
+    if (gen.gen_env) |env_ptr| {
+        const done_env: *Environment = @alignCast(@ptrCast(env_ptr));
+        done_env.deinit();
+        gen.allocator.destroy(done_env);
+        gen.gen_env = null;
+    }
+
+    return error.ExceptionThrown;
 }
 
 // --- Environment tests ---
@@ -2788,4 +3266,137 @@ test "var in nested block updates function scope" {
     const result = env_.get("x");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(i64, 99), result.?.integer);
+}
+
+test "findIndex with inline arrow function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [5, 12, 8, 130, 44];
+        \\arr.findIndex((x) => x > 13)
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 3), result.integer);
+}
+
+test "findIndex with inline function - no match" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [1, 2, 3];
+        \\arr.findIndex((x) => x > 100)
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, -1), result.integer);
+}
+
+test "filter with inline arrow function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [3, -1, 1, 4];
+        \\arr.filter((num) => num > 0)
+    , &env_);
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 3), result.array.elements.items.len);
+    try std.testing.expectEqual(@as(i64, 3), result.array.elements.items[0].integer);
+}
+
+test "findIndex with arr param" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [3, 1, 4];
+        \\arr.findIndex((num, idx, a) => num > a[1])
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 0), result.integer);
+}
+
+test "findIndex with arr.length" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [3, 1, 4];
+        \\arr.findIndex((num, idx, a) => idx < a.length - 1)
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 0), result.integer);
+}
+
+test "findIndex with block body return" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [1, 3, 2];
+        \\arr.findIndex((x) => {
+        \\  return x > 2;
+        \\})
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 1), result.integer);
+}
+
+test "findIndex with if return block" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [1, 3, 2];
+        \\arr.findIndex((x) => {
+        \\  if (x > 2) return true;
+        \\  return false;
+        \\})
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 1), result.integer);
+}
+
+test "findIndex simple trough" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const arr = [3, 1, 4];
+        \\arr.findIndex((num, idx, a) => {
+        \\  if (idx > 0 && num >= a[idx - 1]) return false;
+        \\  if (idx < a.length - 1 && num >= a[idx + 1]) return false;
+        \\  return true;
+        \\})
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 1), result.integer);
+}
+
+test "filter + findIndex chained with inline arrow functions" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluateProgram(
+        \\const numbers = [3, -1, 1, 4, 1, 5, 9, 2, 6];
+        \\numbers
+        \\  .filter((num) => num > 0)
+        \\  .findIndex((num, idx, arr) => {
+        \\    if (idx > 0 && num >= arr[idx - 1]) return false;
+        \\    if (idx < arr.length - 1 && num >= arr[idx + 1]) return false;
+        \\    return true;
+        \\  })
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 1), result.integer);
 }
