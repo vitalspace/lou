@@ -536,6 +536,15 @@ pub const Parser = struct {
         defer elements.deinit(this.allocator);
 
         while (this.current_token.type != .RBracket) {
+            if (this.current_token.type == .Comma or this.current_token.type == .RBracket) {
+                const elision = try this.allocator.create(ast.Node);
+                elision.* = .{ .Elision = {} };
+                try elements.append(this.allocator, elision);
+                if (this.current_token.type == .RBracket) break;
+                this.nextToken(); // consume ','
+                continue;
+            }
+
             const element = if (this.current_token.type == .DotDotDot) blk: {
                 this.nextToken(); // consume '...'
                 const expr = try this.parseExpression();
