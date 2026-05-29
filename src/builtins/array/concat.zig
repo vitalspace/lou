@@ -28,15 +28,11 @@ pub fn Concat(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
         return .{ .value = .{ .void = {} } };
     };
 
-    for (source.elements.items) |elem| {
-        new_array.elements.appendAssumeCapacity(elem);
-    }
+    new_array.elements.appendSliceAssumeCapacity(source.elements.items);
 
     for (args[1..]) |arg| {
         if (arg == .array) {
-            for (arg.array.elements.items) |elem| {
-                new_array.elements.appendAssumeCapacity(elem);
-            }
+            new_array.elements.appendSliceAssumeCapacity(arg.array.elements.items);
         } else {
             new_array.elements.appendAssumeCapacity(arg);
         }
