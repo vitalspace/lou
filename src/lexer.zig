@@ -72,12 +72,15 @@ pub const TokenType = enum {
     For,
     While,
     In,
+    Of,
     Break,
     Continue,
     Switch,
     Case,
     Default,
     Match,
+    Yield,
+    New,
 
     // Module system
     Import,
@@ -96,6 +99,7 @@ pub const TokenType = enum {
     Comma,
     Dot,
     DotDot, // ..
+    DotDotDot, // ...
 
     // Special
     Arrow, // =>
@@ -274,8 +278,11 @@ pub const Lexer = struct {
             '.' => blk: {
                 if (this.peekChar() == '.') {
                     this.readChar();
-                    this.readChar();
-                    return .{ .type = .DotDot, .literal = ".." };
+                    if (this.peekChar() == '.') {
+                        this.readChar();
+                        break :blk .{ .type = .DotDotDot, .literal = "..." };
+                    }
+                    break :blk .{ .type = .DotDot, .literal = ".." };
                 } else {
                     break :blk .{ .type = .Dot, .literal = "." };
                 }
@@ -419,16 +426,19 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "for", .For },
         .{ "while", .While },
         .{ "in", .In },
+        .{ "of", .Of },
         .{ "break", .Break },
         .{ "continue", .Continue },
         .{ "switch", .Switch },
         .{ "case", .Case },
         .{ "default", .Default },
         .{ "match", .Match },
+        .{ "yield", .Yield },
         .{ "import", .Import },
         .{ "from", .From },
         .{ "as", .As },
         .{ "export", .Export },
+        .{ "new", .New },
     });
     return map.get(literal) orelse .Identifier;
 }
@@ -947,6 +957,35 @@ test "range with dotdot" {
         .{ .type = .Identifier, .literal = "print" },
         .{ .type = .LParen, .literal = "(" },
         .{ .type = .Identifier, .literal = "i" },
+        .{ .type = .RParen, .literal = ")" },
+        .{ .type = .Semicolon, .literal = ";" },
+        .{ .type = .RBrace, .literal = "}" },
+        .{ .type = .EOF, .literal = "" },
+    };
+
+    for (expected) |exp| {
+        const tok = lexer.nextToken();
+        try std.testing.expectEqual(exp.type, tok.type);
+        try std.testing.expectEqualSlices(u8, exp.literal, tok.literal);
+    }
+}
+
+test "for...of loop" {
+    const input = "for (const x of arr) { print(x); }";
+    var lexer = Lexer.init(input);
+
+    const expected = [_]struct { type: TokenType, literal: []const u8 }{
+        .{ .type = .For, .literal = "for" },
+        .{ .type = .LParen, .literal = "(" },
+        .{ .type = .Const, .literal = "const" },
+        .{ .type = .Identifier, .literal = "x" },
+        .{ .type = .Of, .literal = "of" },
+        .{ .type = .Identifier, .literal = "arr" },
+        .{ .type = .RParen, .literal = ")" },
+        .{ .type = .LBrace, .literal = "{" },
+        .{ .type = .Identifier, .literal = "print" },
+        .{ .type = .LParen, .literal = "(" },
+        .{ .type = .Identifier, .literal = "x" },
         .{ .type = .RParen, .literal = ")" },
         .{ .type = .Semicolon, .literal = ";" },
         .{ .type = .RBrace, .literal = "}" },
