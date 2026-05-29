@@ -19,6 +19,7 @@ inline fn freeValue(value: ast.Value) void {
         .iterator => |it| it.deinit(),
         .js_object => |obj| obj.deinit(),
         .symbol => |sym| sym.deinit(),
+        .hole => {},
         else => {},
     }
 }
