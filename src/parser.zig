@@ -29,12 +29,22 @@ pub const Parser = struct {
         return p;
     }
 
+    fn isPropertyName(tok_type: TokenType) bool {
+        return switch (tok_type) {
+            .Identifier => true,
+            .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn,
+            .Return, .If, .Else, .For, .While, .In, .Break, .Continue,
+            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export => true,
+            else => false,
+        };
+    }
+
     pub fn deinit(this: *Parser) void {
         this.arena.deinit();
         this.arena_child.destroy(this.arena);
     }
 
-    pub fn parseExpression(this: *Parser) !*ast.Node {
+    pub fn parseExpression(this: *Parser) anyerror!*ast.Node {
         return try this.parsePrecedece(.lowest);
     }
 
@@ -191,13 +201,14 @@ pub const Parser = struct {
     }
 
     fn parsePrimary(this: *Parser) !*ast.Node {
+        var base: *ast.Node = undefined;
         switch (this.current_token.type) {
-            .Integer => return try this.parseIntegerLiteral(),
-            .Float => return try this.parseFloatLiteral(),
-            .String => return try this.parseStringLiteral(),
-            .TemplateString => return try this.parseStringLiteral(),
-            .True => return try this.parseBooleanLiteral(true),
-            .False => return try this.parseBooleanLiteral(false),
+            .Integer => base = try this.parseIntegerLiteral(),
+            .Float => base = try this.parseFloatLiteral(),
+            .String => base = try this.parseStringLiteral(),
+            .TemplateString => base = try this.parseStringLiteral(),
+            .True => base = try this.parseBooleanLiteral(true),
+            .False => base = try this.parseBooleanLiteral(false),
             .Null, .Undefined => {
                 const node = try this.allocator.create(ast.Node);
                 if (this.current_token.type == .Null) {
@@ -206,69 +217,68 @@ pub const Parser = struct {
                     node.* = .{ .VoidLiteral = .{} };
                 }
                 this.nextToken();
-                return node;
+                base = node;
             },
             .LBracket => {
-                var base = try this.parseArrayLiteral();
-
-                // Postfix chain: .prop, [index], (args)
-                while (true) {
-                    if (this.current_token.type == .LBracket) {
-                        base = try this.parseArrayIndex(base);
-                    } else if (this.current_token.type == .Dot) {
-                        base = try this.parseMemberAccessOrCall(base);
-                    } else if (this.current_token.type == .LParen) {
-                        base = try this.parseFunctionCallFromBase(base);
-                    } else {
-                        break;
-                    }
-                }
-
-                return base;
+                base = try this.parseArrayLiteral();
             },
             .Identifier => {
-                var base = try this.parseIdentifier();
-
-                // Postfix chain: .prop, [index], (args)
-                while (true) {
-                    if (this.current_token.type == .LBracket) {
-                        base = try this.parseArrayIndex(base);
-                    } else if (this.current_token.type == .Dot) {
-                        base = try this.parseMemberAccessOrCall(base);
-                    } else if (this.current_token.type == .LParen) {
-                        base = try this.parseFunctionCallFromBase(base);
-                    } else {
-                        break;
-                    }
-                }
-
-                // Post-increment: i++
-                if (this.current_token.type == .Increment and base.* == .Identifier) {
-                    this.nextToken(); // consume ++
-                    const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .Assignment = .{
-                        .name = base.Identifier.name,
-                        .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Plus, .{ .FloatLiteral = .{ .value = 1.0 } }),
-                    } };
-                    ast.freeAst(this.allocator, base);
-                    return node;
-                }
-
-                // Post-decrement: i--
-                if (this.current_token.type == .Decrement and base.* == .Identifier) {
-                    this.nextToken(); // consume --
-                    const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .Assignment = .{
-                        .name = base.Identifier.name,
-                        .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Minus, .{ .FloatLiteral = .{ .value = 1.0 } }),
-                    } };
-                    ast.freeAst(this.allocator, base);
-                    return node;
-                }
-
-                return base;
+                base = try this.parseIdentifier();
             },
-            .LParen => return try this.parseArrowFunction(),
+            .LBrace => {
+                base = try this.parseObjectLiteral();
+            },
+            .Fn => {
+                base = try this.parseFunctionDeclaration();
+            },
+            .Yield => {
+                base = try this.parseYieldExpression();
+            },
+            .New => {
+                this.nextToken(); // consume 'new'
+                // Parse just the callee identifier, not a full primary expression
+                if (this.current_token.type != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const callee_name = this.current_token.literal;
+                this.nextToken(); // consume identifier
+                const callee = try this.allocator.create(ast.Node);
+                callee.* = .{ .Identifier = .{ .name = callee_name } };
+                var arguments: []*ast.Node = &.{};
+                if (this.current_token.type == .LParen) {
+                    this.nextToken(); // consume '('
+                    var args = try this.parseCallArguments();
+                    defer args.deinit(this.allocator);
+                    arguments = try args.toOwnedSlice(this.allocator);
+                    this.nextToken(); // consume ')'
+                }
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .NewExpression = .{
+                    .callee = callee,
+                    .arguments = arguments,
+                } };
+                base = node;
+            },
+            .LParen => {
+                // Try arrow function first; if it fails, parse as grouped expression
+                const saved_lexer = this.lexer.*;
+                const saved_current = this.current_token;
+                const saved_peek = this.peek_token;
+
+                if (this.parseArrowFunction()) |result| {
+                    base = result;
+                } else |_| {
+                    this.lexer.* = saved_lexer;
+                    this.current_token = saved_current;
+                    this.peek_token = saved_peek;
+                    this.nextToken(); // consume '('
+                    base = try this.parseExpression();
+                    if (this.current_token.type != .RParen) {
+                        return error.ExpectedRParen;
+                    }
+                    this.nextToken(); // consume ')'
+                }
+            },
             .Increment => {
                 // Handle pre-increment operator like ++i
                 this.nextToken();
@@ -318,19 +328,6 @@ pub const Parser = struct {
                     return error.UnexpectedToken;
                 }
             },
-            .LBrace => {
-                var base = try this.parseObjectLiteral();
-                while (true) {
-                    if (this.current_token.type == .LBracket) {
-                        base = try this.parseArrayIndex(base);
-                    } else if (this.current_token.type == .Dot) {
-                        base = try this.parseMemberAccessOrCall(base);
-                    } else {
-                        break;
-                    }
-                }
-                return base;
-            },
             .Not => {
                 // Handle logical NOT operator like !x
                 this.nextToken();
@@ -359,6 +356,43 @@ pub const Parser = struct {
             },
             else => return error.UnexpectedToken,
         }
+
+        // Postfix chain: .prop, [index], (args)
+        while (true) {
+            if (this.current_token.type == .LBracket) {
+                base = try this.parseArrayIndex(base);
+            } else if (this.current_token.type == .Dot) {
+                base = try this.parseMemberAccessOrCall(base);
+            } else if (this.current_token.type == .LParen) {
+                base = try this.parseFunctionCallFromBase(base);
+            } else {
+                break;
+            }
+        }
+
+        // Post-increment: i++
+        if (this.current_token.type == .Increment and base.* == .Identifier) {
+            this.nextToken(); // consume ++
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .Assignment = .{
+                .name = base.Identifier.name,
+                .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Plus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+            } };
+            return node;
+        }
+
+        // Post-decrement: i--
+        if (this.current_token.type == .Decrement and base.* == .Identifier) {
+            this.nextToken(); // consume --
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .Assignment = .{
+                .name = base.Identifier.name,
+                .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Minus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+            } };
+            return node;
+        }
+
+        return base;
     }
 
     fn parseBinaryExpression(this: *Parser, left: ast.Node, op: TokenType, right: ast.Node) !*ast.Node {
@@ -389,11 +423,103 @@ pub const Parser = struct {
         return node;
     }
 
+    fn isHexDigit(c: u8) bool {
+        return switch (c) {
+            '0'...'9', 'a'...'f', 'A'...'F' => true,
+            else => false,
+        };
+    }
+
+    fn isHexDigits(slice: []const u8) bool {
+        for (slice) |c| if (!isHexDigit(c)) return false;
+        return true;
+    }
+
+    fn encodeSurrogate(cp: u21) [3]u8 {
+        return [_]u8{
+            @as(u8, 0xE0) | @as(u8, @intCast((cp >> 12) & 0x0F)),
+            @as(u8, 0x80) | @as(u8, @intCast((cp >> 6) & 0x3F)),
+            @as(u8, 0x80) | @as(u8, @intCast(cp & 0x3F)),
+        };
+    }
+
     fn parseStringLiteral(this: *Parser) !*ast.Node {
+        const raw = this.current_token.literal;
         const node = try this.allocator.create(ast.Node);
-        node.* = .{ .StringLiteral = .{ .value = this.current_token.literal } };
+        node.* = if (std.mem.indexOfScalar(u8, raw, '\\')) |_|
+            .{ .StringLiteral = .{ .value = try this.processStringEscapes(raw) } }
+        else
+            .{ .StringLiteral = .{ .value = raw } };
         this.nextToken();
         return node;
+    }
+
+    fn processStringEscapes(this: *Parser, raw: []const u8) ![]const u8 {
+        var buf = std.ArrayList(u8).initCapacity(this.allocator, raw.len) catch { return raw; };
+        errdefer buf.deinit(this.allocator);
+        var i: usize = 0;
+        while (i < raw.len) {
+            if (raw[i] == '\\' and i + 1 < raw.len) {
+                switch (raw[i + 1]) {
+                    'n' => try buf.append(this.allocator, '\n'),
+                    't' => try buf.append(this.allocator, '\t'),
+                    'r' => try buf.append(this.allocator, '\r'),
+                    '\\' => try buf.append(this.allocator, '\\'),
+                    '\'' => try buf.append(this.allocator, '\''),
+                    '"' => try buf.append(this.allocator, '"'),
+                    '0' => try buf.append(this.allocator, 0),
+                    'u' => {
+                        if (i + 5 < raw.len and isHexDigits(raw[i + 2 .. i + 6])) {
+                            const hi = std.fmt.parseInt(u21, raw[i + 2 .. i + 6], 16) catch unreachable;
+                            if (hi >= 0xD800 and hi <= 0xDBFF and i + 11 < raw.len and raw[i + 6] == '\\' and raw[i + 7] == 'u' and isHexDigits(raw[i + 8 .. i + 12])) {
+                                const lo = std.fmt.parseInt(u21, raw[i + 8 .. i + 12], 16) catch unreachable;
+                                if (lo >= 0xDC00 and lo <= 0xDFFF) {
+                                    const cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                                    var encoded: [4]u8 = undefined;
+                                    const len = std.unicode.utf8Encode(cp, &encoded) catch {
+                                        try buf.append(this.allocator, '\\');
+                                        try buf.append(this.allocator, 'u');
+                                        i += 2;
+                                        continue;
+                                    };
+                                    try buf.appendSlice(this.allocator, encoded[0..len]);
+                                    i += 12;
+                                    continue;
+                                }
+                            }
+                            if (hi >= 0xD800 and hi <= 0xDFFF) {
+                                try buf.appendSlice(this.allocator, &encodeSurrogate(hi));
+                            } else {
+                                var encoded: [4]u8 = undefined;
+                                const len = std.unicode.utf8Encode(hi, &encoded) catch {
+                                    try buf.append(this.allocator, '\\');
+                                    try buf.append(this.allocator, 'u');
+                                    i += 2;
+                                    continue;
+                                };
+                                try buf.appendSlice(this.allocator, encoded[0..len]);
+                            }
+                            i += 6;
+                            continue;
+                        }
+                        try buf.append(this.allocator, '\\');
+                        try buf.append(this.allocator, 'u');
+                        i += 2;
+                        continue;
+                    },
+                    else => {
+                        try buf.append(this.allocator, raw[i + 1]);
+                        i += 2;
+                        continue;
+                    },
+                }
+                i += 2;
+            } else {
+                try buf.append(this.allocator, raw[i]);
+                i += 1;
+            }
+        }
+        return buf.toOwnedSlice(this.allocator);
     }
 
     fn parseBooleanLiteral(this: *Parser, value: bool) !*ast.Node {
@@ -410,7 +536,14 @@ pub const Parser = struct {
         defer elements.deinit(this.allocator);
 
         while (this.current_token.type != .RBracket) {
-            const element = try this.parseExpression();
+            const element = if (this.current_token.type == .DotDotDot) blk: {
+                this.nextToken(); // consume '...'
+                const expr = try this.parseExpression();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .SpreadExpression = .{ .value = expr } };
+                break :blk node;
+            } else try this.parseExpression();
+
             try elements.append(this.allocator, element);
 
             if (this.current_token.type == .RBracket) break;
@@ -438,6 +571,22 @@ pub const Parser = struct {
         defer properties.deinit(this.allocator);
 
         while (this.current_token.type != .RBrace and this.current_token.type != .EOF) {
+            // Handle spread property: {...expr}
+            if (this.current_token.type == .DotDotDot) {
+                this.nextToken(); // consume '...'
+                const expr = try this.parseExpression();
+                const spread_node = try this.allocator.create(ast.Node);
+                spread_node.* = .{ .SpreadExpression = .{ .value = expr } };
+                try properties.append(this.allocator, .{ .key = "", .value = spread_node });
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                } else if (this.current_token.type != .RBrace) {
+                    return error.ExpectedCommaOrRBrace;
+                }
+                continue;
+            }
+
             const key = switch (this.current_token.type) {
                 .String => this.current_token.literal,
                 .Identifier => this.current_token.literal,
@@ -483,6 +632,53 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume '('
 
+        // Check for for...of pattern: for (const/var/let identifier of expr)
+        if (this.current_token.type == .Const or this.current_token.type == .Var or this.current_token.type == .Let) {
+            // Save lexer state for backtracking
+            const saved_lexer = this.lexer.*;
+            const saved_current = this.current_token;
+            const saved_peek = this.peek_token;
+
+            const decl_kind = this.current_token.type;
+            this.nextToken(); // consume const/var/let
+
+            if (this.current_token.type == .Identifier) {
+                const variable = this.current_token.literal;
+                this.nextToken(); // consume identifier
+
+                if (this.current_token.type == .Of) {
+                    this.nextToken(); // consume 'of'
+                    const iterable = try this.parseExpression();
+
+                    if (this.current_token.type != .RParen) {
+                        return error.ExpectedRParen;
+                    }
+                    this.nextToken(); // consume ')'
+
+                    const body = try this.parseStatement();
+
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .ForOfLoop = .{
+                        .kind = switch (decl_kind) {
+                            .Const => .Const,
+                            .Var => .Var,
+                            .Let => .Let,
+                            else => unreachable,
+                        },
+                        .variable = variable,
+                        .iterable = iterable,
+                        .body = body,
+                    } };
+                    return node;
+                }
+            }
+
+            // Not a for...of, restore state and fall through to regular for loop parsing
+            this.lexer.* = saved_lexer;
+            this.current_token = saved_current;
+            this.peek_token = saved_peek;
+        }
+
         // Parse initialization (optional)
         var init_stmt: ?*ast.Node = null;
         if (this.current_token.type != .Semicolon) {
@@ -515,7 +711,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume ';'
 
-        // Parse increment (optional) - debe ser una expresión, no un statement
+        // Parse increment (optional)
         var increment: ?*ast.Node = null;
         if (this.current_token.type != .RParen) {
             increment = try this.parseExpression();
@@ -626,14 +822,28 @@ pub const Parser = struct {
     }
 
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
+        // Check if this is a generator function (function* or fn*)
+        var is_generator = false;
+        if (this.peek_token.type == .Multiply) {
+            is_generator = true;
+            this.nextToken(); // consume 'function'/'fn'
+            this.nextToken(); // consume '*'
+        }
+
         var name: []const u8 = "";
-        if (this.peek_token.type == .Identifier) {
+        if (this.current_token.type == .Identifier) {
+            name = this.current_token.literal;
+            this.nextToken(); // consume identifier
+        } else if (this.peek_token.type == .Identifier) {
             this.nextToken(); // consume 'fn'
             name = this.current_token.literal;
             this.nextToken(); // consume identifier
-        } else {
+    } else {
+        if (!is_generator) {
             this.nextToken(); // consume 'fn' (anonymous function)
         }
+        // For anonymous generators, 'fn' and '*' are already consumed above
+    }
 
         if (this.current_token.type != .LParen) {
             return error.ExpectedLParen;
@@ -660,6 +870,16 @@ pub const Parser = struct {
         this.nextToken(); // consume ')'
 
         const body = try this.parseStatement();
+
+        if (is_generator) {
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .GeneratorDeclaration = .{
+                .name = name,
+                .parameters = try parameters.toOwnedSlice(this.allocator),
+                .body = body,
+            } };
+            return node;
+        }
 
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .FunctionDeclaration = .{
@@ -713,7 +933,7 @@ pub const Parser = struct {
 
         this.nextToken(); // consume '.'
 
-        if (this.current_token.type != .Identifier) {
+        if (!isPropertyName(this.current_token.type)) {
             return error.ExpectedIdentifier;
         }
 
@@ -724,28 +944,8 @@ pub const Parser = struct {
         if (this.current_token.type == .LParen) {
             this.nextToken(); // consume '('
 
-            var arguments = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+            var arguments = try this.parseCallArguments();
             defer arguments.deinit(this.allocator);
-            errdefer {
-                for (arguments.items) |arg| {
-                    ast.freeAst(this.allocator, arg);
-                }
-            }
-
-            while (this.current_token.type != .RParen) {
-                const arg = try this.parseExpression();
-                // ⭐ CRÍTICO: errdefer INMEDIATAMENTE después de parsear
-                errdefer ast.freeAst(this.allocator, arg);
-
-                try arguments.append(this.allocator, arg);
-
-                if (this.current_token.type == .RParen) break;
-
-                if (this.current_token.type != .Comma) {
-                    return error.ExpectedComma;
-                }
-                this.nextToken(); // consume ','
-            }
             this.nextToken(); // consume ')'
 
             const node = try this.allocator.create(ast.Node);
@@ -762,43 +962,6 @@ pub const Parser = struct {
         node.* = .{ .MemberAccess = .{
             .object = object,
             .property = property,
-        } };
-        return node;
-    }
-
-    fn parseFunctionCall(this: *Parser) anyerror!*ast.Node {
-        const name = this.current_token.literal;
-        this.nextToken(); // consume identifier
-        this.nextToken(); // consume '('
-
-        var arguments = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
-        defer arguments.deinit(this.allocator);
-        errdefer {
-            for (arguments.items) |arg| {
-                ast.freeAst(this.allocator, arg);
-            }
-        }
-
-        while (this.current_token.type != .RParen) {
-            const arg = try this.parseExpression();
-            // ⭐ CRÍTICO: errdefer INMEDIATAMENTE después de parsear
-            errdefer ast.freeAst(this.allocator, arg);
-
-            try arguments.append(this.allocator, arg);
-
-            if (this.current_token.type == .RParen) break;
-
-            if (this.current_token.type != .Comma) {
-                return error.ExpectedComma;
-            }
-            this.nextToken(); // consume ','
-        }
-        this.nextToken(); // consume ')'
-
-        const node = try this.allocator.create(ast.Node);
-        node.* = .{ .FunctionCall = .{
-            .name = name,
-            .arguments = try arguments.toOwnedSlice(this.allocator),
         } };
         return node;
     }
@@ -824,27 +987,52 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parseFunctionCallFromBase(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
-        if (base.* != .Identifier) {
-            ast.freeAst(this.allocator, base);
-            return error.InvalidFunctionCall;
+    fn parseYieldExpression(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'yield'
+
+        var is_star = false;
+        if (this.current_token.type == .Multiply) {
+            is_star = true;
+            this.nextToken(); // consume '*'
         }
 
-        const name = base.Identifier.name;
-        ast.freeAst(this.allocator, base);
-        this.nextToken(); // consume '('
+        var value: ?*ast.Node = null;
+        // Check if there's an expression after yield
+        if (this.current_token.type != .Semicolon and
+            this.current_token.type != .RBrace and
+            this.current_token.type != .EOF and
+            this.current_token.type != .RParen and
+            this.current_token.type != .Comma)
+        {
+            value = try this.parseExpression();
+        }
 
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .YieldExpression = .{
+            .value = value,
+            .is_star = is_star,
+        } };
+        return node;
+    }
+
+    fn parseCallArguments(this: *Parser) !std.ArrayList(*ast.Node) {
         var arguments = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
-        defer arguments.deinit(this.allocator);
         errdefer {
             for (arguments.items) |arg| {
                 ast.freeAst(this.allocator, arg);
             }
+            arguments.deinit(this.allocator);
         }
 
         while (this.current_token.type != .RParen) {
-            const arg = try this.parseExpression();
-            // ⭐ CRÍTICO: errdefer INMEDIATAMENTE después de parsear
+            const arg = if (this.current_token.type == .DotDotDot) blk: {
+                this.nextToken(); // consume '...'
+                const expr = try this.parseExpression();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .SpreadExpression = .{ .value = expr } };
+                break :blk node;
+            } else try this.parseExpression();
+
             errdefer ast.freeAst(this.allocator, arg);
 
             try arguments.append(this.allocator, arg);
@@ -856,11 +1044,55 @@ pub const Parser = struct {
             }
             this.nextToken(); // consume ','
         }
+
+        return arguments;
+    }
+
+    fn parseFunctionCall(this: *Parser) anyerror!*ast.Node {
+        const name = this.current_token.literal;
+        this.nextToken(); // consume identifier
+        this.nextToken(); // consume '('
+
+        var arguments = try this.parseCallArguments();
+        defer arguments.deinit(this.allocator);
         this.nextToken(); // consume ')'
 
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .FunctionCall = .{
             .name = name,
+            .arguments = try arguments.toOwnedSlice(this.allocator),
+        } };
+        return node;
+    }
+
+    fn parseFunctionCallFromBase(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
+        if (base.* == .Identifier) {
+            const name = base.Identifier.name;
+            ast.freeAst(this.allocator, base);
+            this.nextToken(); // consume '('
+
+            var arguments = try this.parseCallArguments();
+            defer arguments.deinit(this.allocator);
+            this.nextToken(); // consume ')'
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .FunctionCall = .{
+                .name = name,
+                .arguments = try arguments.toOwnedSlice(this.allocator),
+            } };
+            return node;
+        }
+
+        // Non-identifier base (e.g. (function*() { ... })()) — create DirectCall node
+        this.nextToken(); // consume '('
+
+        var arguments = try this.parseCallArguments();
+        defer arguments.deinit(this.allocator);
+        this.nextToken(); // consume ')'
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .DirectCall = .{
+            .callee = base,
             .arguments = try arguments.toOwnedSlice(this.allocator),
         } };
         return node;
