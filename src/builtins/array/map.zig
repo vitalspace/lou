@@ -60,6 +60,10 @@ pub fn Map(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     defer func_env.deinit();
 
     for (source.elements.items, 0..) |element, i| {
+        if (element == .hole) {
+            result.elements.appendAssumeCapacity(.{ .hole = {} });
+            continue;
+        }
         func_env.return_hit = false;
         if (func_params.len > 0) func_env.setVar(func_params[0], element) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], .{ .integer = @intCast(i) }) catch {};
