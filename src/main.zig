@@ -11,6 +11,7 @@ const VM = @import("vm.zig").VM;
 const Compiler = @import("vm.zig").Compiler;
 const Chunk = @import("vm.zig").Chunk;
 const initSimboloObject = @import("builtins/symbol.zig").initSimboloObject;
+const TypeChecker = @import("type_checker.zig").TypeChecker;
 
 const use_vm = false;
 
@@ -111,6 +112,23 @@ pub fn main(init: std.process.Init) !void {
     var parser = try Parser.init(&lexer, allocator);
     defer parser.deinit();
     const program = try parser.parseProgram();
+
+    // --- Type checking pass ---
+    // File extension policy:
+    //   .lou, .ts → run type checking pass
+    //   .js       → skip type checking (plain JavaScript interop)
+    //   other     → skip type checking
+    const ext = if (std.mem.lastIndexOfScalar(u8, filePath, '.')) |dot_idx| filePath[dot_idx..] else "";
+    const should_typecheck = std.mem.eql(u8, ext, ".lou") or std.mem.eql(u8, ext, ".ts");
+
+    if (should_typecheck) {
+        var type_checker = TypeChecker.init(allocator, filePath);
+        try type_checker.check(program);
+        if (type_checker.has_errors) {
+            std.debug.print("Type checking failed for: {s}\n", .{filePath});
+            return;
+        }
+    }
 
     var env_ = try Environment.initWithIo(allocator, null, io);
     defer env_.deinit();
