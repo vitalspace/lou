@@ -114,6 +114,7 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
         },
         .void => right == .void,
         .null => right == .null,
+        .hole => right == .void,
         .closure => right == .closure,
         .iterator => right == .iterator,
         .js_object => right == .js_object,
@@ -199,6 +200,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         },
                         else => {},
                     }
+                } else if (elem.* == .Elision) {
+                    try array_obj.elements.append(env.allocator, .{ .hole = {} });
                 } else {
                     const val = try evaluate(elem, env);
                     try array_obj.elements.append(env.allocator, val);
@@ -298,6 +301,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 else => return error.InvalidIndex,
             };
             if (array_val.array.get(index)) |value| {
+                if (value == .hole) return .{ .void = {} };
                 return value;
             } else {
                 return error.IndexOutOfBounds;
@@ -2308,6 +2312,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             // SpreadExpression should only appear inside array/object literals and function call arguments.
             // It should never be evaluated as a standalone expression.
             return error.UnexpectedSpreadExpression;
+        },
+        .Elision => {
+            // Elision should only appear inside array literals.
+            return error.UnexpectedElision;
         },
     }
 }
