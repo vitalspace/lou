@@ -34,6 +34,7 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
                 out.print("{s} ]{s}", .{ Gy, Reset }) catch {};
             }
         },
+        .hole => out.print("{s}<empty>{s}", .{ D, Reset }) catch {},
         .void => out.print("{s}undefined{s}", .{ D, Reset }) catch {},
         .null => out.print("{s}null{s}", .{ D, Reset }) catch {},
         .object => out.print("{s}[object]{s}", .{ C, Reset }) catch {},
