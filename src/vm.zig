@@ -392,6 +392,9 @@ pub const Compiler = struct {
                 }
                 self.c.emitC(.{ .function = @ptrCast(n) });
             },
+            .Elision => {
+                self.c.emitC(.{ .hole = {} });
+            },
             else => {},
         }
     }
@@ -749,7 +752,7 @@ pub const VM = struct {
     }
 };
 
-fn truthy(v: Value) bool { return switch (v) { .boolean => |b| b, .float => |f| f != 0.0, .integer => |i| i != 0, .string => |s| s.len > 0, .void,.null => false, else => true }; }
+fn truthy(v: Value) bool { return switch (v) { .boolean => |b| b, .float => |f| f != 0.0, .integer => |i| i != 0, .string => |s| s.len > 0, .void,.null,.hole => false, else => true }; }
 fn toF64(v: Value) ?f64 { return switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => null }; }
 fn toInt(v: Value) i64 { return switch (v) { .integer => |i| i, .float => |f| @intFromFloat(f), else => 0 }; }
 fn valEq(l: Value, r: Value) bool { return switch (l) {
@@ -757,7 +760,7 @@ fn valEq(l: Value, r: Value) bool { return switch (l) {
     .float => |lf| switch (r) { .float => |rf| lf==rf, .integer => |ri| lf==@as(f64,@floatFromInt(ri)), else => false },
     .string => |ls| switch (r) { .string => |rs| std.mem.eql(u8,ls,rs), else => false },
     .boolean => |lb| switch (r) { .boolean => |rb| lb==rb, else => false },
-    .void => r == .void, .null => r == .null,
+    .void => r == .void, .null => r == .null, .hole => r == .void,
     else => false,
 }; }
 fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { switch (v) {
@@ -775,6 +778,7 @@ fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { swit
     .boolean => |b| buf.appendSlice(a, if (b) "true" else "false") catch {},
     .void => buf.appendSlice(a, "undefined") catch {},
     .null => buf.appendSlice(a, "null") catch {},
+    .hole => buf.appendSlice(a, "undefined") catch {},
     else => buf.appendSlice(a, "[object]") catch {},
 }
 }
