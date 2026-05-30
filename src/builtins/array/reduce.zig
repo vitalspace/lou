@@ -259,3 +259,7 @@ test "reduce single element without initialValue returns that element" {
     try testing.expect(result.value == .integer);
     try testing.expectEqual(@as(i64, 99), result.value.integer);
 }
+
+// reduce y reduceRight NO tienen thisArg en el estándar ECMAScript
+// El segundo parámetro es initialValue, no thisArg
+// Ver: https://tc39.es/ecma262/#sec-array.prototype.reduce
