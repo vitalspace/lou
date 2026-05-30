@@ -1,15 +1,5 @@
-console.time("total")
+import defaultFunc from "./foo.js";
+import { foo } from "./foo.js";
 
-// import "./console.js";
-// import "./operators.js";
-// import "./loops.js";
-// import "./blocks.js";
-// import "./if.js";
-import "./arrays/arrays.js";
-import "./lang/math.js";
-// import "./functions.js";
-// import "./strings.js";
-// import "./arrow.js";
-// import "./imports.js";
-// 
-console.timeEnd("total")
+console.log(foo);              // "hello"
+console.log(defaultFunc());    // "default"
