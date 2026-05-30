@@ -38,6 +38,8 @@ pub fn FindLastIndex(args: []Types.Value, env: *Types.Environment) Types.Builtin
     };
     defer func_env.deinit();
 
+    const this_arg: Types.Value = if (args.len >= 3) args[2] else .{ .void = {} };
+
     var i: usize = source.elements.items.len;
     while (i > 0) {
         i -= 1;
@@ -47,6 +49,7 @@ pub fn FindLastIndex(args: []Types.Value, env: *Types.Environment) Types.Builtin
         if (func_params.len > 0) func_env.setVar(func_params[0], cb_element) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], .{ .integer = @intCast(i) }) catch {};
         if (func_params.len > 2) func_env.setVar(func_params[2], args[0]) catch {};
+        func_env.set("this", this_arg) catch {};
 
         const result = evaluate(func_body, &func_env) catch {
             return .{ .value = .{ .integer = -1 } };
