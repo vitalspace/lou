@@ -2,6 +2,51 @@ const std = @import("std");
 const Types = @import("../../types/types.zig");
 const ansi = @import("../../utils/ansi.zig");
 
+fn valueDisplayWidth(v: Types.Value) usize {
+    return switch (v) {
+        .integer => return 4,
+        .float => return 12,
+        .string => |s| 2 + s.len,
+        .boolean => |b| if (b) 4 else 5,
+        .void => return 9,
+        .null => return 4,
+        .hole => return 6,
+        .array => return 10,
+        else => return 8,
+    };
+}
+
+fn shouldFormatArrayWrapped(a: *Types.ArrayObject) bool {
+    var total: usize = 4;
+    for (a.elements.items) |elem| {
+        total += valueDisplayWidth(elem) + 2;
+    }
+    return total > 80;
+}
+
+fn printArrayInline(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8) void {
+    out.print("{s}[ {s}", .{ Gy, R }) catch {};
+    for (a.elements.items, 0..) |elem, j| {
+        if (j > 0) out.print("{s}, {s}", .{ Gy, R }) catch {};
+        printValueTo(out, elem, use_ansi);
+    }
+    out.print("{s} ]{s}", .{ Gy, R }) catch {};
+}
+
+fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8) void {
+    out.print("{s}[ {s}", .{ Gy, R }) catch {};
+    for (a.elements.items, 0..) |elem, j| {
+        if (j > 0) {
+            out.print(", ", .{}) catch {};
+            if ((j % 6) == 0) {
+                out.print("\n  ", .{}) catch {};
+            }
+        }
+        printValueTo(out, elem, use_ansi);
+    }
+    out.print("\n{s}]{s}", .{ Gy, R }) catch {};
+}
+
 fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
     const Y = if (use_ansi) ansi.Yellow else "";
     const G = if (use_ansi) ansi.Green else "";
@@ -25,13 +70,10 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
         .array => |a| {
             if (a.elements.items.len == 0) {
                 out.print("{s}[]{s}", .{ Gy, Reset }) catch {};
+            } else if (shouldFormatArrayWrapped(a)) {
+                printArrayWrapped(out, a, use_ansi, Gy, Reset);
             } else {
-                out.print("{s}[ {s}", .{ Gy, Reset }) catch {};
-                for (a.elements.items, 0..) |elem, j| {
-                    if (j > 0) out.print("{s}, {s}", .{ Gy, Reset }) catch {};
-                    printValueTo(out, elem, use_ansi);
-                }
-                out.print("{s} ]{s}", .{ Gy, Reset }) catch {};
+                printArrayInline(out, a, use_ansi, Gy, Reset);
             }
         },
         .hole => out.print("{s}<empty>{s}", .{ D, Reset }) catch {},
@@ -43,18 +85,37 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
         .iterator => out.print("{s}[object Array Iterator]{s}", .{ Y, Reset }) catch {},
         .generator => out.print("{s}[generator]{s}", .{ C, Reset }) catch {},
         .symbol => |sym| out.print("{s}Symbol({s}){s}", .{ Y, sym.description, Reset }) catch {},
-        .js_object => |o| {
-            out.print("{s}{{ {s}", .{ Gy, Reset }) catch {};
-            var first = true;
-            var it = o.properties.iterator();
-            while (it.next()) |entry| {
-                if (!first) out.print("{s}, {s}", .{ Gy, Reset }) catch {};
-                first = false;
-                out.print("{s}{s}:{s} ", .{ C, entry.key_ptr.*, Reset }) catch {};
-                printValueTo(out, entry.value_ptr.*, use_ansi);
-            }
-            out.print("{s} }}{s}", .{ Gy, Reset }) catch {};
-        },
+.js_object => |o| {
+             out.print("{s}{{ {s}", .{ Gy, Reset }) catch {};
+             var first = true;
+             var it = o.properties.iterator();
+             while (it.next()) |entry| {
+                 if (!first) out.print("{s}, {s}", .{ Gy, Reset }) catch {};
+                 first = false;
+                 const key = entry.key_ptr.*;
+                 var is_numeric_key: bool = false;
+                 if (key.len > 0) {
+                     var all_valid = true;
+                     var has_digit = false;
+                     for (key) |c| {
+                         if (c >= '0' and c <= '9') {
+                             has_digit = true;
+                         } else if (c != '.') {
+                             all_valid = false;
+                             break;
+                         }
+                     }
+                     is_numeric_key = all_valid and has_digit;
+                 }
+                 if (is_numeric_key) {
+                     out.print("{s}'{s}':{s} ", .{ C, key, Reset }) catch {};
+                 } else {
+                     out.print("{s}{s}:{s} ", .{ C, key, Reset }) catch {};
+                 }
+                 printValueTo(out, entry.value_ptr.*, use_ansi);
+             }
+             out.print("{s} }}{s}", .{ Gy, Reset }) catch {};
+         },
     }
 }
 
