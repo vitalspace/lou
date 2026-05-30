@@ -43,20 +43,20 @@ pub const ArrayObject = struct {
 };
 
 pub const ObjectValue = struct {
-    allocator: std.mem.Allocator,
-    properties: std.StringHashMap(Value),
+     allocator: std.mem.Allocator,
+     properties: std.StringArrayHashMap(Value),
 
-    pub fn init(allocator: std.mem.Allocator) !*ObjectValue {
-        const obj = try allocator.create(ObjectValue);
-        obj.* = .{ .allocator = allocator, .properties = std.StringHashMap(Value).init(allocator) };
-        return obj;
-    }
+     pub fn init(allocator: std.mem.Allocator) !*ObjectValue {
+         const obj = try allocator.create(ObjectValue);
+         obj.* = .{ .allocator = allocator, .properties = std.StringArrayHashMap(Value).init(allocator) };
+         return obj;
+     }
 
-    pub fn deinit(this: *ObjectValue) void {
-        this.properties.deinit();
-        this.allocator.destroy(this);
-    }
-};
+     pub fn deinit(this: *ObjectValue) void {
+         this.properties.deinit();
+         this.allocator.destroy(this);
+     }
+ };
 
 pub const ClosureValue = struct {
     chunk_ptr: *ChunkType,
