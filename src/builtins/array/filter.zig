@@ -49,12 +49,15 @@ pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
     };
     defer func_env.deinit();
 
+    const this_arg: Types.Value = if (args.len >= 3) args[2] else .{ .void = {} };
+
     for (source.elements.items, 0..) |element, i| {
         if (element == .hole) continue;
         func_env.return_hit = false;
         if (func_params.len > 0) func_env.setVar(func_params[0], element) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], .{ .integer = @intCast(i) }) catch {};
         if (func_params.len > 2) func_env.setVar(func_params[2], args[0]) catch {};
+        func_env.set("this", this_arg) catch {};
 
         const ret = evaluate(func_body, &func_env) catch {
             return .{ .value = .{ .void = {} } };
