@@ -225,3 +225,5 @@ test "reduceRight single element without initialValue returns that element" {
     try testing.expect(result.value == .integer);
     try testing.expectEqual(@as(i64, 99), result.value.integer);
 }
+// Nota: reduceRight NO tiene thisArg en el estándar ECMAScript
+// El segundo parámetro es initialValue, no thisArg
