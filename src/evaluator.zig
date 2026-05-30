@@ -256,6 +256,20 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 const index_val = try evaluate(a.index, env);
                 const key = switch (index_val) {
                     .string => |s| s,
+                    .integer => |i| blk: {
+                        var buf: [32]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                        const owned = try env.allocator.dupe(u8, s);
+                        env.owned_strings.append(env.allocator, owned) catch {};
+                        break :blk owned;
+                    },
+                    .float => |f| blk: {
+                        var buf: [64]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                        const owned = try env.allocator.dupe(u8, s);
+                        env.owned_strings.append(env.allocator, owned) catch {};
+                        break :blk owned;
+                    },
                     .symbol => |sym| blk: {
                         const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
                         env.owned_strings.append(env.allocator, prop_name) catch {};
@@ -338,18 +352,25 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     const ai = b.left.ArrayIndex;
                     const obj_val = try evaluate(ai.array, env);
                     if (obj_val != .js_object) return error.InvalidAssignment;
-                    const key_val = try evaluate(ai.index, env);
-                    const key: []const u8 = switch (key_val) {
-                        .string => |s| s,
-                        .integer => |i| blk: {
-                            var buf: [32]u8 = undefined;
-                            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
-                            const owned = try env.allocator.dupe(u8, s);
-                            env.owned_strings.append(env.allocator, owned) catch {};
-                            break :blk owned;
-                        },
-                        else => return error.InvalidIndex,
-                    };
+const key_val = try evaluate(ai.index, env);
+                     const key: []const u8 = switch (key_val) {
+                         .string => |s| s,
+                         .integer => |i| blk: {
+                             var buf: [32]u8 = undefined;
+                             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                             const owned = try env.allocator.dupe(u8, s);
+                             env.owned_strings.append(env.allocator, owned) catch {};
+                             break :blk owned;
+                         },
+                         .float => |f| blk: {
+                             var buf: [64]u8 = undefined;
+                             const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                             const owned = try env.allocator.dupe(u8, s);
+                             env.owned_strings.append(env.allocator, owned) catch {};
+                             break :blk owned;
+                         },
+                         else => return error.InvalidIndex,
+                     };
                     const val = try evaluate(b.right, env);
                     try obj_val.js_object.properties.put(key, val);
                     return val;
@@ -2285,7 +2306,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     if (env.get(n)) |v| {
                         try env.exports.put("default", v);
                     } else if (env.getFunction(n)) |_| {
-                        try env.exports.put("default", .{ .float = 0.0 });
+                        try env.exports.put("default", result);
                     } else {
                         try env.exports.put("default", result);
                     }
@@ -2299,7 +2320,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     if (env.get(n)) |v| {
                         try env.exports.put(n, v);
                     } else if (env.getFunction(n)) |_| {
-                        try env.exports.put(n, .{ .float = 0.0 });
+                        try env.exports.put(n, result);
                     } else {
                         return error.ExportNotFound;
                     }
