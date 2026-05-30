@@ -599,6 +599,8 @@ pub const Parser = struct {
             const key = switch (this.current_token.type) {
                 .String => this.current_token.literal,
                 .Identifier => this.current_token.literal,
+                .Integer => this.current_token.literal,
+                .Float => this.current_token.literal,
                 else => return error.ExpectedPropertyName,
             };
             this.nextToken(); // consume key
