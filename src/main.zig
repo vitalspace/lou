@@ -13,7 +13,7 @@ const Chunk = @import("vm.zig").Chunk;
 const initSimboloObject = @import("builtins/symbol.zig").initSimboloObject;
 const TypeChecker = @import("type_checker.zig").TypeChecker;
 
-const use_vm = false;
+const use_vm = true;
 
 test {
     _ = @import("builtins/console/log.zig");
@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.lastIndexOfScalar(u8, filePath, '/')) |idx| {
         dir_buf = filePath[0..idx];
     }
-    
+
     env_.module_dir = dir_buf;
 
     try initSimboloObject(&env_);
@@ -147,8 +147,20 @@ pub fn main(init: std.process.Init) !void {
         defer chunk.deinit();
         var comp = Compiler.init(&env_);
         comp.compile(program, &chunk);
-        comp.deinit();
+        if (comp.compile_error) |err| {
+            comp.deinit();
+            if (comp.compile_error_line > 0) {
+                std.debug.print("Error at line {d}: {s}\n", .{ comp.compile_error_line, err });
+            } else {
+                std.debug.print("Error: {s}\n", .{err});
+            }
+            return error.CompileError;
+        }
         var vm = VM.init(&env_);
+        vm.compiled_chunks = comp.compiled_chunks; // Transfer ownership
+        // Prevent Compiler deinit from double-freeing the chunks
+        comp.compiled_chunks = std.StringHashMap(*Chunk).init(allocator);
+        comp.deinit();
         defer vm.deinit();
         try vm.interpret(&chunk);
     } else {
