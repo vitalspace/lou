@@ -1,5 +1,6 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
+const utils = @import("string_utils.zig");
 
 pub fn IndexOf(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
@@ -20,12 +21,17 @@ pub fn IndexOf(args: []const Types.Value, env: *Types.Environment) Types.Builtin
         .null => 0,
         else => 0,
     };
-    var pos: usize = if (position < 0) 0 else @as(usize, @intCast(position));
-    if (pos > s.len) pos = s.len;
-    if (searchString.len == 0) return .{ .value = .{ .integer = @as(i64, @intCast(pos)) } };
-    if (pos + searchString.len > s.len) return .{ .value = .{ .integer = -1 } };
-    if (std.mem.indexOf(u8, s[pos..], searchString)) |idx| {
-        return .{ .value = .{ .integer = @as(i64, @intCast(pos + idx)) } };
+
+    // Convert position from codepoint index to byte index
+    const cp_len = utils.cpCount(s);
+    const clamped_pos: i64 = if (position < 0) 0 else if (position > cp_len) cp_len else position;
+    const byte_start = utils.cpToByte(s, clamped_pos);
+
+    if (searchString.len == 0) return .{ .value = .{ .integer = clamped_pos } };
+    if (byte_start > s.len) return .{ .value = .{ .integer = -1 } };
+    if (std.mem.indexOf(u8, s[byte_start..], searchString)) |match_byte| {
+        // Convert the byte-level match offset back to a codepoint index
+        return .{ .value = .{ .integer = clamped_pos + utils.byteToCp(s[byte_start..], match_byte) } };
     }
     return .{ .value = .{ .integer = -1 } };
 }
@@ -110,6 +116,29 @@ test "indexOf no args returns -1" {
 
 test "indexOf empty string with position beyond len clamped" {
     var args = [_]Types.Value{ .{ .string = "hello" }, .{ .string = "" }, .{ .integer = 99 } };
+    const result = IndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 5), result.value.integer);
+}
+
+test "indexOf multi-byte UTF-8" {
+    // "ñoño" has codepoints: ñ(2 bytes), o(1), ñ(2), o(1) = 6 bytes, 4 codepoints
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "o" } };
+    const result = IndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 1), result.value.integer);
+}
+
+test "indexOf multi-byte UTF-8 with position" {
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "o" }, .{ .integer = 2 } };
+    const result = IndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 3), result.value.integer);
+}
+
+test "indexOf 4-byte emoji" {
+    // "hola 😀 mundo" — 😀 is at codepoint index 5
+    var args = [_]Types.Value{ .{ .string = "hola \xF0\x9F\x98\x80 mundo" }, .{ .string = "\xF0\x9F\x98\x80" } };
     const result = IndexOf(&args, undefined);
     try testing.expect(result == .value);
     try testing.expectEqual(@as(i64, 5), result.value.integer);
