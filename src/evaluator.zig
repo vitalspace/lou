@@ -129,7 +129,45 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
     };
 }
 
+fn consumeBreak(env: *Environment, my_label: ?[]const u8) void {
+    if (!env.break_hit) return;
+    if (env.break_label == null or (my_label != null and std.mem.eql(u8, env.break_label.?, my_label.?))) {
+        env.break_hit = false;
+        env.break_label = null;
+    }
+}
+
+fn consumeContinue(env: *Environment, my_label: ?[]const u8) bool {
+    // Returns true if the continue was consumed (label matched or unlabeled)
+    if (!env.continue_hit) return false;
+    if (env.continue_label == null or (my_label != null and std.mem.eql(u8, env.continue_label.?, my_label.?))) {
+        env.continue_hit = false;
+        env.continue_label = null;
+        return true;
+    }
+    return false;
+}
+
 pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
+    const setLoopVar = struct {
+        fn set(scope: *Environment, kind: ast.ForOfKind, name: []const u8, val: ast.Value) !void {
+            switch (kind) {
+                .Const => {
+                    try scope.values.put(name, val);
+                    if (!scope.constants.contains(name)) {
+                        try scope.constants.put(name, {});
+                    }
+                },
+                .Let => {
+                    try scope.values.put(name, val);
+                },
+                .Var => {
+                    try scope.setVar(name, val);
+                },
+            }
+        }
+    }.set;
+
     switch (node.*) {
         .IntegerLiteral => |i| return .{ .integer = i.value },
         .FloatLiteral => |f| return .{ .float = f.value },
@@ -331,8 +369,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return val;
         },
         .Identifier => |i| {
-            if (env.getFunction(i.name)) |_| {
-                return .{ .string = i.name };
+            if (env.getFunction(i.name)) |funcNode| {
+                return .{ .function = @ptrCast(funcNode) };
             } else if (env.get(i.name)) |value| {
                 return value;
             } else {
@@ -943,7 +981,7 @@ const key_val = try evaluate(ai.index, env);
                         }
                     }
                     result = try evaluate(stmt, env);
-                    if (env.return_hit) break;
+                    if (env.return_hit or env.break_hit or env.continue_hit) break;
                 }
                 return result;
             }
@@ -963,7 +1001,7 @@ const key_val = try evaluate(ai.index, env);
                 }
 
                 result = try evaluate(stmt, &block_env);
-                if (block_env.return_hit) break;
+                if (block_env.return_hit or block_env.break_hit or block_env.continue_hit) break;
             }
             return result;
         },
@@ -998,7 +1036,15 @@ const key_val = try evaluate(ai.index, env);
             }
             debugPrint("[OPTIMIZATION] FAILED - falling through\n", .{});
 
-            const is_let_init = f.init != null and f.init.?.* == .LetDeclaration;
+            const is_let_init = if (f.init) |init| blk: {
+                if (init.* == .LetDeclaration) break :blk true;
+                if (init.* == .BlockStatement) {
+                    for (init.BlockStatement.statements) |s| {
+                        if (s.* == .LetDeclaration or s.* == .ConstantDeclaration) break :blk true;
+                    }
+                }
+                break :blk false;
+            } else false;
 
             var loop_env_buf: Environment = undefined;
             const eval_env: *Environment = if (is_let_init) blk: {
@@ -1012,7 +1058,15 @@ const key_val = try evaluate(ai.index, env);
             // Run init on first entry; skip on generator yield re-entry
             if (f.init) |init| {
                 if (env.for_yield_node != @as(?*const anyopaque, @ptrCast(node))) {
-                    _ = try evaluate(init, eval_env);
+                    // Unroll BlockStatement inits directly into eval_env so let/const
+                    // declarations are visible to the condition/body/increment.
+                    if (init.* == .BlockStatement) {
+                        for (init.BlockStatement.statements) |s| {
+                            _ = try evaluate(s, eval_env);
+                        }
+                    } else {
+                        _ = try evaluate(init, eval_env);
+                    }
                 }
             }
 
@@ -1024,11 +1078,13 @@ const key_val = try evaluate(ai.index, env);
                         null
                 else
                     null
-            else
-                null;
+    else
+        null;
 
-            while (true) {
-                if (pre_limit != null and loop_var_name != null) {
+    const my_label = env.pending_loop_label;
+    env.pending_loop_label = null;
+    while (true) {
+        if (pre_limit != null and loop_var_name != null) {
                     const current_val = eval_env.get(loop_var_name.?) orelse break;
                     const current_f: f64 = switch (current_val) {
                         .float => |v| v,
@@ -1064,10 +1120,32 @@ const key_val = try evaluate(ai.index, env);
                     eval_env.yield_hit = false; // Consume so outer loops don't also catch it
                     break;
                 }
+                if (eval_env.return_hit) break;
+                if (eval_env.break_hit) {
+                    const matches = (eval_env.break_label == null) or
+                        (my_label != null and std.mem.eql(u8, eval_env.break_label.?, my_label.?));
+                    if (matches) {
+                        eval_env.break_hit = false;
+                        eval_env.break_label = null;
+                    }
+                    break;
+                }
+                if (eval_env.continue_hit) {
+                    const matches = (eval_env.continue_label == null) or
+                        (my_label != null and std.mem.eql(u8, eval_env.continue_label.?, my_label.?));
+                    if (matches) {
+                        eval_env.continue_hit = false;
+                        eval_env.continue_label = null;
+                        if (f.increment) |inc| {
+                            _ = try evaluate(inc, eval_env);
+                        }
+                        continue;
+                    }
+                    break;
+                }
                 if (f.increment) |inc| {
                     _ = try evaluate(inc, eval_env);
                 }
-                if (eval_env.return_hit) break;
             }
 
             // For-loop completed without yielding — clear for_yield_node
@@ -1078,25 +1156,8 @@ const key_val = try evaluate(ai.index, env);
         },
         .ForOfLoop => |f| {
             var result: ast.Value = .{ .float = 0.0 };
-
-    const setLoopVar = struct {
-        fn set(scope: *Environment, kind: ast.ForOfKind, name: []const u8, val: ast.Value) !void {
-            switch (kind) {
-                .Const => {
-                    try scope.values.put(name, val);
-                    if (!scope.constants.contains(name)) {
-                        try scope.constants.put(name, {});
-                    }
-                },
-                .Let => {
-                    try scope.values.put(name, val);
-                },
-                .Var => {
-                    try scope.setVar(name, val);
-                },
-            }
-        }
-    }.set;
+            const fo_my_label = env.pending_loop_label;
+            env.pending_loop_label = null;
 
             // On re-entry after yield, check for cached iteration state first
             // (these fields persist in the generator's environment)
@@ -1141,6 +1202,18 @@ const key_val = try evaluate(ai.index, env);
                     env.yield_caught_by_loop = true;
                     result = loop_env.yield_value;
                     loop_env.yield_hit = false;
+                }
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fo_my_label);
+                    env.for_of_gen = null;
+                    return result;
+                }
+                if (loop_env.continue_hit) {
+                    if (consumeContinue(loop_env, fo_my_label)) {
+                        return result;
+                    }
+                    // Labeled continue for outer loop — propagate
+                    return result;
                 }
                 return result;
             }
@@ -1203,6 +1276,19 @@ const key_val = try evaluate(ai.index, env);
                     env.yield_star_array = loop_env.yield_star_array;
                     env.yield_star_gen = loop_env.yield_star_gen;
                     if (loop_env.return_hit) break;
+                    if (loop_env.break_hit) {
+                        consumeBreak(loop_env, fo_my_label);
+                        env.for_of_array = null;
+                        return result;
+                    }
+                    if (loop_env.continue_hit) {
+                        if (consumeContinue(loop_env, fo_my_label)) {
+                            i += 1;
+                            env.for_of_array_index = i;
+                            continue;
+                        }
+                        break;
+                    }
                     i += 1;
                     // Persist current position across re-entries
                     env.for_of_array_index = i;
@@ -1256,6 +1342,17 @@ const key_val = try evaluate(ai.index, env);
                             break;
                         }
                         if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fo_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fo_my_label)) {
+                                i += 1;
+                                continue;
+                            }
+                            break;
+                        }
                         // Clear stale yield_star state after body completes without yield
                         env.yield_star_array = loop_env.yield_star_array;
                         env.yield_star_gen = loop_env.yield_star_gen;
@@ -1288,13 +1385,26 @@ const key_val = try evaluate(ai.index, env);
                             break;
                         }
                         if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fo_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fo_my_label)) {
+                                i += cp_len;
+                                continue;
+                            }
+                            break;
+                        }
                         i += cp_len;
                     }
                 },
                 .js_object => |obj| {
                     const type_tag = obj.properties.get("@@type");
+                    var handled = false;
                     if (type_tag != null and type_tag.? == .string) {
                         if (std.mem.eql(u8, type_tag.?.string, "Set")) {
+                            handled = true;
                             if (obj.properties.get("values")) |vals| {
                                 if (vals == .array) {
                                     for (vals.array.elements.items) |val| {
@@ -1309,10 +1419,21 @@ const key_val = try evaluate(ai.index, env);
                                             break;
                                         }
                                         if (loop_env.return_hit) break;
+                                        if (loop_env.break_hit) {
+                                            consumeBreak(loop_env, fo_my_label);
+                                            break;
+                                        }
+                                        if (loop_env.continue_hit) {
+                                            if (consumeContinue(loop_env, fo_my_label)) {
+                                                continue;
+                                            }
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         } else if (std.mem.eql(u8, type_tag.?.string, "Map")) {
+                            handled = true;
                             if (obj.properties.get("entries")) |ents| {
                                 if (ents == .array) {
                                     for (ents.array.elements.items) |entry| {
@@ -1327,11 +1448,22 @@ const key_val = try evaluate(ai.index, env);
                                             break;
                                         }
                                         if (loop_env.return_hit) break;
+                                        if (loop_env.break_hit) {
+                                            consumeBreak(loop_env, fo_my_label);
+                                            break;
+                                        }
+                                        if (loop_env.continue_hit) {
+                                            if (consumeContinue(loop_env, fo_my_label)) {
+                                                continue;
+                                            }
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    if (!handled) return error.TypeError;
                 },
                 .generator => |gen| {
                     // Cache the generator for re-entry
@@ -1369,6 +1501,17 @@ const key_val = try evaluate(ai.index, env);
                             break;
                         }
                         if (loop_env.return_hit) break;
+                        if (loop_env.break_hit) {
+                            consumeBreak(loop_env, fo_my_label);
+                            env.for_of_gen = null;
+                            break;
+                        }
+                if (loop_env.continue_hit) {
+                    if (consumeContinue(loop_env, fo_my_label)) {
+                        continue;
+                    }
+                    break;
+                }
                     }
                 },
                 .iterator => |iter| {
@@ -1398,6 +1541,156 @@ const key_val = try evaluate(ai.index, env);
                             break;
                         }
                         if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fo_my_label);
+                    break;
+                }
+                if (loop_env.continue_hit) {
+                    if (consumeContinue(loop_env, fo_my_label)) {
+                        continue;
+                    }
+                    break;
+                }
+                    }
+                },
+                else => {
+                    return error.TypeError;
+                },
+            }
+
+            return result;
+        },
+        .ForInLoop => |f| {
+            var result: ast.Value = .{ .float = 0.0 };
+            const fi_my_label = env.pending_loop_label;
+            env.pending_loop_label = null;
+            const object_val = try evaluate(f.object, env);
+
+            var block_env_buf: Environment = undefined;
+            const loop_env: *Environment = if (f.kind == .Let or f.kind == .Const) blk: {
+                block_env_buf = try Environment.initBlock(env.allocator, env);
+                break :blk &block_env_buf;
+            } else env;
+            defer if (f.kind == .Let or f.kind == .Const) block_env_buf.deinit();
+
+            switch (object_val) {
+                .js_object => |obj| {
+                    var it = obj.properties.iterator();
+                    while (it.next()) |entry| {
+                        const key = entry.key_ptr.*;
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fi_my_label);
+                    break;
+                }
+                if (loop_env.continue_hit) {
+                    if (consumeContinue(loop_env, fi_my_label)) {
+                        continue;
+                    }
+                    break;
+                }
+                    }
+                },
+                .array => |arr| {
+                    var i: usize = 0;
+                    while (i < arr.elements.items.len) {
+                        var buf: [32]u8 = undefined;
+                        const key_slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break;
+                        const key = try env.allocator.dupe(u8, key_slice);
+                        env.owned_strings.append(env.allocator, key) catch {};
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fi_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fi_my_label)) {
+                                i += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                },
+                .string => |s| {
+                    var i: usize = 0;
+                    while (i < s.len) {
+                        var buf: [32]u8 = undefined;
+                        const key_slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break;
+                        const key = try env.allocator.dupe(u8, key_slice);
+                        env.owned_strings.append(env.allocator, key) catch {};
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fi_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fi_my_label)) {
+                                i += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                },
+                .integer => |n| {
+                    var repr: [32]u8 = undefined;
+                    const str = std.fmt.bufPrint(&repr, "{d}", .{n}) catch "";
+                    var i: usize = 0;
+                    while (i < str.len) {
+                        var buf: [4]u8 = undefined;
+                        const key_slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break;
+                        const key = try env.allocator.dupe(u8, key_slice);
+                        env.owned_strings.append(env.allocator, key) catch {};
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fi_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fi_my_label)) {
+                                i += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                },
+                .float => |n| {
+                    var repr: [64]u8 = undefined;
+                    const str = std.fmt.bufPrint(&repr, "{d}", .{n}) catch "";
+                    var i: usize = 0;
+                    while (i < str.len) {
+                        var buf: [4]u8 = undefined;
+                        const key_slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break;
+                        const key = try env.allocator.dupe(u8, key_slice);
+                        env.owned_strings.append(env.allocator, key) catch {};
+                        try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
+                        result = try evaluate(f.body, loop_env);
+                        if (loop_env.return_hit) break;
+                if (loop_env.break_hit) {
+                    consumeBreak(loop_env, fi_my_label);
+                    break;
+                }
+                        if (loop_env.continue_hit) {
+                            if (consumeContinue(loop_env, fi_my_label)) {
+                                i += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                        i += 1;
                     }
                 },
                 else => {},
@@ -1449,6 +1742,8 @@ const key_val = try evaluate(ai.index, env);
 
             var result: ast.Value = .{ .float = 0.0 };
 
+            const w_my_label = env.pending_loop_label;
+            env.pending_loop_label = null;
             while (true) {
                 if (w_loop_var) |vn| {
                     const current_val = env.get(vn) orelse break;
@@ -1481,6 +1776,56 @@ const key_val = try evaluate(ai.index, env);
                     break;
                 }
                 if (env.return_hit) break;
+                if (env.break_hit) {
+                    consumeBreak(env, w_my_label);
+                    break;
+                }
+                if (env.continue_hit) {
+                    if (consumeContinue(env, w_my_label)) {
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            return result;
+        },
+        .DoWhileLoop => |d| {
+            var result: ast.Value = .{ .float = 0.0 };
+
+            const d_my_label = env.pending_loop_label;
+            env.pending_loop_label = null;
+            while (true) {
+                result = try evaluate(d.body, env);
+                if (env.yield_hit) {
+                    env.yield_caught_by_loop = true;
+                    result = env.yield_value;
+                    env.yield_hit = false;
+                    break;
+                }
+                if (env.return_hit) break;
+                if (env.break_hit) {
+                    consumeBreak(env, d_my_label);
+                    break;
+                }
+
+                // Reset continue_hit so it doesn't propagate to outer loops
+                // Then evaluate condition to determine if loop continues
+                if (env.continue_hit) {
+                    if (!consumeContinue(env, d_my_label)) {
+                        // Labeled continue for outer loop — propagate
+                        break;
+                    }
+                }
+
+                const cond_val = try evaluate(d.condition, env);
+                const is_false = switch (cond_val) {
+                    .boolean => |bv| !bv,
+                    .float => |fv| fv == 0.0,
+                    .integer => |iv| iv == 0,
+                    else => false,
+                };
+                if (is_false) break;
             }
 
             return result;
@@ -1506,6 +1851,82 @@ const key_val = try evaluate(ai.index, env);
                 return .{ .float = 0.0 };
             }
         },
+        .ConditionalExpression => |c| {
+            // Lazy evaluation: only evaluate the chosen branch.
+            const cond_val = try evaluate(c.condition, env);
+            const is_truthy = switch (cond_val) {
+                .boolean => |b| b,
+                .float => |f| f != 0.0,
+                .integer => |iv| iv != 0,
+                .string => |s| s.len > 0,
+                .void => false,
+                else => true,
+            };
+            if (is_truthy) {
+                return try evaluate(c.consequent, env);
+            } else {
+                return try evaluate(c.alternate, env);
+            }
+        },
+        .BreakStatement => |bs| {
+            env.break_hit = true;
+            env.break_label = bs.label;
+            return .{ .void = {} };
+        },
+        .ContinueStatement => |cs| {
+            env.continue_hit = true;
+            env.continue_label = cs.label;
+            return .{ .void = {} };
+        },
+        .LabeledStatement => |ls| {
+            // Set pending_loop_label so the inner loop can capture it
+            env.pending_loop_label = ls.label;
+            const result = try evaluate(ls.body, env);
+            // Consume labeled break targeting this label
+            if (env.break_hit and env.break_label != null and
+                std.mem.eql(u8, env.break_label.?, ls.label))
+            {
+                env.break_hit = false;
+                env.break_label = null;
+            }
+            // Consume labeled continue targeting this label
+            if (env.continue_hit and env.continue_label != null and
+                std.mem.eql(u8, env.continue_label.?, ls.label))
+            {
+                // continue can only target iteration statements (loops)
+                const is_loop = switch (ls.body.*) {
+                    .ForLoop, .WhileLoop, .DoWhileLoop, .ForOfLoop, .ForInLoop => true,
+                    else => false,
+                };
+                if (!is_loop) {
+                    return error.InvalidContinueTarget;
+                }
+                env.continue_hit = false;
+                env.continue_label = null;
+            }
+            return result;
+        },
+        .TypeOfExpression => |t| {
+            const val = try evaluate(t.operand, env);
+            const type_str: []const u8 = switch (val) {
+                .integer => "number",
+                .float => "number",
+                .string => "string",
+                .boolean => "boolean",
+                .void => "undefined",
+                .null => "object",
+                .array => "object",
+                .js_object => "object",
+                .function => "function",
+                .closure => "function",
+                .object => "object",
+                .generator => "function",
+                .symbol => "symbol",
+                .iterator => "object",
+                .hole => "undefined",
+            };
+            return .{ .string = type_str };
+        },
         .ReturnStatement => |r| {
             env.return_hit = true;
             if (r.value) |val| {
@@ -1514,6 +1935,42 @@ const key_val = try evaluate(ai.index, env);
             } else {
                 return .{ .void = {} };
             }
+        },
+        .ThrowStatement => |ts| {
+            const val = try evaluate(ts.value, env);
+            env.throw_hit = true;
+            env.throw_value = val;
+            return val;
+        },
+        .TryCatchFinally => |tc| {
+            var body_val: ast.Value = .{ .void = {} };
+            var threw = false;
+            if (evaluate(tc.body, env)) |val| {
+                body_val = val;
+            } else |_| {
+                threw = true;
+            }
+            if (!threw) threw = env.throw_hit;
+            if (!threw) {
+                if (tc.finally_body) |fb| _ = try evaluate(fb, env);
+                return body_val;
+            }
+            if (tc.catch_body) |cb| {
+                const error_val: ast.Value = if (env.throw_hit) blk: {
+                    const v = env.throw_value;
+                    env.throw_hit = false;
+                    env.throw_value = .{ .void = {} };
+                    break :blk v;
+                } else .{ .void = {} };
+                if (tc.catch_param) |param| try env.setVar(param, error_val);
+                var catch_val: ast.Value = .{ .void = {} };
+                if (evaluate(cb, env)) |v| { catch_val = v; } else |_| {}
+                if (tc.finally_body) |fb| _ = try evaluate(fb, env);
+                return catch_val;
+            }
+            if (tc.finally_body) |fb| _ = try evaluate(fb, env);
+            if (env.throw_hit) return env.throw_value;
+            return error.PropagatedError;
         },
         .GeneratorDeclaration => |g| {
             try env.setFunction(g.name, node);
@@ -2338,6 +2795,15 @@ const key_val = try evaluate(ai.index, env);
             // Elision should only appear inside array literals.
             return error.UnexpectedElision;
         },
+.CommaExpression => |c| {
+             var result: ast.Value = .{ .float = 0.0 };
+             for (c.expressions) |e| {
+                 result = try evaluate(e, env);
+                 // Debug: log intermediate results
+                 // std.debug.print("comma expr: {}\n", .{result});
+             }
+             return result;
+         },
     }
 }
 
@@ -2403,6 +2869,9 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             const func = func_node.ArrowFunction;
             var func_env = try Environment.init(env.allocator, env);
             defer func_env.deinit();
+            // Inherit this from outer lexical environment
+            const lexical_this = env.get("this") orelse (ast.Value){ .void = {} };
+            try func_env.set("this", lexical_this);
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
             }
@@ -3150,6 +3619,35 @@ test "evaluate while loop" {
     try std.testing.expectApproxEqAbs(@as(f64, 10.0), result_f, 0.001);
 }
 
+test "evaluate do while loop" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram("var i = 0", &env_);
+    _ = try parseAndEvaluateProgram("var sum = 0", &env_);
+    _ = try parseAndEvaluateProgram("do { sum += i; i += 1 } while (i < 5)", &env_);
+    const result = try parseAndEvaluate("sum", &env_);
+    const result_f: f64 = switch (result) {
+        .integer => |v| @floatFromInt(v),
+        .float => |v| v,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), result_f, 0.001);
+}
+
+test "evaluate do while loop - executes at least once" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram("var ran = false", &env_);
+    _ = try parseAndEvaluateProgram("do { ran = true } while (false)", &env_);
+    const result = try parseAndEvaluate("ran", &env_);
+    try std.testing.expect(result == .boolean);
+    try std.testing.expect(result.boolean);
+}
+
 // --- For loop tests ---
 
 test "evaluate for loop - simple" {
@@ -3161,6 +3659,56 @@ test "evaluate for loop - simple" {
     _ = try parseAndEvaluateProgram("for (var j = 1; j < 6; j = j + 1) { sum = sum + j }", &env_);
     const result = try parseAndEvaluate("sum", &env_);
     try std.testing.expectApproxEqAbs(@as(f64, 15.0), result.float, 0.001);
+}
+
+test "evaluate for in loop" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram("var obj = { a: 1, b: 2, c: 3 }", &env_);
+    _ = try parseAndEvaluateProgram("var keys = []", &env_);
+    _ = try parseAndEvaluateProgram("for (var k in obj) { keys.push(k) }", &env_);
+    const result = try parseAndEvaluate("keys", &env_);
+
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 3), result.array.elements.items.len);
+    try std.testing.expectEqualStrings("a", result.array.elements.items[0].string);
+    try std.testing.expectEqualStrings("b", result.array.elements.items[1].string);
+    try std.testing.expectEqualStrings("c", result.array.elements.items[2].string);
+}
+
+test "evaluate for in loop with const" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram("var obj = { x: 10, y: 20 }", &env_);
+    _ = try parseAndEvaluateProgram("var keys = []", &env_);
+    _ = try parseAndEvaluateProgram("for (const k in obj) { keys.push(k) }", &env_);
+    const result = try parseAndEvaluate("keys", &env_);
+
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 2), result.array.elements.items.len);
+    try std.testing.expectEqualStrings("x", result.array.elements.items[0].string);
+    try std.testing.expectEqualStrings("y", result.array.elements.items[1].string);
+}
+
+test "evaluate for in loop on array" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram("var arr = [10, 20, 30]", &env_);
+    _ = try parseAndEvaluateProgram("var indices = []", &env_);
+    _ = try parseAndEvaluateProgram("for (var idx in arr) { indices.push(idx) }", &env_);
+    const result = try parseAndEvaluate("indices", &env_);
+
+    try std.testing.expect(result == .array);
+    try std.testing.expectEqual(@as(usize, 3), result.array.elements.items.len);
+    try std.testing.expectEqualStrings("0", result.array.elements.items[0].string);
+    try std.testing.expectEqualStrings("1", result.array.elements.items[1].string);
+    try std.testing.expectEqualStrings("2", result.array.elements.items[2].string);
 }
 
 // --- Function tests ---
