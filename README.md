@@ -1,6 +1,10 @@
 # Lou
 
-<img width="400" height="400" alt="157634247" src="https://github.com/user-attachments/assets/14eb6160-7670-4325-80cb-c83b1f75c266" />
+<div align="center">
+<img title="Luo" width="400" height="400" alt="157634247" src="https://github.com/user-attachments/assets/14eb6160-7670-4325-80cb-c83b1f75c266" />
+</div>
+
+<br/>
 
 A scripting language with partial JavaScript/TypeScript support, written in Zig.
 
