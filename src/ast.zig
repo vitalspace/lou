@@ -37,7 +37,9 @@ pub const NodeType = enum {
     BlockStatement,
     ForLoop,
     ForOfLoop,
+    ForInLoop,
     WhileLoop,
+    DoWhileLoop,
     IfStatement,
     ReturnStatement,
     FunctionDeclaration,
@@ -53,6 +55,14 @@ pub const NodeType = enum {
     Elision,
     NewExpression,
     DirectCall,
+    BreakStatement,
+    ContinueStatement,
+    LabeledStatement,
+    CommaExpression,
+    ConditionalExpression,
+    TryCatchFinally,
+    ThrowStatement,
+    TypeOfExpression,
 };
 
 pub const Node = union(NodeType) {
@@ -124,9 +134,19 @@ pub const Node = union(NodeType) {
         iterable: *Node,
         body: *Node,
     },
+    ForInLoop: struct {
+        kind: ForOfKind,
+        variable: []const u8,
+        object: *Node,
+        body: *Node,
+    },
     WhileLoop: struct {
         condition: *Node,
         body: *Node,
+    },
+    DoWhileLoop: struct {
+        body: *Node,
+        condition: *Node,
     },
     IfStatement: struct {
         condition: *Node,
@@ -190,6 +210,38 @@ pub const Node = union(NodeType) {
         callee: *Node,
         arguments: []*Node,
     },
+    BreakStatement: struct {
+        label: ?[]const u8 = null,
+        line: u32 = 0,
+    },
+    ContinueStatement: struct {
+        label: ?[]const u8 = null,
+        line: u32 = 0,
+    },
+    LabeledStatement: struct {
+        label: []const u8,
+        body: *Node,
+    },
+    CommaExpression: struct {
+        expressions: []*Node,
+    },
+    ConditionalExpression: struct {
+        condition: *Node,
+        consequent: *Node,
+        alternate: *Node,
+    },
+    TryCatchFinally: struct {
+        body: *Node,
+        catch_param: ?[]const u8,
+        catch_body: ?*Node,
+        finally_body: ?*Node,
+    },
+    ThrowStatement: struct {
+        value: *Node,
+    },
+    TypeOfExpression: struct {
+        operand: *Node,
+    },
 };
 
 pub const ForOfKind = enum { Const, Var, Let };
@@ -214,26 +266,26 @@ pub fn getTokenPrecedence(token_type: TokenType) Precedence {
         // Arithmetic
         .Plus, .Minus => .Sum,
         .Multiply, .Divide, .Modulo => .Product,
-        
+
         // Bitwise
         .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift => .Comparison,
-        
+
         // Comparison
         .Equal, .NotEqual, .StrictEqual, .StrictNotEqual => .Comparison,
         .LessThan, .LessThanOrEqual, .GreaterThan, .GreaterThanOrEqual => .Comparison,
-        
+
         // Logical
         .And, .Or => .Logical,
-        
+
         // Nullish coalescing
         .Nullish => .Logical,
-        
+
         // Pipeline
         .Pipe => .Logical,
-        
+
         // Assignment
         .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => .Assign,
-        
+
         else => .lowest,
     };
 }
@@ -371,6 +423,19 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("Body:\n", .{});
             try printAst(f.body, depth + 2, writer);
         },
+        .ForInLoop => |f| {
+            try writer.print("ForInLoop:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Kind: {s}\n", .{@tagName(f.kind)});
+            try printIdent(writer, depth + 1);
+            try writer.print("Variable: {s}\n", .{f.variable});
+            try printIdent(writer, depth + 1);
+            try writer.print("Object:\n", .{});
+            try printAst(f.object, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Body:\n", .{});
+            try printAst(f.body, depth + 2, writer);
+        },
         .WhileLoop => |w| {
             try writer.print("WhileLoop:\n", .{});
             try printIdent(writer, depth + 1);
@@ -379,6 +444,15 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try printIdent(writer, depth + 1);
             try writer.print("Body:\n", .{});
             try printAst(w.body, depth + 2, writer);
+        },
+        .DoWhileLoop => |d| {
+            try writer.print("DoWhileLoop:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Body:\n", .{});
+            try printAst(d.body, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Condition:\n", .{});
+            try printAst(d.condition, depth + 2, writer);
         },
         .IfStatement => |i| {
             try writer.print("IfStatement:\n", .{});
@@ -558,6 +632,69 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
                 try printAst(arg, depth + 2, writer);
             }
         },
+        .BreakStatement => |bs| {
+            if (bs.label) |lbl| {
+                try writer.print("BreakStatement(label: {s})\n", .{lbl});
+            } else {
+                try writer.print("BreakStatement\n", .{});
+            }
+        },
+        .ContinueStatement => |cs| {
+            if (cs.label) |lbl| {
+                try writer.print("ContinueStatement(label: {s})\n", .{lbl});
+            } else {
+                try writer.print("ContinueStatement\n", .{});
+            }
+        },
+        .LabeledStatement => |ls| {
+            try writer.print("LabeledStatement(label: {s}):\n", .{ls.label});
+            try printAst(ls.body, depth + 1, writer);
+        },
+        .CommaExpression => |c| {
+            try writer.print("CommaExpression:\n", .{});
+            for (c.expressions) |e| {
+                try printAst(e, depth + 1, writer);
+            }
+        },
+        .ConditionalExpression => |c| {
+            try writer.print("ConditionalExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Condition:\n", .{});
+            try printAst(c.condition, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Consequent:\n", .{});
+            try printAst(c.consequent, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Alternate:\n", .{});
+            try printAst(c.alternate, depth + 2, writer);
+        },
+        .TryCatchFinally => |tc| {
+            try writer.print("TryCatchFinally:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Body:\n", .{});
+            try printAst(tc.body, depth + 2, writer);
+            if (tc.catch_body) |cb| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Catch({s}):\n", .{tc.catch_param orelse ""});
+                try printAst(cb, depth + 2, writer);
+            }
+            if (tc.finally_body) |fb| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Finally:\n", .{});
+                try printAst(fb, depth + 2, writer);
+            }
+        },
+        .ThrowStatement => |ts| {
+            try writer.print("ThrowStatement:\n", .{});
+            try printIdent(writer, depth + 1);
+            try printAst(ts.value, depth + 2, writer);
+        },
+        .TypeOfExpression => |t| {
+            try writer.print("TypeOfExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Operand:\n", .{});
+            try printAst(t.operand, depth + 2, writer);
+        },
         .Elision => {
             try writer.print("Elision\n", .{});
         },
@@ -627,9 +764,17 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
             freeAst(allocator, f.iterable);
             freeAst(allocator, f.body);
         },
+        .ForInLoop => |f| {
+            freeAst(allocator, f.object);
+            freeAst(allocator, f.body);
+        },
         .WhileLoop => |w| {
             freeAst(allocator, w.condition);
             freeAst(allocator, w.body);
+        },
+        .DoWhileLoop => |d| {
+            freeAst(allocator, d.body);
+            freeAst(allocator, d.condition);
         },
         .IfStatement => |i| {
             freeAst(allocator, i.condition);
@@ -701,7 +846,34 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
             }
             allocator.free(dc.arguments);
         },
+        .BreakStatement => {},
+        .ContinueStatement => {},
+        .LabeledStatement => |ls| {
+            freeAst(allocator, ls.body);
+        },
         .Elision => {},
+        .CommaExpression => |c| {
+            for (c.expressions) |e| {
+                freeAst(allocator, e);
+            }
+            allocator.free(c.expressions);
+        },
+        .ConditionalExpression => |c| {
+            freeAst(allocator, c.condition);
+            freeAst(allocator, c.consequent);
+            freeAst(allocator, c.alternate);
+        },
+        .TryCatchFinally => |tc| {
+            freeAst(allocator, tc.body);
+            if (tc.catch_body) |cb| freeAst(allocator, cb);
+            if (tc.finally_body) |fb| freeAst(allocator, fb);
+        },
+        .ThrowStatement => |ts| {
+            freeAst(allocator, ts.value);
+        },
+        .TypeOfExpression => |t| {
+            freeAst(allocator, t.operand);
+        },
     }
     allocator.destroy(node);
 }
