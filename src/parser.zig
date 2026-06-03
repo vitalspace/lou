@@ -34,7 +34,7 @@ pub const Parser = struct {
             .Identifier => true,
             .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn,
             .Return, .If, .Else, .For, .While, .In, .Break, .Continue,
-            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export => true,
+            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf => true,
             else => false,
         };
     }
@@ -46,6 +46,28 @@ pub const Parser = struct {
 
     pub fn parseExpression(this: *Parser) anyerror!*ast.Node {
         return try this.parsePrecedece(.lowest);
+    }
+
+    pub fn parseCommaExpression(this: *Parser) anyerror!*ast.Node {
+        const expr = try this.parsePrecedece(.lowest);
+
+        if (this.current_token.type == .Comma) {
+            var expressions = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+            defer expressions.deinit(this.allocator);
+
+            try expressions.append(this.allocator, expr);
+            while (this.current_token.type == .Comma) {
+                this.nextToken(); // consume ','
+                const next = try this.parsePrecedece(.lowest);
+                try expressions.append(this.allocator, next);
+            }
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .CommaExpression = .{ .expressions = try expressions.toOwnedSlice(this.allocator) } };
+            return node;
+        }
+
+        return expr;
     }
 
     pub fn parseProgram(this: *Parser) ![]*ast.Node {
@@ -64,52 +86,142 @@ pub const Parser = struct {
     }
 
     pub fn parseStatement(this: *Parser) anyerror!*ast.Node {
-        switch (this.current_token.type) {
-            .Const => return try this.parseConstantDeclaration(),
-            .Var => return try this.parseVariableDeclaration(),
-            .Let => return try this.parseLetDeclaration(),
-            .For => return try this.parseForLoop(),
-            .While => return try this.parseWhileLoop(),
-            .If => return try this.parseIfStatement(),
-            .Return => return try this.parseReturnStatement(),
-            .Fn => return try this.parseFunctionDeclaration(),
-            .Import => return try this.parseImportStatement(),
-            .Export => return try this.parseExportStatement(),
-            .Identifier => {
-                if (this.peek_token.type == .Assign) {
-                    const name = this.current_token.literal;
-                    this.nextToken(); // consume identifier
-                    this.nextToken(); // consume =
-                    const value = try this.parseExpression();
-                    const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .Assignment = .{
-                        .name = name,
-                        .value = value,
-                    } };
-                    return node;
-                } else if (this.peek_token.type == .Dot or this.peek_token.type == .LBracket) {
-                    const expr = try this.parseExpression();
-                    if (this.current_token.type == .Assign) {
-                        if (expr.* == .MemberAccess) {
-                            const key = expr.MemberAccess.property;
-                            const object = expr.MemberAccess.object;
-                            this.allocator.destroy(expr);
-                            this.nextToken(); // consume '='
-                            const value = try this.parseExpression();
-                            const node = try this.allocator.create(ast.Node);
-                            node.* = .{ .PropertySet = .{ .object = object, .key = key, .value = value } };
-                            return node;
-                        }
-                        return error.InvalidAssignmentTarget;
+        const result = stmt: {
+            switch (this.current_token.type) {
+                .Const => {
+                    const first = try this.parseConstantDeclaration();
+                    if (this.current_token.type != .Comma) break :stmt first;
+                    var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+                    defer stmts.deinit(this.allocator);
+                    try stmts.append(this.allocator, first);
+                    while (this.current_token.type == .Comma) {
+                        this.nextToken(); // consume ','
+                        const name = this.current_token.literal;
+                        this.nextToken(); // consume identifier
+                        this.nextToken(); // consume '='
+                        const value = try this.parseExpression();
+                        const n = try this.allocator.create(ast.Node);
+                        n.* = .{ .ConstantDeclaration = .{ .name = name, .value = value } };
+                        try stmts.append(this.allocator, n);
                     }
-                    return expr;
-                } else {
-                    return try this.parseExpression();
-                }
-            },
-            .LBrace => return try this.parseBlockStatement(),
-            else => return try this.parseExpression(),
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    break :stmt node;
+                },
+                .Var => {
+                    const first = try this.parseVariableDeclaration();
+                    if (this.current_token.type != .Comma) break :stmt first;
+                    var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+                    defer stmts.deinit(this.allocator);
+                    try stmts.append(this.allocator, first);
+                    while (this.current_token.type == .Comma) {
+                        this.nextToken(); // consume ','
+                        const name = this.current_token.literal;
+                        this.nextToken(); // consume identifier
+                        this.nextToken(); // consume '='
+                        const value = try this.parseExpression();
+                        const n = try this.allocator.create(ast.Node);
+                        n.* = .{ .VariableDeclaration = .{ .name = name, .value = value } };
+                        try stmts.append(this.allocator, n);
+                    }
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    break :stmt node;
+                },
+                .Let => {
+                    const first = try this.parseLetDeclaration();
+                    if (this.current_token.type != .Comma) break :stmt first;
+                    var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+                    defer stmts.deinit(this.allocator);
+                    try stmts.append(this.allocator, first);
+                    while (this.current_token.type == .Comma) {
+                        this.nextToken(); // consume ','
+                        const name = this.current_token.literal;
+                        this.nextToken(); // consume identifier
+                        this.nextToken(); // consume '='
+                        const value = try this.parseExpression();
+                        const n = try this.allocator.create(ast.Node);
+                        n.* = .{ .LetDeclaration = .{ .name = name, .value = value } };
+                        try stmts.append(this.allocator, n);
+                    }
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    break :stmt node;
+                },
+                .For => break :stmt try this.parseForLoop(),
+                .While => break :stmt try this.parseWhileLoop(),
+                .Do => break :stmt try this.parseDoWhileLoop(),
+                .If => break :stmt try this.parseIfStatement(),
+                .Return => break :stmt try this.parseReturnStatement(),
+                .Break => break :stmt try this.parseBreakStatement(),
+                .Continue => break :stmt try this.parseContinueStatement(),
+                .Try => break :stmt try this.parseTryStatement(),
+                .Throw => break :stmt try this.parseThrowStatement(),
+                .Fn => break :stmt try this.parseFunctionDeclaration(),
+                .Import => break :stmt try this.parseImportStatement(),
+                .Export => break :stmt try this.parseExportStatement(),
+                .Identifier => {
+                    // Check for labeled statement: `identifier: statement`
+                    if (this.peek_token.type == .Colon) {
+                        const label = this.current_token.literal;
+                        this.nextToken(); // consume identifier
+                        this.nextToken(); // consume ':'
+                        const body = try this.parseStatement();
+                        const node = try this.allocator.create(ast.Node);
+                        node.* = .{ .LabeledStatement = .{ .label = label, .body = body } };
+                        break :stmt node;
+                    } else if (this.peek_token.type == .Assign) {
+                        const name = this.current_token.literal;
+                        this.nextToken(); // consume identifier
+                        this.nextToken(); // consume =
+                        const value = try this.parseExpression();
+                        const node = try this.allocator.create(ast.Node);
+                        node.* = .{ .Assignment = .{
+                            .name = name,
+                            .value = value,
+                        } };
+                        break :stmt node;
+                    } else if (this.peek_token.type == .Dot or this.peek_token.type == .LBracket) {
+                        const expr = try this.parseCommaExpression();
+                        if (this.current_token.type == .Assign) {
+                            if (expr.* == .MemberAccess) {
+                                const key = expr.MemberAccess.property;
+                                const object = expr.MemberAccess.object;
+                                this.allocator.destroy(expr);
+                                this.nextToken(); // consume '='
+                                const value = try this.parseExpression();
+                                const node = try this.allocator.create(ast.Node);
+                                node.* = .{ .PropertySet = .{ .object = object, .key = key, .value = value } };
+                                break :stmt node;
+                            }
+                            return error.InvalidAssignmentTarget;
+                        }
+                        break :stmt expr;
+                    } else {
+                        break :stmt try this.parseCommaExpression();
+                    }
+                },
+                .LBrace => break :stmt try this.parseBlockStatement(),
+                else => break :stmt try this.parseCommaExpression(),
+            }
+        };
+
+        // Handle comma operator at statement level
+        if (this.current_token.type == .Comma) {
+            var exprs = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+            defer exprs.deinit(this.allocator);
+            try exprs.append(this.allocator, result);
+            while (this.current_token.type == .Comma) {
+                this.nextToken(); // consume ','
+                const next = try this.parseCommaExpression();
+                try exprs.append(this.allocator, next);
+            }
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .CommaExpression = .{ .expressions = try exprs.toOwnedSlice(this.allocator) } };
+            return node;
         }
+
+        return result;
     }
 
     fn parseConstantDeclaration(this: *Parser) !*ast.Node {
@@ -197,6 +309,34 @@ pub const Parser = struct {
             left = node;
         }
 
+        // Ternary operator: `condition ? consequent : alternate`.
+        // We allow the ternary at `.lowest` and `.Assign` precedence levels.
+        // At `.lowest` it acts as the top-level expression (all higher-precedence
+        // binary operators have already been folded into `left`). At `.Assign` it
+        // lets us parse the RHS of an assignment as a full ternary expression,
+        // e.g. `q = (p % 2 == 0) ? q + 1 : q - 1` must parse as
+        // `q = ((p % 2 == 0) ? q + 1 : q - 1)` rather than
+        // `(q = (p % 2 == 0)) ? q + 1 : q - 1`.
+        if (@intFromEnum(precedence) <= @intFromEnum(ast.Precedence.Assign) and this.current_token.type == .Question) {
+            this.nextToken(); // consume '?'
+            const consequent = try this.parsePrecedece(.lowest);
+            if (this.current_token.type != .Colon) {
+                ast.freeAst(this.allocator, consequent);
+                ast.freeAst(this.allocator, left);
+                return error.ExpectedColon;
+            }
+            this.nextToken(); // consume ':'
+            const alternate = try this.parsePrecedece(.lowest);
+
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ConditionalExpression = .{
+                .condition = left,
+                .consequent = consequent,
+                .alternate = alternate,
+            } };
+            return node;
+        }
+
         return left;
     }
 
@@ -272,7 +412,7 @@ pub const Parser = struct {
                     this.current_token = saved_current;
                     this.peek_token = saved_peek;
                     this.nextToken(); // consume '('
-                    base = try this.parseExpression();
+                    base = try this.parseCommaExpression();
                     if (this.current_token.type != .RParen) {
                         return error.ExpectedRParen;
                     }
@@ -295,7 +435,7 @@ pub const Parser = struct {
                 }
             },
             .Minus => {
-                // Handle minus: could be negative number or -- prefix already handled by lexer
+                // Unary minus: -literal, -identifier, -(expr), etc.
                 this.nextToken();
                 if (this.current_token.type == .Integer) {
                     const node = try this.allocator.create(ast.Node);
@@ -310,7 +450,13 @@ pub const Parser = struct {
                     this.nextToken();
                     return node;
                 } else {
-                    return error.UnexpectedToken;
+                    // Generic unary minus: build `0 - operand` so the runtime
+                    // can rely on the existing BinaryExpression path. The
+                    // operand itself is parsed as a primary expression so we
+                    // support things like `-n`, `-obj.value`, `-arr[0]`,
+                    // `-(a + b)`, etc.
+                    const operand = try this.parsePrimary();
+                    return try this.parseBinaryExpression(.{ .FloatLiteral = .{ .value = 0.0 } }, .Minus, operand.*);
                 }
             },
             .Decrement => {
@@ -339,6 +485,14 @@ pub const Parser = struct {
                     .right = expr,
                 } };
                 node.BinaryExpression.left.* = .{ .BooleanLiteral = .{ .value = false } };
+                return node;
+            },
+            .TypeOf => {
+                // Handle typeof operator: typeof expr
+                this.nextToken(); // consume 'typeof'
+                const expr = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .TypeOfExpression = .{ .operand = expr } };
                 return node;
             },
             .BitNot => {
@@ -682,24 +836,96 @@ pub const Parser = struct {
                     } };
                     return node;
                 }
+
+                if (this.current_token.type == .In) {
+                    this.nextToken(); // consume 'in'
+                    const object = try this.parseExpression();
+
+                    if (this.current_token.type != .RParen) {
+                        return error.ExpectedRParen;
+                    }
+                    this.nextToken(); // consume ')'
+
+                    const body = try this.parseStatement();
+
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .ForInLoop = .{
+                        .kind = switch (decl_kind) {
+                            .Const => .Const,
+                            .Var => .Var,
+                            .Let => .Let,
+                            else => unreachable,
+                        },
+                        .variable = variable,
+                        .object = object,
+                        .body = body,
+                    } };
+                    return node;
+                }
             }
 
-            // Not a for...of, restore state and fall through to regular for loop parsing
+            // Not a for...of or for...in, restore state and fall through to regular for loop parsing
             this.lexer.* = saved_lexer;
             this.current_token = saved_current;
             this.peek_token = saved_peek;
         }
 
-        // Parse initialization (optional)
+        // Parse initialization (optional) — supports comma-separated initializers
         var init_stmt: ?*ast.Node = null;
         if (this.current_token.type != .Semicolon) {
-            init_stmt = try this.parseStatement();
+            if (this.current_token.type == .Var or this.current_token.type == .Let or this.current_token.type == .Const) {
+                const decl_type = this.current_token.type;
+                this.nextToken(); // consume 'var'/'let'/'const'
+
+                var init_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
+                defer init_stmts.deinit(this.allocator);
+
+                {
+                    const name = this.current_token.literal;
+                    this.nextToken(); // consume identifier
+                    if (this.current_token.type != .Assign) return error.ExpectedAssign;
+                    this.nextToken(); // consume '='
+                    const value = try this.parseExpression();
+                    const n = try this.allocator.create(ast.Node);
+                    n.* = switch (decl_type) {
+                        .Var => .{ .VariableDeclaration = .{ .name = name, .value = value } },
+                        .Let => .{ .LetDeclaration = .{ .name = name, .value = value } },
+                        .Const => .{ .ConstantDeclaration = .{ .name = name, .value = value } },
+                        else => unreachable,
+                    };
+                    try init_stmts.append(this.allocator, n);
+                }
+
+                while (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                    const name = this.current_token.literal;
+                    this.nextToken(); // consume identifier
+                    if (this.current_token.type != .Assign) return error.ExpectedAssign;
+                    this.nextToken(); // consume '='
+                    const value = try this.parseExpression();
+                    const n = try this.allocator.create(ast.Node);
+                    n.* = switch (decl_type) {
+                        .Var => .{ .VariableDeclaration = .{ .name = name, .value = value } },
+                        .Let => .{ .LetDeclaration = .{ .name = name, .value = value } },
+                        .Const => .{ .ConstantDeclaration = .{ .name = name, .value = value } },
+                        else => unreachable,
+                    };
+                    try init_stmts.append(this.allocator, n);
+                }
+
+                if (init_stmts.items.len == 1) {
+                    init_stmt = init_stmts.items[0];
+                } else {
+                    const wrapped = try this.allocator.create(ast.Node);
+                    wrapped.* = .{ .BlockStatement = .{ .statements = try init_stmts.toOwnedSlice(this.allocator) } };
+                    init_stmt = wrapped;
+                }
+            } else {
+                init_stmt = try this.parseCommaExpression();
+            }
         }
         if (this.current_token.type != .Semicolon) {
-            // Clean up on error
-            if (init_stmt) |init_node| {
-                ast.freeAst(this.allocator, init_node);
-            }
+            if (init_stmt) |init_node| ast.freeAst(this.allocator, init_node);
             return error.ExpectedSemicolon;
         }
         this.nextToken(); // consume ';'
@@ -707,17 +933,11 @@ pub const Parser = struct {
         // Parse condition (optional)
         var condition: ?*ast.Node = null;
         if (this.current_token.type != .Semicolon) {
-            condition = try this.parseExpression();
+            condition = try this.parseCommaExpression();
         }
         if (this.current_token.type != .Semicolon) {
-            // Clean up on error
-            if (init_stmt) |init_node| {
-                ast.freeAst(this.allocator, init_node);
-            }
-
-            if (condition) |cond_node| {
-                ast.freeAst(this.allocator, cond_node);
-            }
+            if (init_stmt) |init_node| ast.freeAst(this.allocator, init_node);
+            if (condition) |cond_node| ast.freeAst(this.allocator, cond_node);
             return error.ExpectedSemicolon;
         }
         this.nextToken(); // consume ';'
@@ -725,19 +945,12 @@ pub const Parser = struct {
         // Parse increment (optional)
         var increment: ?*ast.Node = null;
         if (this.current_token.type != .RParen) {
-            increment = try this.parseExpression();
+            increment = try this.parseCommaExpression();
         }
         if (this.current_token.type != .RParen) {
-            // Clean up on error
-            if (init_stmt) |init_node| {
-                ast.freeAst(this.allocator, init_node);
-            }
-            if (condition) |cond_node| {
-                ast.freeAst(this.allocator, cond_node);
-            }
-            if (increment) |inc_node| {
-                ast.freeAst(this.allocator, inc_node);
-            }
+            if (init_stmt) |init_node| ast.freeAst(this.allocator, init_node);
+            if (condition) |cond_node| ast.freeAst(this.allocator, cond_node);
+            if (increment) |inc_node| ast.freeAst(this.allocator, inc_node);
             return error.ExpectedRParen;
         }
         this.nextToken(); // consume ')'
@@ -761,7 +974,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume '('
 
-        const condition = try this.parseExpression();
+        const condition = try this.parseCommaExpression();
 
         if (this.current_token.type != .RParen) {
             ast.freeAst(this.allocator, condition);
@@ -779,6 +992,42 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parseDoWhileLoop(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'do'
+
+        const body = try this.parseStatement();
+
+        if (this.current_token.type != .While) {
+            return error.ExpectedWhile;
+        }
+        this.nextToken(); // consume 'while'
+
+        if (this.current_token.type != .LParen) {
+            return error.ExpectedLParen;
+        }
+        this.nextToken(); // consume '('
+
+        const condition = try this.parseCommaExpression();
+
+        if (this.current_token.type != .RParen) {
+            ast.freeAst(this.allocator, condition);
+            ast.freeAst(this.allocator, body);
+            return error.ExpectedRParen;
+        }
+        this.nextToken(); // consume ')'
+
+        if (this.current_token.type == .Semicolon) {
+            this.nextToken(); // consume ';'
+        }
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .DoWhileLoop = .{
+            .body = body,
+            .condition = condition,
+        } };
+        return node;
+    }
+
     fn parseIfStatement(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'if'
         if (this.current_token.type != .LParen) {
@@ -786,7 +1035,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume '('
 
-        const condition = try this.parseExpression();
+        const condition = try this.parseCommaExpression();
 
         if (this.current_token.type != .RParen) {
             ast.freeAst(this.allocator, condition);
@@ -828,6 +1077,82 @@ pub const Parser = struct {
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .ReturnStatement = .{
             .value = value,
+        } };
+        return node;
+    }
+
+    fn parseBreakStatement(this: *Parser) !*ast.Node {
+        const line = this.current_token.line;
+        this.nextToken(); // consume 'break'
+        var label: ?[]const u8 = null;
+        if (this.current_token.type == .Identifier) {
+            label = this.current_token.literal;
+            this.nextToken(); // consume label
+        }
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .BreakStatement = .{ .label = label, .line = line } };
+        return node;
+    }
+
+    fn parseContinueStatement(this: *Parser) !*ast.Node {
+        const line = this.current_token.line;
+        this.nextToken(); // consume 'continue'
+        var label: ?[]const u8 = null;
+        if (this.current_token.type == .Identifier) {
+            label = this.current_token.literal;
+            this.nextToken(); // consume label
+        }
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .ContinueStatement = .{ .label = label, .line = line } };
+        return node;
+    }
+
+    fn parseThrowStatement(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'throw'
+        const value = try this.parseExpression();
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .ThrowStatement = .{ .value = value } };
+        return node;
+    }
+
+    fn parseTryStatement(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'try'
+        const body = try this.parseBlockStatement();
+
+        var catch_param: ?[]const u8 = null;
+        var catch_body: ?*ast.Node = null;
+        var finally_body: ?*ast.Node = null;
+
+        if (this.current_token.type == .Catch) {
+            this.nextToken(); // consume 'catch'
+            if (this.current_token.type == .LParen) {
+                this.nextToken(); // consume '('
+                if (this.current_token.type == .Identifier) {
+                    catch_param = this.current_token.literal;
+                    this.nextToken(); // consume param name
+                }
+                if (this.current_token.type == .RParen) {
+                    this.nextToken(); // consume ')'
+                }
+            }
+            catch_body = try this.parseBlockStatement();
+        }
+
+        if (this.current_token.type == .Finally) {
+            this.nextToken(); // consume 'finally'
+            finally_body = try this.parseBlockStatement();
+        }
+
+        if (catch_body == null and finally_body == null) {
+            return error.ExpectedCatchOrFinally;
+        }
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .TryCatchFinally = .{
+            .body = body,
+            .catch_param = catch_param,
+            .catch_body = catch_body,
+            .finally_body = finally_body,
         } };
         return node;
     }
@@ -880,7 +1205,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume ')'
 
-        const body = try this.parseStatement();
+        const body = if (this.current_token.type == .LBrace) try this.parseBlockStatement() else try this.parseStatement();
 
         if (is_generator) {
             const node = try this.allocator.create(ast.Node);
@@ -928,7 +1253,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume '=>'
 
-        const body = try this.parseStatement();
+        const body = if (this.current_token.type == .LBrace) try this.parseBlockStatement() else try this.parseStatement();
 
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .ArrowFunction = .{
@@ -1411,4 +1736,178 @@ test "parse single quoted string" {
 
     try std.testing.expect(node.* == .StringLiteral);
     try std.testing.expectEqualStrings("hello", node.StringLiteral.value);
+}
+
+test "parse ternary - simple" {
+    const allocator = std.testing.allocator;
+    const input = "cond ? 1 : 2";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ConditionalExpression);
+    try std.testing.expect(node.ConditionalExpression.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("cond", node.ConditionalExpression.condition.Identifier.name);
+    try std.testing.expect(node.ConditionalExpression.consequent.* == .IntegerLiteral);
+    try std.testing.expectEqual(@as(i64, 1), node.ConditionalExpression.consequent.IntegerLiteral.value);
+    try std.testing.expect(node.ConditionalExpression.alternate.* == .IntegerLiteral);
+    try std.testing.expectEqual(@as(i64, 2), node.ConditionalExpression.alternate.IntegerLiteral.value);
+}
+
+test "parse ternary - condition has higher precedence operator" {
+    // `a > b ? 1 : 2` must parse as `(a > b) ? 1 : 2`, i.e. the comparison
+    // operator is folded into the condition before the `?` is recognised.
+    const allocator = std.testing.allocator;
+    const input = "a > b ? 1 : 2";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ConditionalExpression);
+    try std.testing.expect(node.ConditionalExpression.condition.* == .BinaryExpression);
+    try std.testing.expect(node.ConditionalExpression.condition.BinaryExpression.operator == .GreaterThan);
+}
+
+test "parse ternary - right associative" {
+    // `a ? b : c ? d : e` must parse as `a ? b : (c ? d : e)`.
+    const allocator = std.testing.allocator;
+    const input = "a ? b : c ? d : e";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ConditionalExpression);
+    try std.testing.expect(node.ConditionalExpression.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("a", node.ConditionalExpression.condition.Identifier.name);
+    try std.testing.expect(node.ConditionalExpression.consequent.* == .Identifier);
+    try std.testing.expectEqualStrings("b", node.ConditionalExpression.consequent.Identifier.name);
+    try std.testing.expect(node.ConditionalExpression.alternate.* == .ConditionalExpression);
+    const inner = &node.ConditionalExpression.alternate.ConditionalExpression;
+    try std.testing.expect(inner.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("c", inner.condition.Identifier.name);
+    try std.testing.expect(inner.consequent.* == .Identifier);
+    try std.testing.expectEqualStrings("d", inner.consequent.Identifier.name);
+    try std.testing.expect(inner.alternate.* == .Identifier);
+    try std.testing.expectEqualStrings("e", inner.alternate.Identifier.name);
+}
+
+test "parse ternary - missing colon is an error" {
+    const allocator = std.testing.allocator;
+    const input = "a ? b";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ExpectedColon, parser.parseExpression());
+}
+
+test "parse ternary inside assignment" {
+    // `q = cond ? a : b` must parse as `q = (cond ? a : b)`, not
+    // `(q = cond) ? a : b`.
+    const allocator = std.testing.allocator;
+    const input = "q = cond ? a : b";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    // Top-level should be an Assignment
+    try std.testing.expect(node.* == .Assignment);
+    try std.testing.expectEqualStrings("q", node.Assignment.name);
+
+    // The value of the assignment should be a ConditionalExpression
+    const val = node.Assignment.value;
+    try std.testing.expect(val.* == .ConditionalExpression);
+    try std.testing.expect(val.ConditionalExpression.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("cond", val.ConditionalExpression.condition.Identifier.name);
+    try std.testing.expect(val.ConditionalExpression.consequent.* == .Identifier);
+    try std.testing.expectEqualStrings("a", val.ConditionalExpression.consequent.Identifier.name);
+    try std.testing.expect(val.ConditionalExpression.alternate.* == .Identifier);
+    try std.testing.expectEqualStrings("b", val.ConditionalExpression.alternate.Identifier.name);
+}
+
+test "parse ternary inside assignment - grouped condition" {
+    // `q = (p % 2 == 0) ? q + 1 : q - 1` must parse as
+    // `q = ((p % 2 == 0) ? q + 1 : q - 1)`.
+    const allocator = std.testing.allocator;
+    const input = "q = (p % 2 == 0) ? q + 1 : q - 1";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    try std.testing.expect(node.* == .Assignment);
+    try std.testing.expectEqualStrings("q", node.Assignment.name);
+
+    const val = node.Assignment.value;
+    try std.testing.expect(val.* == .ConditionalExpression);
+
+    // Condition: (p % 2 == 0) is a BinaryExpression
+    try std.testing.expect(val.ConditionalExpression.condition.* == .BinaryExpression);
+    try std.testing.expect(val.ConditionalExpression.condition.BinaryExpression.operator == .Equal);
+
+    // Consequent: q + 1
+    try std.testing.expect(val.ConditionalExpression.consequent.* == .BinaryExpression);
+    try std.testing.expect(val.ConditionalExpression.consequent.BinaryExpression.operator == .Plus);
+
+    // Alternate: q - 1
+    try std.testing.expect(val.ConditionalExpression.alternate.* == .BinaryExpression);
+    try std.testing.expect(val.ConditionalExpression.alternate.BinaryExpression.operator == .Minus);
+}
+
+test "parse ternary inside compound assignment" {
+    // `x += cond ? a : b` must parse as `x += (cond ? a : b)`.
+    const allocator = std.testing.allocator;
+    const input = "x += cond ? a : b";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    // Top-level should be a BinaryExpression with += operator
+    try std.testing.expect(node.* == .BinaryExpression);
+    try std.testing.expect(node.BinaryExpression.operator == .PlusAssign);
+    try std.testing.expect(node.BinaryExpression.left.* == .Identifier);
+    try std.testing.expectEqualStrings("x", node.BinaryExpression.left.Identifier.name);
+
+    // Right side should be a ConditionalExpression
+    const right = node.BinaryExpression.right;
+    try std.testing.expect(right.* == .ConditionalExpression);
+    try std.testing.expect(right.ConditionalExpression.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("cond", right.ConditionalExpression.condition.Identifier.name);
+}
+
+test "parse ternary inside comma expression with assignment" {
+    // `(p = p + 1, q = cond ? a : b)` — the comma expression splits into two
+    // statements, and the second one has a ternary inside its assignment.
+    const allocator = std.testing.allocator;
+    const input = "p = p + 1, q = cond ? a : b";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    // Top-level should be a CommaExpression
+    try std.testing.expect(node.* == .CommaExpression);
+    try std.testing.expectEqual(@as(usize, 2), node.CommaExpression.expressions.len);
+
+    // First expression: p = p + 1 (Assignment)
+    const first = node.CommaExpression.expressions[0];
+    try std.testing.expect(first.* == .Assignment);
+    try std.testing.expectEqualStrings("p", first.Assignment.name);
+
+    // Second expression: q = cond ? a : b — parsed as BinaryExpression(q, =, ConditionalExpression)
+    // because inside a comma expression the = is treated as a binary operator, not a statement-level Assignment.
+    const second = node.CommaExpression.expressions[1];
+    try std.testing.expect(second.* == .BinaryExpression);
+    try std.testing.expect(second.BinaryExpression.operator == .Assign);
+    try std.testing.expect(second.BinaryExpression.left.* == .Identifier);
+    try std.testing.expectEqualStrings("q", second.BinaryExpression.left.Identifier.name);
+    const ternary = second.BinaryExpression.right;
+    try std.testing.expect(ternary.* == .ConditionalExpression);
+    try std.testing.expect(ternary.ConditionalExpression.condition.* == .Identifier);
+    try std.testing.expectEqualStrings("cond", ternary.ConditionalExpression.condition.Identifier.name);
 }
