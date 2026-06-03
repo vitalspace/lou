@@ -71,6 +71,7 @@ pub const TokenType = enum {
     Else,
     For,
     While,
+    Do,
     In,
     Of,
     Break,
@@ -81,12 +82,17 @@ pub const TokenType = enum {
     Match,
     Yield,
     New,
+    TypeOf,
 
     // Module system
     Import,
     From,
     As,
     Export,
+    Try,
+    Catch,
+    Finally,
+    Throw,
 
     // Delimiters
     LParen,
@@ -109,6 +115,7 @@ pub const TokenType = enum {
 pub const Token = struct {
     type: TokenType,
     literal: []const u8,
+    line: u32 = 0,
 };
 
 pub const Lexer = struct {
@@ -116,6 +123,7 @@ pub const Lexer = struct {
     position: usize,
     read_position: usize,
     ch: u8,
+    line: u32 = 1,
 
     pub fn init(input: []const u8) Lexer {
         var l = Lexer{
@@ -123,6 +131,7 @@ pub const Lexer = struct {
             .position = 0,
             .read_position = 0,
             .ch = 0,
+            .line = 1,
         };
         l.readChar();
         return l;
@@ -138,7 +147,9 @@ pub const Lexer = struct {
             }
         }
 
-        const tok: Token = switch (this.ch) {
+        const tok_line = this.line;
+
+        var tok: Token = switch (this.ch) {
             '+' => blk: {
                 if (this.peekChar() == '+') {
                     this.readChar();
@@ -287,10 +298,10 @@ pub const Lexer = struct {
                     break :blk .{ .type = .Dot, .literal = "." };
                 }
             },
-            0 => return .{ .type = .EOF, .literal = "" },
-            '"' => return this.readString('"'),
-            '\'' => return this.readString('\''),
-            '`' => return this.readTemplateString(),
+            0 => return .{ .type = .EOF, .literal = "", .line = tok_line },
+            '"' => { var t = this.readString('"'); t.line = tok_line; return t; },
+            '\'' => { var t = this.readString('\''); t.line = tok_line; return t; },
+            '`' => { var t = this.readTemplateString(); t.line = tok_line; return t; },
             else => if (std.ascii.isDigit(this.ch)) {
                 const start = this.position;
                 while (std.ascii.isDigit(this.ch)) {
@@ -301,9 +312,9 @@ pub const Lexer = struct {
                     while (std.ascii.isDigit(this.ch)) {
                         this.readChar();
                     }
-                    return .{ .type = .Float, .literal = this.input[start..this.position] };
+                    return .{ .type = .Float, .literal = this.input[start..this.position], .line = tok_line };
                 }
-                return .{ .type = .Integer, .literal = this.input[start..this.position] };
+                return .{ .type = .Integer, .literal = this.input[start..this.position], .line = tok_line };
             } else if (std.ascii.isAlphabetic(this.ch) or this.ch == '_') {
                 const start = this.position;
                 while (std.ascii.isAlphabetic(this.ch) or std.ascii.isDigit(this.ch) or this.ch == '_') {
@@ -311,13 +322,14 @@ pub const Lexer = struct {
                 }
                 const literal = this.input[start..this.position];
                 const token_type: TokenType = getKeywordType(literal);
-                return .{ .type = token_type, .literal = literal };
+                return .{ .type = token_type, .literal = literal, .line = tok_line };
             } else {
-                return .{ .type = .EOF, .literal = "" };
+                return .{ .type = .EOF, .literal = "", .line = tok_line };
             },
         };
 
         this.readChar();
+        tok.line = tok_line;
         return tok;
     }
 
@@ -329,6 +341,7 @@ pub const Lexer = struct {
         }
         this.position = this.read_position;
         this.read_position += 1;
+        if (this.ch == '\n') this.line += 1;
     }
 
     fn peekChar(this: *Lexer) u8 {
@@ -425,6 +438,7 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "else", .Else },
         .{ "for", .For },
         .{ "while", .While },
+        .{ "do", .Do },
         .{ "in", .In },
         .{ "of", .Of },
         .{ "break", .Break },
@@ -439,6 +453,11 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "as", .As },
         .{ "export", .Export },
         .{ "new", .New },
+        .{ "typeof", .TypeOf },
+        .{ "try", .Try },
+        .{ "catch", .Catch },
+        .{ "finally", .Finally },
+        .{ "throw", .Throw },
     });
     return map.get(literal) orelse .Identifier;
 }
