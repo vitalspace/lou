@@ -1,5 +1,6 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
+const utils = @import("string_utils.zig");
 
 pub fn StartsWith(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
@@ -20,11 +21,16 @@ pub fn StartsWith(args: []const Types.Value, env: *Types.Environment) Types.Buil
         .null => 0,
         else => 0,
     };
+
+    // Convert position from codepoint index to byte index
+    const cp_len = utils.cpCount(s);
+    const clamped_pos: i64 = if (position < 0) 0 else if (position > cp_len) cp_len else position;
+    const byte_start = utils.cpToByte(s, clamped_pos);
+
     if (searchString.len == 0) return .{ .value = .{ .boolean = true } };
-    const pos: usize = if (position < 0) 0 else @as(usize, @intCast(position));
-    if (pos > s.len) return .{ .value = .{ .boolean = false } };
-    if (pos + searchString.len > s.len) return .{ .value = .{ .boolean = false } };
-    return .{ .value = .{ .boolean = std.mem.eql(u8, s[pos .. pos + searchString.len], searchString) } };
+    if (byte_start > s.len) return .{ .value = .{ .boolean = false } };
+    if (byte_start + searchString.len > s.len) return .{ .value = .{ .boolean = false } };
+    return .{ .value = .{ .boolean = std.mem.eql(u8, s[byte_start .. byte_start + searchString.len], searchString) } };
 }
 
 const testing = std.testing;
@@ -110,4 +116,25 @@ test "startsWith non-string searchString returns false" {
     const result = StartsWith(&args, undefined);
     try testing.expect(result == .value);
     try testing.expect(!result.value.boolean);
+}
+
+test "startsWith multi-byte UTF-8" {
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "ño" } };
+    const result = StartsWith(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
+}
+
+test "startsWith multi-byte UTF-8 with position" {
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "ño" }, .{ .integer = 2 } };
+    const result = StartsWith(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
+}
+
+test "startsWith 4-byte emoji" {
+    var args = [_]Types.Value{ .{ .string = "\xF0\x9F\x98\x80 mundo" }, .{ .string = "\xF0\x9F\x98\x80" } };
+    const result = StartsWith(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
 }
