@@ -1,5 +1,6 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
+const utils = @import("string_utils.zig");
 
 pub fn Includes(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
@@ -20,10 +21,15 @@ pub fn Includes(args: []const Types.Value, env: *Types.Environment) Types.Builti
         .null => 0,
         else => 0,
     };
+
+    // Convert position from codepoint index to byte index
+    const cp_len = utils.cpCount(s);
+    const clamped_pos: i64 = if (position < 0) 0 else if (position > cp_len) cp_len else position;
+    const byte_start = utils.cpToByte(s, clamped_pos);
+
     if (searchString.len == 0) return .{ .value = .{ .boolean = true } };
-    const pos: usize = if (position < 0) 0 else @as(usize, @intCast(position));
-    if (pos >= s.len) return .{ .value = .{ .boolean = false } };
-    return .{ .value = .{ .boolean = std.mem.indexOf(u8, s[pos..], searchString) != null } };
+    if (byte_start >= s.len) return .{ .value = .{ .boolean = false } };
+    return .{ .value = .{ .boolean = std.mem.indexOf(u8, s[byte_start..], searchString) != null } };
 }
 
 const testing = std.testing;
@@ -95,4 +101,26 @@ test "includes no args returns false" {
     const result = Includes(&[_]Types.Value{}, undefined);
     try testing.expect(result == .value);
     try testing.expect(!result.value.boolean);
+}
+
+test "includes multi-byte UTF-8" {
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "ñ" } };
+    const result = Includes(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
+}
+
+test "includes multi-byte UTF-8 with position" {
+    // position=1 starts from cp1 ("o"), "oño" DOES include "ñ"
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "ñ" }, .{ .integer = 1 } };
+    const result = Includes(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
+}
+
+test "includes 4-byte emoji" {
+    var args = [_]Types.Value{ .{ .string = "hola \xF0\x9F\x98\x80 mundo" }, .{ .string = "\xF0\x9F\x98\x80" } };
+    const result = Includes(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expect(result.value.boolean);
 }
