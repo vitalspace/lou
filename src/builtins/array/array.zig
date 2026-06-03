@@ -32,6 +32,9 @@ const Slice = @import("slice.zig").Slice;
 const Some = @import("some.zig").Some;
 const Sort = @import("sort.zig").Sort;
 const Splice = @import("splice.zig").Splice;
+const ToReversed = @import("toReversed.zig").ToReversed;
+const ToSorted = @import("toSorted.zig").ToSorted;
+const ToSpliced = @import("toSpliced.zig").ToSpliced;
 const ToString = @import("toString.zig").ToString;
 const Unshift = @import("unshift.zig").Unshift;
 const Values = @import("values.zig").Values;
@@ -71,6 +74,9 @@ pub const ARRAY_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "some", .func = Some },
     .{ .name = "sort", .func = Sort },
     .{ .name = "splice", .func = Splice },
+    .{ .name = "toReversed", .func = ToReversed },
+    .{ .name = "toSorted", .func = ToSorted },
+    .{ .name = "toSpliced", .func = ToSpliced },
     .{ .name = "toString", .func = ToString },
     .{ .name = "unshift", .func = Unshift },
     .{ .name = "values", .func = Values },
