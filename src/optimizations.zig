@@ -18,14 +18,23 @@ pub fn optimizeArrayPushLoop(w: @TypeOf(@as(ast.Node, undefined).WhileLoop), env
     const cond = w.condition.BinaryExpression;
     if (cond.operator != .LessThan) return null;
     if (cond.left.* != .Identifier) return null;
-    if (cond.right.* != .FloatLiteral) return null;
+    if (cond.right.* != .FloatLiteral and cond.right.* != .IntegerLiteral) return null;
 
     const loop_var = cond.left.Identifier.name;
-    const limit = cond.right.FloatLiteral.value;
+    const limit: f64 = switch (cond.right.*) {
+        .FloatLiteral => |v| v.value,
+        .IntegerLiteral => |v| @floatFromInt(v.value),
+        else => unreachable,
+    };
 
     if (w.body.* != .BlockStatement) return null;
     const body_stmts = w.body.BlockStatement.statements;
     if (body_stmts.len != 2) return null;
+
+    // Don't optimize loops that contain yield (generator context)
+    for (body_stmts) |stmt| {
+        if (stmt.* == .YieldExpression) return null;
+    }
 
     if (body_stmts[0].* != .MethodCall) return null;
     const method_call = body_stmts[0].MethodCall;
@@ -413,9 +422,20 @@ pub fn optimizeSimpleWhileLoop(w: @TypeOf(@as(ast.Node, undefined).WhileLoop), e
                     }
                 }
             } else {
+                // The non-increment statement must be a recognized accumulator pattern
+                // (e.g. sum = sum + i) — if it's not, skip optimization to avoid
+                // silently skipping arbitrary loop body logic (break/continue/push/etc.)
+                const is_recognized_acc = switch (stmt.*) {
+                    .Assignment => |a| a.value.* == .BinaryExpression,
+                    .BinaryExpression => |be| be.operator == .PlusAssign or be.operator == .MinusAssign,
+                    else => false,
+                };
+                if (!is_recognized_acc) return null;
                 acc_stmt = stmt;
             }
         }
+        // acc_stmt must be set by this point (one statement is the increment, the other is the accumulator)
+        if (acc_stmt == null) return null;
     } else {
         if (body_stmts[0].* == .Assignment) {
             const assign = body_stmts[0].Assignment;
