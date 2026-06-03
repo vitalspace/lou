@@ -1,5 +1,6 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
+const utils = @import("string_utils.zig");
 
 pub fn LastIndexOf(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = env;
@@ -13,21 +14,24 @@ pub fn LastIndexOf(args: []const Types.Value, env: *Types.Environment) Types.Bui
         .string => |ss| ss,
         else => return .{ .value = .{ .integer = -1 } },
     };
-    const raw_position = if (args.len < 3) @as(i64, @intCast(s.len)) else switch (args[2]) {
+    const cp_len = utils.cpCount(s);
+    const raw_position = if (args.len < 3) cp_len else switch (args[2]) {
         .integer => |i| i,
         .float => |f| @as(i64, @intFromFloat(f)),
-        .void => @as(i64, @intCast(s.len)),
-        .null => @as(i64, @intCast(s.len)),
-        else => @as(i64, @intCast(s.len)),
+        .void => cp_len,
+        .null => cp_len,
+        else => cp_len,
     };
-    var pos: usize = if (raw_position < 0)
-        0
-    else
-        @as(usize, @intCast(raw_position));
-    if (pos > s.len) pos = s.len;
-    if (searchString.len == 0) return .{ .value = .{ .integer = @as(i64, @intCast(pos)) } };
+    const pos: i64 = if (raw_position < 0) 0 else if (raw_position > cp_len) cp_len else raw_position;
+
+    // Convert codepoint position to byte index
+    const byte_end = utils.cpToByte(s, pos);
+
+    if (searchString.len == 0) return .{ .value = .{ .integer = pos } };
     if (searchString.len > s.len) return .{ .value = .{ .integer = -1 } };
-    var start: usize = pos;
+
+    // Search backwards from byte_end
+    var start: usize = byte_end;
     if (start + searchString.len > s.len) {
         if (s.len >= searchString.len) {
             start = s.len - searchString.len;
@@ -35,11 +39,13 @@ pub fn LastIndexOf(args: []const Types.Value, env: *Types.Environment) Types.Bui
             return .{ .value = .{ .integer = -1 } };
         }
     }
+
     var i: usize = start + 1;
     while (i > 0) {
         i -= 1;
         if (std.mem.eql(u8, s[i .. i + searchString.len], searchString)) {
-            return .{ .value = .{ .integer = @as(i64, @intCast(i)) } };
+            // Convert byte offset back to codepoint index
+            return .{ .value = .{ .integer = utils.byteToCp(s, i) } };
         }
     }
     return .{ .value = .{ .integer = -1 } };
@@ -128,4 +134,29 @@ test "lastIndexOf duplicate last occurrence" {
     const result = LastIndexOf(&args, undefined);
     try testing.expect(result == .value);
     try testing.expectEqual(@as(i64, 3), result.value.integer);
+}
+
+test "lastIndexOf multi-byte UTF-8" {
+    // "ñoño" — last "o" is at codepoint 3
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "o" } };
+    const result = LastIndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 3), result.value.integer);
+}
+
+test "lastIndexOf multi-byte UTF-8 with position" {
+    // "ñoño" — searching backward from codepoint 2 (second ñ), last "o" before that is at cp 1
+    var args = [_]Types.Value{ .{ .string = "ñoño" }, .{ .string = "o" }, .{ .integer = 2 } };
+    const result = LastIndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 1), result.value.integer);
+}
+
+test "lastIndexOf 4-byte emoji" {
+    // "hola \xF0\x9F\x98\x80 mundo \xF0\x9F\x98\x80" — last emoji at cp 13
+    // h(0) o(1) l(2) a(3) ' '(4) 😀(5) ' '(6) m(7) u(8) n(9) d(10) o(11) ' '(12) 😀(13)
+    var args = [_]Types.Value{ .{ .string = "hola \xF0\x9F\x98\x80 mundo \xF0\x9F\x98\x80" }, .{ .string = "\xF0\x9F\x98\x80" } };
+    const result = LastIndexOf(&args, undefined);
+    try testing.expect(result == .value);
+    try testing.expectEqual(@as(i64, 13), result.value.integer);
 }
