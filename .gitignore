@@ -5,3 +5,4 @@ http/
 optimizations/
 bench.sh
 profiler/
+js/
