@@ -66,6 +66,7 @@ fn truthy(v: Types.Value) bool {
         .boolean => |b| b,
         .float => |f| f != 0.0,
         .integer => |i| i != 0,
+        .big_int => |b| !b.eqlZero(),
         .string => |s| s.len > 0,
         .void, .null => false,
         else => true,

@@ -345,6 +345,7 @@ pub const Parser = struct {
         switch (this.current_token.type) {
             .Integer => base = try this.parseIntegerLiteral(),
             .Float => base = try this.parseFloatLiteral(),
+            .BigInt => base = try this.parseBigIntLiteral(),
             .String => base = try this.parseStringLiteral(),
             .TemplateString => base = try this.parseStringLiteral(),
             .True => base = try this.parseBooleanLiteral(true),
@@ -364,6 +365,18 @@ pub const Parser = struct {
             },
             .Identifier => {
                 base = try this.parseIdentifier();
+                // Detect single-param arrow: identifier followed immediately by `=>`.
+                if (this.current_token.type == .Arrow) {
+                    const param_name = base.Identifier.name;
+                    this.nextToken(); // consume '=>'
+                    const body = if (this.current_token.type == .LBrace) try this.parseBlockStatement() else try this.parseExpression();
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .ArrowFunction = .{
+                        .parameters = try this.allocator.dupe([]const u8, &.{param_name}),
+                        .body = body,
+                    } };
+                    return node;
+                }
             },
             .LBrace => {
                 base = try this.parseObjectLiteral();
@@ -424,9 +437,10 @@ pub const Parser = struct {
                 this.nextToken();
                 if (this.current_token.type == .Identifier) {
                     const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .Assignment = .{
+                    node.* = .{ .UpdateExpression = .{
                         .name = this.current_token.literal,
-                        .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = this.current_token.literal } }, .Plus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+                        .prefix = true,
+                        .operator = .Increment,
                     } };
                     this.nextToken();
                     return node;
@@ -456,7 +470,7 @@ pub const Parser = struct {
                     // support things like `-n`, `-obj.value`, `-arr[0]`,
                     // `-(a + b)`, etc.
                     const operand = try this.parsePrimary();
-                    return try this.parseBinaryExpression(.{ .FloatLiteral = .{ .value = 0.0 } }, .Minus, operand.*);
+                    return try this.parseBinaryExpression(.{ .IntegerLiteral = .{ .value = 0 } }, .Minus, operand.*);
                 }
             },
             .Decrement => {
@@ -464,9 +478,10 @@ pub const Parser = struct {
                 this.nextToken();
                 if (this.current_token.type == .Identifier) {
                     const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .Assignment = .{
+                    node.* = .{ .UpdateExpression = .{
                         .name = this.current_token.literal,
-                        .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = this.current_token.literal } }, .Minus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+                        .prefix = true,
+                        .operator = .Decrement,
                     } };
                     this.nextToken();
                     return node;
@@ -528,9 +543,10 @@ pub const Parser = struct {
         if (this.current_token.type == .Increment and base.* == .Identifier) {
             this.nextToken(); // consume ++
             const node = try this.allocator.create(ast.Node);
-            node.* = .{ .Assignment = .{
+            node.* = .{ .UpdateExpression = .{
                 .name = base.Identifier.name,
-                .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Plus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+                .prefix = false,
+                .operator = .Increment,
             } };
             return node;
         }
@@ -539,9 +555,10 @@ pub const Parser = struct {
         if (this.current_token.type == .Decrement and base.* == .Identifier) {
             this.nextToken(); // consume --
             const node = try this.allocator.create(ast.Node);
-            node.* = .{ .Assignment = .{
+            node.* = .{ .UpdateExpression = .{
                 .name = base.Identifier.name,
-                .value = try this.parseBinaryExpression(.{ .Identifier = .{ .name = base.Identifier.name } }, .Minus, .{ .FloatLiteral = .{ .value = 1.0 } }),
+                .prefix = false,
+                .operator = .Decrement,
             } };
             return node;
         }
@@ -573,6 +590,15 @@ pub const Parser = struct {
         const node = try this.allocator.create(ast.Node);
         const value = try std.fmt.parseFloat(f64, this.current_token.literal);
         node.* = .{ .FloatLiteral = .{ .value = value } };
+        this.nextToken();
+        return node;
+    }
+
+    fn parseBigIntLiteral(this: *Parser) !*ast.Node {
+        const node = try this.allocator.create(ast.Node);
+        // Literal already has the trailing 'n' stripped by the lexer.
+        const digits = try this.allocator.dupe(u8, this.current_token.literal);
+        node.* = .{ .BigIntLiteral = .{ .value = digits } };
         this.nextToken();
         return node;
     }

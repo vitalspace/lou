@@ -187,9 +187,66 @@ pub fn symbolPropertyName(allocator: std.mem.Allocator, description: []const u8)
     return full;
 }
 
+pub const BigIntValue = struct {
+    allocator: std.mem.Allocator,
+    value: std.math.big.int.Managed,
+
+    pub fn init(allocator: std.mem.Allocator) !*BigIntValue {
+        const obj = try allocator.create(BigIntValue);
+        obj.* = .{
+            .allocator = allocator,
+            .value = try std.math.big.int.Managed.init(allocator),
+        };
+        return obj;
+    }
+
+    pub fn deinit(this: *BigIntValue) void {
+        this.value.deinit();
+        this.allocator.destroy(this);
+    }
+
+    pub fn fromString(allocator_: std.mem.Allocator, str: []const u8) !*BigIntValue {
+        const obj = try allocator_.create(BigIntValue);
+        obj.* = .{
+            .allocator = allocator_,
+            .value = try std.math.big.int.Managed.init(allocator_),
+        };
+        obj.value.setString(10, str) catch {
+            obj.deinit();
+            return error.InvalidBigInt;
+        };
+        return obj;
+    }
+
+    /// Convert BigInt to its digit string (without `n` suffix). Caller owns the result.
+    pub fn toString(self: *BigIntValue, allocator_: std.mem.Allocator) ![]const u8 {
+        return self.value.toString(allocator_, 10, .lower);
+    }
+
+    /// Compare two BigInts. Returns .lt, .eq, or .gt.
+    pub fn compare(a: *const BigIntValue, b: *const BigIntValue) std.math.Order {
+        return std.math.big.int.Managed.order(a.value, b.value);
+    }
+
+    /// True if BigInt equals zero.
+    pub fn eqlZero(self: *const BigIntValue) bool {
+        return self.value.eqlZero();
+    }
+
+    /// Try to convert BigInt to i64. Returns false if it doesn't fit.
+    pub fn toI64(self: *BigIntValue) ?i64 {
+        // Slow path: convert via string. (We can't read raw limbs directly
+        // without depending on internal API of std.math.big.int.Managed.)
+        const s = self.value.toString(self.allocator, 10, .lower) catch return null;
+        defer self.allocator.free(s);
+        return std.fmt.parseInt(i64, s, 10) catch null;
+    }
+};
+
 pub const Value = union(enum) {
     float: f64,
     integer: i64,
+    big_int: *BigIntValue,
     string: []const u8,
     boolean: bool,
     array: *ArrayObject,

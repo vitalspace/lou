@@ -214,6 +214,19 @@ pub fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: 
         }
 
         increment_value = getFloatValue(inc_expr.right) orelse return null;
+    } else if (f.increment.?.* == .UpdateExpression) {
+        const inc = f.increment.?.UpdateExpression;
+
+        if (!std.mem.eql(u8, inc.name, loop_var)) {
+            return null;
+        }
+        if (inc.prefix) {
+            return null;
+        }
+        if (inc.operator != .Increment) {
+            return null;
+        }
+        increment_value = 1.0;
     } else if (f.increment.?.* == .BinaryExpression) {
         const inc_expr = f.increment.?.BinaryExpression;
 

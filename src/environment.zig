@@ -47,6 +47,7 @@ pub const Environment = struct {
     iterators: std.ArrayList(*ast.ArrayIterator),
     objects: std.ArrayList(*ast.ObjectValue),
     symbols: std.ArrayList(*ast.SymbolValue),
+    bigints: std.ArrayList(*ast.BigIntValue),
     generators: std.ArrayList(*ast.GeneratorObject),
     owned_strings: std.ArrayList([]const u8),
     outer: ?*Environment,
@@ -93,6 +94,7 @@ pub const Environment = struct {
         const iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0);
         const objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0);
         const symbols = try std.ArrayList(*ast.SymbolValue).initCapacity(allocator, 0);
+        const bigints = try std.ArrayList(*ast.BigIntValue).initCapacity(allocator, 0);
         const generators = try std.ArrayList(*ast.GeneratorObject).initCapacity(allocator, 0);
         const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
 
@@ -109,6 +111,7 @@ pub const Environment = struct {
             .iterators = iterators,
             .objects = objects,
             .symbols = symbols,
+            .bigints = bigints,
             .generators = generators,
             .owned_strings = owned_strings,
             .outer = outer,
@@ -137,6 +140,7 @@ pub const Environment = struct {
             .iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0),
             .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
             .symbols = try std.ArrayList(*ast.SymbolValue).initCapacity(allocator, 0),
+            .bigints = try std.ArrayList(*ast.BigIntValue).initCapacity(allocator, 0),
             .generators = try std.ArrayList(*ast.GeneratorObject).initCapacity(allocator, 0),
             .owned_strings = owned_strings,
             .outer = outer,
@@ -327,6 +331,17 @@ pub const Environment = struct {
             }
         }
         self.symbols.deinit(self.allocator);
+
+        if (self.outer) |outer| {
+            for (self.bigints.items) |bi| {
+                outer.bigints.append(outer.allocator, bi) catch {};
+            }
+        } else {
+            for (self.bigints.items) |bi| {
+                bi.deinit();
+            }
+        }
+        self.bigints.deinit(self.allocator);
 
         self.exports.deinit();
         self.values.deinit();

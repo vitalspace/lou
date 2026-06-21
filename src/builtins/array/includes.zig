@@ -15,6 +15,10 @@ fn valEq(l: Types.Value, r: Types.Value) bool {
             .integer => |ri| lf == @as(f64, @floatFromInt(ri)),
             else => false,
         },
+        .big_int => |lb| switch (r) {
+            .big_int => |rb| lb.compare(rb) == .eq,
+            else => false,
+        },
         .string => |ls| switch (r) {
             .string => |rs| std.mem.eql(u8, ls, rs),
             else => false,

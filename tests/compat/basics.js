@@ -1,0 +1,33 @@
+console.log(2 + 3);
+console.log(10 - 4);
+console.log(6 * 7);
+console.log(15 / 4);
+console.log(15 % 4);
+console.log(-(5));
+
+console.log(Math.abs(-7));
+console.log(Math.abs(3.5));
+
+console.log("hello" + " " + "world");
+console.log("hi".length);
+console.log("JAVASCRIPT".toLowerCase());
+console.log("hello".toUpperCase());
+console.log("test".repeat(3));
+console.log("hello".includes("ell"));
+console.log("hello".startsWith("he"));
+console.log("hello".endsWith("lo"));
+console.log("a,b,c".split(","));
+console.log("hello".indexOf("l"));
+console.log("hello".slice(1, 4));
+console.log("hi".padStart(5, "0"));
+console.log("hi".padEnd(5, "."));
+
+console.log(true && false);
+console.log(true || false);
+console.log(!true);
+console.log(1 < 2);
+console.log(2 > 1);
+console.log(1 <= 1);
+console.log(1 >= 1);
+console.log(1 == 1);
+console.log(1 != 2);

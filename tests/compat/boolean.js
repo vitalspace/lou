@@ -1,0 +1,64 @@
+// Boolean constructor + prototype methods
+// Spec: specs/todos/pendientes/boolean-object.md
+
+console.log("--- Boolean() constructor as function ---");
+console.log(Boolean(1));
+console.log(Boolean(0));
+console.log(Boolean(-0));
+console.log(Boolean(Number("abc")));
+console.log(Boolean(""));
+console.log(Boolean("hello"));
+console.log(Boolean(null));
+console.log(Boolean(undefined));
+console.log(Boolean({}));
+console.log(Boolean([]));
+console.log(Boolean(0n));
+console.log(Boolean(42));
+console.log(Boolean(-1));
+console.log(Boolean("0"));
+console.log(Boolean("false"));
+
+console.log("--- Boolean() with no args ---");
+console.log(Boolean());
+
+console.log("--- new Boolean() wrapper object ---");
+const bt = new Boolean(true);
+const bf = new Boolean(false);
+console.log(typeof bt);
+console.log(typeof bf);
+console.log(bt.valueOf());
+console.log(bf.valueOf());
+console.log(bt.toString());
+console.log(bf.toString());
+
+console.log("--- new Boolean() with various args ---");
+console.log((new Boolean(1)).valueOf());
+console.log((new Boolean(0)).valueOf());
+console.log((new Boolean("")).valueOf());
+console.log((new Boolean("x")).valueOf());
+
+console.log("--- Boolean.prototype on primitives ---");
+console.log(true.toString());
+console.log(false.toString());
+console.log(true.valueOf());
+console.log(false.valueOf());
+
+console.log("--- Boolean() in expressions ---");
+console.log(Boolean(1) && "yes");
+console.log(Boolean(0) || "fallback");
+console.log(Boolean(null) ? "truthy" : "falsy");
+console.log(Boolean(undefined) ? "truthy" : "falsy");
+
+console.log("--- Truthiness of wrapper objects ---");
+if (new Boolean(false)) {
+  console.log("wrapper of false is truthy (object)");
+} else {
+  console.log("wrapper of false is falsy");
+}
+
+console.log("--- typeof of all booleans ---");
+console.log(typeof true);
+console.log(typeof false);
+console.log(typeof Boolean(1));
+console.log(typeof Boolean(0));
+console.log(typeof new Boolean(true));

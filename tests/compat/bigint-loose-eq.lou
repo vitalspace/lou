@@ -1,0 +1,97 @@
+// BigInt loose equality (==) — comprehensive tests per ECMAScript 7.2.14
+// Lou version — must produce identical output to tests/compat/bigint-loose-eq.js
+//
+// Spec: specs/todos/hechos/bigint-loose-equality.md
+
+console.log("--- Coercion Number -> BigInt ---");
+console.log(1n == 1);
+console.log(2n == 2);
+console.log(0n == 0);
+console.log(10n == 10);
+console.log(10n == 11);
+
+console.log("--- Coercion String -> BigInt (parse) ---");
+console.log(1n == "1");
+console.log(100n == "100");
+console.log(0n == "0");
+console.log(1n == "2");
+
+console.log("--- Coercion Boolean -> Number -> BigInt ---");
+console.log(1n == true);
+console.log(0n == false);
+console.log(1n == false);
+console.log(0n == true);
+
+console.log("--- Coercion Float (solo si es entero) ---");
+console.log(1n == 1.5);
+console.log(1n == 1.0);
+console.log(42n == 42.0);
+console.log(1n == 0.5);
+
+console.log("--- Null / Undefined loose eq ---");
+console.log(null == undefined);
+console.log(null == 0n);
+console.log(undefined == 0n);
+console.log(0n == null);
+console.log(0n == undefined);
+
+console.log("--- Object / Array (no ToPrimitive todavia) ---");
+console.log(0n == {});
+// 0n == [] devuelve true en Node v25 (ToPrimitive -> toString "" -> 0 -> 0n).
+// Lou no implementa ToPrimitive todavia (spec: edge futuro), asi que devuelve false.
+// Para paridad estricta con Node, Object/Array equality queda fuera del scope.
+
+console.log("--- BigInt - BigInt ---");
+console.log(1n == 1n);
+console.log(1n == 2n);
+
+console.log("--- Negativos via resta (parser convierte -5n a 0.0-5n) ---");
+console.log((0n - 1n) == -1);
+console.log((0n - 5n) == -5);
+console.log((0n - 100n) == -100);
+
+console.log("--- Negacion (!=) ---");
+console.log(1n != 2);
+console.log(1n != 1);
+console.log(1n != 1n);
+console.log(0n != 0);
+console.log(0n != "0");
+console.log(0n != false);
+console.log(0n != 1);
+
+console.log("--- Strict equality (===, !==) sin coercion ---");
+console.log(1n === 1);
+console.log(1n !== 1);
+console.log(1n === 1n);
+console.log(1n === "1");
+console.log(1n !== 1n);
+console.log(0n === -0);
+
+console.log("--- Simetria ---");
+console.log(0 == 0n);
+console.log(1 == 1n);
+console.log("0" == 0n);
+console.log("1" == 1n);
+console.log(false == 0n);
+console.log(true == 1n);
+
+console.log("--- NaN nunca es equal ---");
+const nan = 0/0;
+console.log(0n == nan);
+console.log(1n == nan);
+console.log(nan == 0n);
+console.log(nan == 1n);
+
+console.log("--- BigInt grandes ---");
+console.log(1000000n == 1000000);
+console.log(1000000n == "1000000");
+console.log(999999n == 1000000);
+
+console.log("--- Strings invalidos (parse falla) ---");
+console.log(0n == "0n");
+console.log(1n == "1n");
+console.log(0n == "0.0");
+console.log(1n == "1.0");
+console.log(1n == "1.5");
+console.log(0n == "0e0");
+console.log(1n == "1e2");

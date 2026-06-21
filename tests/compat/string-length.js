@@ -1,0 +1,22 @@
+console.log("hi".length);
+console.log("hello".length);
+console.log("".length);
+console.log("a".length);
+console.log("abcdef".length);
+
+const s = "JavaScript";
+console.log(s.length);
+console.log(s.length === 10);
+console.log(s.length > 5);
+console.log(s.length - 1);
+
+let total = 0;
+const word = "abcde";
+for (let i = 0; i < word.length; i++) {
+    total = total + 1;
+}
+console.log(total);
+
+console.log("hello world".length);
+console.log("  ".length);
+console.log("a\nb".length);

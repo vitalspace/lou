@@ -16,6 +16,16 @@ fn valToString(val: Types.Value, allocator: std.mem.Allocator) ![]const u8 {
     return switch (val) {
         .integer => |i| std.fmt.allocPrint(allocator, "{d}", .{i}),
         .float => |f| std.fmt.allocPrint(allocator, "{d}", .{f}),
+        .big_int => |b| blk: {
+            // Use the BigInt's digit string (without 'n' suffix) so numeric
+            // sort order is preserved (1n < 10n < 100n).
+            const digits = b.toString(allocator) catch break :blk try allocator.dupe(u8, "");
+            // Digits is owned; copy so the caller's defer can free it
+            // independently of the returned slice.
+            const duped = try allocator.dupe(u8, digits);
+            allocator.free(digits);
+            break :blk duped;
+        },
         .string => |s| try allocator.dupe(u8, s),
         .boolean => |b| try allocator.dupe(u8, if (b) "true" else "false"),
         .null => try allocator.dupe(u8, "null"),

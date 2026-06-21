@@ -92,6 +92,10 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
             .integer => |ri| ln == @as(f64, @floatFromInt(ri)),
             else => false,
         },
+        .big_int => |lb| switch (right) {
+            .big_int => |rb| lb.compare(rb) == .eq,
+            else => false,
+        },
         .string => |ls| switch (right) {
             .string => |rs| std.mem.eql(u8, ls, rs),
             else => false,
@@ -127,6 +131,158 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
             else => false,
         },
     };
+}
+
+/// Try to coerce a Number (integer/float) into a `*BigIntValue` when the value
+/// is integer-exact and fits in i64. Returns null otherwise (NaN, non-integer,
+/// out of range, etc.). Used by loose equality for the BigInt↔Number path.
+fn coerceNumberToBigInt(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntValue), v: ast.Value) !?*ast.BigIntValue {
+    switch (v) {
+        .integer => |i| {
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        .float => |f| {
+            if (std.math.isNan(f)) return null;
+            if (f < @as(f64, @floatFromInt(std.math.minInt(i64))) or f > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return null;
+            const i: i64 = @intFromFloat(f);
+            if (@as(f64, @floatFromInt(i)) != f) return null; // must be integer-exact
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        else => return null,
+    }
+}
+
+/// ECMAScript 7.2.14 `IsLooselyEqual(x, y)` — `==` semantics.
+///
+/// Implements:
+/// - same-type → strict comparison (NaN never equal)
+/// - null == undefined (and vice-versa)
+/// - null/undefined vs anything else → false
+/// - String ↔ Number: coerce string to number
+/// - BigInt ↔ Number: coerce number to BigInt if integer-exact
+/// - BigInt ↔ String: parse string as BigInt (BigInt() rules: no `n`,
+///   no `.`, no `e`; failure → false)
+/// - Boolean vs anything: coerce boolean to number, then compare
+/// - Object → ToPrimitive not implemented yet, returns false
+fn looseValuesEqual(
+    allocator: std.mem.Allocator,
+    bigints_list: *std.ArrayList(*ast.BigIntValue),
+    left: ast.Value,
+    right: ast.Value,
+) bool {
+    // Step 1: same type → strict equality.
+    if (std.meta.activeTag(left) == std.meta.activeTag(right)) {
+        return switch (left) {
+            .big_int => |lb| switch (right) {
+                .big_int => |rb| lb.compare(rb) == .eq,
+                else => unreachable,
+            },
+            .integer => |li| switch (right) {
+                .integer => |ri| li == ri,
+                else => unreachable,
+            },
+            .float => |lf| switch (right) {
+                .float => |rf| lf == rf,
+                else => unreachable,
+            },
+            .string => |ls| switch (right) {
+                .string => |rs| std.mem.eql(u8, ls, rs),
+                else => unreachable,
+            },
+            .boolean => |lb| switch (right) {
+                .boolean => |rb| lb == rb,
+                else => unreachable,
+            },
+            .void => true,
+            .null => true,
+            .hole => true,
+            else => false, // array/object/function/etc. compare by identity via valuesEqual
+        };
+    }
+
+    // Step 2/3: null == undefined (and vice-versa).
+    if ((left == .null and right == .void) or (left == .void and right == .null)) {
+        return true;
+    }
+
+    // null/undefined vs anything else → false.
+    if (left == .null or left == .void or right == .null or right == .void) {
+        return false;
+    }
+
+    // Step 4/5: Number (integer/float) ↔ String → coerce string to number.
+    {
+        const string_side: ?ast.Value = if (left == .string) left else if (right == .string) right else null;
+        if (string_side != null) {
+            const num_side = if (left == .string) right else left;
+            const parsed = switch (string_side.?) {
+                .string => |s| std.fmt.parseFloat(f64, s) catch std.math.nan(f64),
+                else => std.math.nan(f64),
+            };
+            return switch (num_side) {
+                .integer => |i| parsed == @as(f64, @floatFromInt(i)),
+                .float => |f| parsed == f,
+                .big_int => blk: {
+                    // String↔BigInt handled below, but defensively handle:
+                    // if string parsed as a finite integer that fits in i64 and
+                    // is integer-exact, compare via BigInt.
+                    if (std.math.isNan(parsed)) break :blk false;
+                    if (parsed < @as(f64, @floatFromInt(std.math.minInt(i64))) or parsed > @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk false;
+                    const i: i64 = @intFromFloat(parsed);
+                    if (@as(f64, @floatFromInt(i)) != parsed) break :blk false;
+                    const tmp = ast.BigIntValue.fromString(allocator, "0") catch break :blk false;
+                    bigints_list.append(allocator, tmp) catch {};
+                    tmp.value.set(i) catch break :blk false;
+                    break :blk num_side.big_int.compare(tmp) == .eq;
+                },
+                else => false,
+            };
+        }
+    }
+
+    // Step 6/7: BigInt ↔ Number → coerce number to BigInt if integer-exact.
+    {
+        const big_side: ?ast.Value = if (left == .big_int) left else if (right == .big_int) right else null;
+        if (big_side != null) {
+            const num_side = if (left == .big_int) right else left;
+            const coerced = coerceNumberToBigInt(allocator, bigints_list, num_side) catch return false;
+            const other = coerced orelse return false;
+            return big_side.?.big_int.compare(other) == .eq;
+        }
+    }
+
+    // Step 8: BigInt ↔ String (already handled by Number↔String branch above,
+    // but if bigint is one side and string is the other with no Number on the
+    // other side, parse string as BigInt).
+    {
+        const big_side = if (left == .big_int) left else if (right == .big_int) right else null;
+        const str_side = if (left == .string) left else if (right == .string) right else null;
+        if (big_side != null and str_side != null) {
+            const s = str_side.?.string;
+            const parsed = ast.BigIntValue.fromString(allocator, s) catch return false;
+            bigints_list.append(allocator, parsed) catch {};
+            return big_side.?.big_int.compare(parsed) == .eq;
+        }
+    }
+
+    // Step 9/10: Boolean ↔ anything → coerce boolean to number.
+    {
+        const bool_side: ?ast.Value = if (left == .boolean) left else if (right == .boolean) right else null;
+        if (bool_side != null) {
+            const other = if (left == .boolean) right else left;
+            const as_num: ast.Value = .{ .integer = if (bool_side.? == .boolean and bool_side.?.boolean) @as(i64, 1) else @as(i64, 0) };
+            return looseValuesEqual(allocator, bigints_list, as_num, other);
+        }
+    }
+
+    // Step 11/12: Object ↔ primitive → ToPrimitive not implemented, return false.
+    return false;
 }
 
 fn consumeBreak(env: *Environment, my_label: ?[]const u8) void {
@@ -171,6 +327,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     switch (node.*) {
         .IntegerLiteral => |i| return .{ .integer = i.value },
         .FloatLiteral => |f| return .{ .float = f.value },
+        .BigIntLiteral => |b| {
+            const big = ast.BigIntValue.fromString(env.allocator, b.value) catch return .{ .void = {} };
+            env.bigints.append(env.allocator, big) catch {};
+            return .{ .big_int = big };
+        },
         .StringLiteral => |s| return .{ .string = s.value },
         .BooleanLiteral => |b| return .{ .boolean = b.value },
         .NullLiteral => return .{ .null = {} },
@@ -348,15 +509,24 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
 
             const index: usize = switch (index_val) {
-                .integer => |i| @intCast(i),
-                .float => |f| @intFromFloat(f),
+                .integer => |i| if (i < 0) return .{ .void = {} } else @intCast(i),
+                .float => |f| blk: {
+                    if (std.math.isNan(f) or f < 0.0) return .{ .void = {} };
+                    break :blk @as(usize, @intFromFloat(f));
+                },
+                .big_int => |b| blk: {
+                    // Per ES2020: BigInt out-of-range / negative index returns undefined.
+                    const i = b.toI64() orelse return .{ .void = {} };
+                    if (i < 0) return .{ .void = {} };
+                    break :blk @as(usize, @intCast(i));
+                },
                 else => return error.InvalidIndex,
             };
             if (array_val.array.get(index)) |value| {
                 if (value == .hole) return .{ .void = {} };
                 return value;
             } else {
-                return error.IndexOutOfBounds;
+                return .{ .void = {} };
             }
         },
         .PropertySet => |p| {
@@ -389,29 +559,51 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 if (b.left.* == .ArrayIndex) {
                     const ai = b.left.ArrayIndex;
                     const obj_val = try evaluate(ai.array, env);
-                    if (obj_val != .js_object) return error.InvalidAssignment;
-const key_val = try evaluate(ai.index, env);
-                     const key: []const u8 = switch (key_val) {
-                         .string => |s| s,
-                         .integer => |i| blk: {
-                             var buf: [32]u8 = undefined;
-                             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
-                             const owned = try env.allocator.dupe(u8, s);
-                             env.owned_strings.append(env.allocator, owned) catch {};
-                             break :blk owned;
-                         },
-                         .float => |f| blk: {
-                             var buf: [64]u8 = undefined;
-                             const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
-                             const owned = try env.allocator.dupe(u8, s);
-                             env.owned_strings.append(env.allocator, owned) catch {};
-                             break :blk owned;
-                         },
-                         else => return error.InvalidIndex,
-                     };
                     const val = try evaluate(b.right, env);
-                    try obj_val.js_object.properties.put(key, val);
-                    return val;
+                    if (obj_val == .js_object) {
+                        const key_val = try evaluate(ai.index, env);
+                        const key: []const u8 = switch (key_val) {
+                            .string => |s| s,
+                            .integer => |i| blk: {
+                                var buf: [32]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk owned;
+                            },
+                            .float => |f| blk: {
+                                var buf: [64]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk owned;
+                            },
+                            else => return error.InvalidIndex,
+                        };
+                        try obj_val.js_object.properties.put(key, val);
+                        return val;
+                    }
+                    if (obj_val == .array) {
+                        // Evaluate the index now so BigInt/Integer/Float are handled.
+                        const key_val = try evaluate(ai.index, env);
+                        const index: usize = switch (key_val) {
+                            .integer => |i| if (i < 0) return val else @intCast(i),
+                            .float => |f| blk: {
+                                if (f < 0.0 or std.math.isNan(f)) return val;
+                                break :blk @as(usize, @intFromFloat(f));
+                            },
+                            .big_int => |big| blk: {
+                                // Per ES2020: BigInt index out of range / negative -> assignment is a no-op (extends).
+                                const i = big.toI64() orelse return val;
+                                if (i < 0) return val;
+                                break :blk @as(usize, @intCast(i));
+                            },
+                            else => return val,
+                        };
+                        try obj_val.array.set(index, val);
+                        return val;
+                    }
+                    return error.InvalidAssignment;
                 }
                 if (b.left.* != .Identifier) {
                     return error.InvalidAssignment;
@@ -591,8 +783,10 @@ const key_val = try evaluate(ai.index, env);
                 const left = try evaluate(b.left, env);
                 const right = try evaluate(b.right, env);
                 const result = switch (b.operator) {
-                    .Equal, .StrictEqual => valuesEqual(left, right),
-                    .NotEqual, .StrictNotEqual => !valuesEqual(left, right),
+                    .StrictEqual => valuesEqual(left, right),
+                    .StrictNotEqual => !valuesEqual(left, right),
+                    .Equal => looseValuesEqual(env.allocator, &env.bigints, left, right),
+                    .NotEqual => !looseValuesEqual(env.allocator, &env.bigints, left, right),
                     else => unreachable,
                 };
                 return .{ .boolean = result };
@@ -604,35 +798,18 @@ const key_val = try evaluate(ai.index, env);
                     .boolean => |bv| bv,
                     .integer => |iv| iv != 0,
                     .float => |fv| fv != 0.0,
+                    .big_int => |big| !big.value.eqlZero(),
                     .string => |sv| sv.len > 0,
-                    .void => false,
+                    .void, .null => false,
                     else => true,
                 };
 
                 if (b.operator == .And) {
-                    if (!left_truthy) return .{ .boolean = false };
-                    const right = try evaluate(b.right, env);
-                    const right_truthy = switch (right) {
-                        .boolean => |bv| bv,
-                        .integer => |iv| iv != 0,
-                        .float => |fv| fv != 0.0,
-                        .string => |sv| sv.len > 0,
-                        .void => false,
-                        else => true,
-                    };
-                    return .{ .boolean = right_truthy };
+                    if (!left_truthy) return left;
+                    return try evaluate(b.right, env);
                 } else {
-                    if (left_truthy) return .{ .boolean = true };
-                    const right = try evaluate(b.right, env);
-                    const right_truthy = switch (right) {
-                        .boolean => |bv| bv,
-                        .integer => |iv| iv != 0,
-                        .float => |fv| fv != 0.0,
-                        .string => |sv| sv.len > 0,
-                        .void => false,
-                        else => true,
-                    };
-                    return .{ .boolean = right_truthy };
+                    if (left_truthy) return left;
+                    return try evaluate(b.right, env);
                 }
             }
 
@@ -644,6 +821,11 @@ const key_val = try evaluate(ai.index, env);
                 defer buf.deinit(env.allocator);
                 switch (left) {
                     .string => |s| buf.appendSlice(env.allocator, s) catch return error.OutOfMemory,
+                    .big_int => |bi| {
+                        const digits = bi.toString(env.allocator) catch return error.OutOfMemory;
+                        defer env.allocator.free(digits);
+                        buf.appendSlice(env.allocator, digits) catch return error.OutOfMemory;
+                    },
                     .integer => |i| {
                         var tmp: [32]u8 = undefined;
                         const written = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return error.OutOfMemory;
@@ -665,6 +847,11 @@ const key_val = try evaluate(ai.index, env);
                 }
                 switch (right) {
                     .string => |s| buf.appendSlice(env.allocator, s) catch return error.OutOfMemory,
+                    .big_int => |bi| {
+                        const digits = bi.toString(env.allocator) catch return error.OutOfMemory;
+                        defer env.allocator.free(digits);
+                        buf.appendSlice(env.allocator, digits) catch return error.OutOfMemory;
+                    },
                     .integer => |i| {
                         var tmp: [32]u8 = undefined;
                         const written = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return error.OutOfMemory;
@@ -687,6 +874,91 @@ const key_val = try evaluate(ai.index, env);
                 const owned = buf.toOwnedSlice(env.allocator) catch return error.OutOfMemory;
                 env.owned_strings.append(env.allocator, owned) catch {};
                 return .{ .string = owned };
+            }
+
+            if (left == .big_int and right == .big_int) {
+                const lb = left.big_int;
+                const rb = right.big_int;
+                // Allocate a result BigInt and dispatch by operator.
+                const result = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                env.bigints.append(env.allocator, result) catch {};
+                switch (b.operator) {
+                    .Plus => {
+                        result.value.copy(lb.value.toConst()) catch return error.OutOfMemory;
+                        result.value.add(&lb.value, &rb.value) catch return error.OutOfMemory;
+                    },
+                    .Minus => {
+                        result.value.copy(lb.value.toConst()) catch return error.OutOfMemory;
+                        result.value.sub(&lb.value, &rb.value) catch return error.OutOfMemory;
+                    },
+                    .Multiply => {
+                        result.value.copy(lb.value.toConst()) catch return error.OutOfMemory;
+                        result.value.mul(&lb.value, &rb.value) catch return error.OutOfMemory;
+                    },
+                    .Divide => {
+                        var quot = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                        env.bigints.append(env.allocator, quot) catch {};
+                        quot.value.divFloor(&result.value, &lb.value, &rb.value) catch return error.OutOfMemory;
+                        return .{ .big_int = result };
+                    },
+                    .Modulo => {
+                        var quot = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                        env.bigints.append(env.allocator, quot) catch {};
+                        quot.value.divFloor(&result.value, &lb.value, &rb.value) catch return error.OutOfMemory;
+                        return .{ .big_int = result };
+                    },
+                    .LessThan => return .{ .boolean = lb.compare(rb) == .lt },
+                    .LessThanOrEqual => {
+                        const ord = lb.compare(rb);
+                        return .{ .boolean = ord == .lt or ord == .eq };
+                    },
+                    .GreaterThan => return .{ .boolean = lb.compare(rb) == .gt },
+                    .GreaterThanOrEqual => {
+                        const ord = lb.compare(rb);
+                        return .{ .boolean = ord == .gt or ord == .eq };
+                    },
+                    .Equal, .StrictEqual => return .{ .boolean = lb.compare(rb) == .eq },
+                    .NotEqual, .StrictNotEqual => return .{ .boolean = lb.compare(rb) != .eq },
+                    .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift => return error.UnsupportedOperator,
+                    else => return error.UnsupportedOperator,
+                }
+                return .{ .big_int = result };
+            }
+
+            if (b.operator == .Exponent) {
+                // ** is only supported for BigInt ** non-negative integer (matches ES2020).
+                const exp_int: i64 = switch (right) {
+                    .integer => |i| if (i < 0) return error.OutOfMemory else i,
+                    .big_int => |bi| bi.toI64() orelse return error.OutOfMemory,
+                    else => return error.UnsupportedOperator,
+                };
+                const base = switch (left) {
+                    .big_int => |bi| bi.value,
+                    .integer => |i| blk: {
+                        const tmp = ast.BigIntValue.fromString(env.allocator, "0") catch return error.OutOfMemory;
+                        env.bigints.append(env.allocator, tmp) catch {};
+                        tmp.value.set(i) catch return error.OutOfMemory;
+                        break :blk tmp.value;
+                    },
+                    .float => |f| {
+                        // Number ** Number — promote to f64.
+                        const e: f64 = switch (right) {
+                            .integer => |i| @floatFromInt(i),
+                            .float => |ff| ff,
+                            else => unreachable,
+                        };
+                        return .{ .float = std.math.pow(f64, f, e) };
+                    },
+                    else => return error.UnsupportedOperator,
+                };
+                const result = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                env.bigints.append(env.allocator, result) catch {};
+                result.value.set(1) catch return error.OutOfMemory;
+                var i: i64 = 0;
+                while (i < exp_int) : (i += 1) {
+                    result.value.mul(&result.value, &base) catch return error.OutOfMemory;
+                }
+                return .{ .big_int = result };
             }
 
             if (left == .integer and right == .integer) {
@@ -777,6 +1049,52 @@ const key_val = try evaluate(ai.index, env);
             const value = try evaluate(a.value, env);
             try env.setInScope(a.name, value);
             return value;
+        },
+        .UpdateExpression => |u| {
+            const current = env.get(u.name) orelse return error.UndefinedVariable;
+            const new_val = blk: {
+                switch (current) {
+                    .big_int => |bi| {
+                        const result = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                        env.bigints.append(env.allocator, result) catch {};
+                        const one_str = if (u.operator == .Increment) "1" else "-1";
+                        const delta = ast.BigIntValue.fromString(env.allocator, one_str) catch return error.OutOfMemory;
+                        defer env.allocator.free(delta.value.toString(env.allocator, 10, .lower) catch "");
+                        env.bigints.append(env.allocator, delta) catch {};
+                        if (u.operator == .Increment) {
+                            result.value.add(&bi.value, &delta.value) catch return error.OutOfMemory;
+                        } else {
+                            result.value.sub(&bi.value, &delta.value) catch return error.OutOfMemory;
+                        }
+                        break :blk ast.Value{ .big_int = result };
+                    },
+                    .integer => |i| {
+                        if (u.operator == .Increment) {
+                            const ov = @addWithOverflow(i, 1);
+                            if (ov[1] != 0) {
+                                break :blk ast.Value{ .float = @as(f64, @floatFromInt(i)) + 1.0 };
+                            }
+                            break :blk ast.Value{ .integer = ov[0] };
+                        } else {
+                            const ov = @subWithOverflow(i, 1);
+                            if (ov[1] != 0) {
+                                break :blk ast.Value{ .float = @as(f64, @floatFromInt(i)) - 1.0 };
+                            }
+                            break :blk ast.Value{ .integer = ov[0] };
+                        }
+                    },
+                    .float => |f| {
+                        if (u.operator == .Increment) {
+                            break :blk ast.Value{ .float = f + 1.0 };
+                        } else {
+                            break :blk ast.Value{ .float = f - 1.0 };
+                        }
+                    },
+                    else => return error.InvalidAssignmentTarget,
+                }
+            };
+            try env.setInScope(u.name, new_val);
+            return if (u.prefix) new_val else current;
         },
         .YieldExpression => |y| {
             if (y.is_star) {
@@ -1911,6 +2229,7 @@ const key_val = try evaluate(ai.index, env);
             const type_str: []const u8 = switch (val) {
                 .integer => "number",
                 .float => "number",
+                .big_int => "bigint",
                 .string => "string",
                 .boolean => "boolean",
                 .void => "undefined",

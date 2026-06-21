@@ -1,6 +1,5 @@
 zig-out/**
 .zig-cache/
-specs/
 http/
 optimizations/
 bench.sh

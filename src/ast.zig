@@ -10,6 +10,7 @@ pub const ObjectValue = @import("types/runtime.zig").ObjectValue;
 pub const SymbolValue = @import("types/runtime.zig").SymbolValue;
 pub const WellKnownSymbol = @import("types/runtime.zig").WellKnownSymbol;
 pub const GeneratorObject = @import("types/runtime.zig").GeneratorObject;
+pub const BigIntValue = @import("types/runtime.zig").BigIntValue;
 pub const symbolPropertyName = @import("types/runtime.zig").symbolPropertyName;
 
 pub const Property = struct {
@@ -20,6 +21,7 @@ pub const Property = struct {
 pub const NodeType = enum {
     IntegerLiteral, // Literales enteros como 42
     FloatLiteral, // Literales flotantes como 3.14
+    BigIntLiteral, // Literales BigInt como 42n
     StringLiteral,
     BooleanLiteral,
     NullLiteral, // null
@@ -31,6 +33,7 @@ pub const NodeType = enum {
     Identifier,
     BinaryExpression,
     Assignment,
+    UpdateExpression,
     ConstantDeclaration,
     VariableDeclaration,
     LetDeclaration,
@@ -72,6 +75,9 @@ pub const Node = union(NodeType) {
     FloatLiteral: struct {
         value: f64,
     },
+    BigIntLiteral: struct {
+        value: []const u8, // digit string without 'n' suffix
+    },
     StringLiteral: struct {
         value: []const u8,
     },
@@ -106,6 +112,11 @@ pub const Node = union(NodeType) {
     Assignment: struct {
         name: []const u8,
         value: *Node,
+    },
+    UpdateExpression: struct {
+        name: []const u8,
+        prefix: bool,
+        operator: TokenType, // .Increment or .Decrement
     },
     ConstantDeclaration: struct {
         name: []const u8,
@@ -266,6 +277,7 @@ pub fn getTokenPrecedence(token_type: TokenType) Precedence {
         // Arithmetic
         .Plus, .Minus => .Sum,
         .Multiply, .Divide, .Modulo => .Product,
+        .Exponent => .Highest,
 
         // Bitwise
         .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift => .Comparison,
@@ -301,6 +313,7 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
     switch (node.*) {
         .IntegerLiteral => |i| try writer.print("Integer: {d}\n", .{i.value}),
         .FloatLiteral => |f| try writer.print("Float: {d}\n", .{f.value}),
+        .BigIntLiteral => |b| try writer.print("BigInt: {s}n\n", .{b.value}),
         .BooleanLiteral => |b| try writer.print("Boolean: {}\n", .{b.value}),
         .StringLiteral => |s| try writer.print("String: \"{s}\"\n", .{s.value}),
         .ArrayLiteral => |a| {
@@ -358,6 +371,13 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try printIdent(writer, depth + 1);
             try writer.print("Value:\n", .{});
             try printAst(a.value, depth + 2, writer);
+        },
+        .UpdateExpression => |u| {
+            try writer.print("UpdateExpression: {s}{s}{s}\n", .{
+                if (u.prefix) "++" else "",
+                u.name,
+                if (u.prefix) "" else if (u.operator == .Increment) "++" else "--",
+            });
         },
         .ConstantDeclaration => |c| {
             try writer.print("ConstantDeclaration:\n", .{});
@@ -705,6 +725,7 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
     switch (node.*) {
         .IntegerLiteral => {},
         .FloatLiteral => {},
+        .BigIntLiteral => {}, // digit string is owned by the node's allocator; freed elsewhere
         .ArrayLiteral => |a| {
             for (a.elements) |elem| {
                 freeAst(allocator, elem);
@@ -733,6 +754,7 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .Assignment => |a| {
             freeAst(allocator, a.value);
         },
+        .UpdateExpression => {},
         .ConstantDeclaration => |c| {
             freeAst(allocator, c.value);
         },

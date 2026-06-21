@@ -1,0 +1,68 @@
+// BigInt.prototype.toString / toLocaleString
+// Template literal interpolation
+//
+// Spec: specs/todos/hechos/bigint-prototype-template.md
+
+console.log("--- BigInt.prototype.toString (sin sufijo n) ---");
+console.log((42n).toString());
+console.log((0n).toString());
+console.log((-42n).toString());
+console.log((123n).toString(10));
+console.log((1n).toString());
+console.log((-1n).toString());
+
+console.log("--- BigInt.prototype.toString(radix 2..36) ---");
+console.log((255n).toString(16));
+console.log((255n).toString(2));
+console.log((255n).toString(8));
+console.log((255n).toString(36));
+console.log((-255n).toString(16));
+console.log((0n).toString(16));
+console.log((0n).toString(2));
+console.log((16n).toString(16));
+console.log((100n).toString(10));
+
+console.log("--- BigInt.prototype.toString radix inválido → RangeError ---");
+try { (42n).toString(1); } catch (e) { console.log("caught:", e.message); }
+try { (42n).toString(37); } catch (e) { console.log("caught:", e.message); }
+try { (42n).toString(0); } catch (e) { console.log("caught:", e.message); }
+try { (42n).toString(-1); } catch (e) { console.log("caught:", e.message); }
+
+console.log("--- Distinción toString vs console.log ---");
+console.log("log:", 42n);
+console.log("toString:", (42n).toString());
+console.log("+ empty:", "" + 42n);
+console.log("`${}`:", `${42n}`);
+
+console.log("--- Template literal interpolación básica ---");
+const x = 42n;
+const name = "world";
+console.log(`x = ${x}`);
+console.log(`hello ${name}`);
+console.log(`${x}${x}${x}`);
+
+console.log("--- Template con expresiones múltiples ---");
+console.log(`big: ${x}, small: ${7 + 3}`);
+console.log(`a=${1}, b=${2}, c=${3}`);
+
+console.log("--- Template con tipos varios ---");
+console.log(`n=${1 + 2}`);
+console.log(`s=${"hello"}`);
+console.log(`b=${true}`);
+console.log(`u=${undefined}`);
+console.log(`null=${null}`);
+console.log(`f=${3.14}`);
+
+console.log("--- Template con BigInt (no añade 'n') ---");
+console.log(`${x}`);
+console.log(`value: ${x}`);
+console.log(`0n -> ${0n}`);
+
+console.log("--- Template sin expresiones ---");
+console.log(`hello world`);
+console.log(``);
+console.log(`simple`);
+
+console.log("--- Template vacío y bordes ---");
+console.log(`${""}`);
+console.log(`${undefined}${null}${true}${false}`);

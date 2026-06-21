@@ -3,6 +3,7 @@ const std = @import("std");
 pub const TokenType = enum {
     Integer, // Enteros como 42
     Float, // Flotantes como 3.14
+    BigInt, // BigInt como 42n (digit literal with 'n' suffix)
     String,
     TemplateString, // Template strings with backticks `...`
     Identifier,
@@ -11,6 +12,7 @@ pub const TokenType = enum {
     Plus,
     Minus,
     Multiply,
+    Exponent, // **
     Divide,
     Modulo, // %
     Increment, // ++
@@ -176,6 +178,9 @@ pub const Lexer = struct {
                 if (this.peekChar() == '=') {
                     this.readChar();
                     break :blk .{ .type = .MultiplyAssign, .literal = "*=" };
+                } else if (this.peekChar() == '*') {
+                    this.readChar();
+                    break :blk .{ .type = .Exponent, .literal = "**" };
                 } else {
                     break :blk .{ .type = .Multiply, .literal = "*" };
                 }
@@ -313,6 +318,12 @@ pub const Lexer = struct {
                         this.readChar();
                     }
                     return .{ .type = .Float, .literal = this.input[start..this.position], .line = tok_line };
+                }
+                if (this.ch == 'n') {
+                    // BigInt literal like `42n`. Strip the trailing 'n' from the
+                    // literal so downstream code only sees the digit string.
+                    this.readChar();
+                    return .{ .type = .BigInt, .literal = this.input[start..this.position - 1], .line = tok_line };
                 }
                 return .{ .type = .Integer, .literal = this.input[start..this.position], .line = tok_line };
             } else if (std.ascii.isAlphabetic(this.ch) or this.ch == '_') {

@@ -24,16 +24,16 @@ fn shouldFormatArrayWrapped(a: *Types.ArrayObject) bool {
     return total > 80;
 }
 
-fn printArrayInline(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8) void {
+fn printArrayInline(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8, env: *Types.Environment) void {
     out.print("{s}[ {s}", .{ Gy, R }) catch {};
     for (a.elements.items, 0..) |elem, j| {
         if (j > 0) out.print("{s}, {s}", .{ Gy, R }) catch {};
-        printValueTo(out, elem, use_ansi);
+        printValueTo(out, elem, use_ansi, env);
     }
     out.print("{s} ]{s}", .{ Gy, R }) catch {};
 }
 
-fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8) void {
+fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8, env: *Types.Environment) void {
     out.print("{s}[ {s}", .{ Gy, R }) catch {};
     for (a.elements.items, 0..) |elem, j| {
         if (j > 0) {
@@ -42,12 +42,12 @@ fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []
                 out.print("\n  ", .{}) catch {};
             }
         }
-        printValueTo(out, elem, use_ansi);
+        printValueTo(out, elem, use_ansi, env);
     }
     out.print("\n{s}]{s}", .{ Gy, R }) catch {};
 }
 
-fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
+fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool, env: *Types.Environment) void {
     const Y = if (use_ansi) ansi.Yellow else "";
     const G = if (use_ansi) ansi.Green else "";
     const C = if (use_ansi) ansi.Cyan else "";
@@ -65,15 +65,20 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
                 out.print("{s}{d}{s}", .{ Y, f, Reset }) catch {};
             }
         },
+        .big_int => |b| {
+            const digits = b.toString(env.allocator) catch return;
+            defer env.allocator.free(digits);
+            out.print("{s}{s}n{s}", .{ Y, digits, Reset }) catch {};
+        },
         .string => |s| out.print("{s}'{s}'{s}", .{ G, s, Reset }) catch {},
         .boolean => |b| out.print("{s}{}{s}", .{ M, b, Reset }) catch {},
         .array => |a| {
             if (a.elements.items.len == 0) {
                 out.print("{s}[]{s}", .{ Gy, Reset }) catch {};
             } else if (shouldFormatArrayWrapped(a)) {
-                printArrayWrapped(out, a, use_ansi, Gy, Reset);
+                printArrayWrapped(out, a, use_ansi, Gy, Reset, env);
             } else {
-                printArrayInline(out, a, use_ansi, Gy, Reset);
+                printArrayInline(out, a, use_ansi, Gy, Reset, env);
             }
         },
         .hole => out.print("{s}<empty>{s}", .{ D, Reset }) catch {},
@@ -112,7 +117,7 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool) void {
                  } else {
                      out.print("{s}{s}:{s} ", .{ C, key, Reset }) catch {};
                  }
-                 printValueTo(out, entry.value_ptr.*, use_ansi);
+                 printValueTo(out, entry.value_ptr.*, use_ansi, env);
              }
              out.print("{s} }}{s}", .{ Gy, Reset }) catch {};
          },
@@ -134,7 +139,7 @@ pub fn Error(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
             if (i > 0) out.print(" ", .{}) catch {};
             switch (arg) {
                 .string => |s| out.print("{s}{s}{s}", .{ G, s, Reset }) catch {},
-                else => printValueTo(out, arg, use_ansi),
+                else => printValueTo(out, arg, use_ansi, env),
             }
         }
         out.print("\n", .{}) catch {};

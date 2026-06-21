@@ -11,13 +11,13 @@ const evaluateGeneratorThrow = @import("evaluator.zig").evaluateGeneratorThrow;
 
 pub const Op = enum(u8) {
     constant, add, sub, mul, div, mod_, negate,
-    eq, ne, lt, gt,
+    eq, ne, strict_eq, strict_ne, lt, gt,
     not_, and_, or_, nullish,
     true_, false_, null_, void_,
     pop, dup,
     def_global, get_global, set_global, try_get_global,
     get_local, set_local,
-    jump, jump_if_false, jump_if_true, loop,
+    jump, jump_if_false, jump_if_true, jump_if_not_nullish, loop,
     make_array, index_get, get_prop, make_object, set_prop,
     bit_and, bit_or, bit_xor, bit_not, left_shift, right_shift,
     eval_node, builtin, method_call, call, ret,
@@ -494,6 +494,11 @@ fn forStmt(self: *Compiler, n: *ast.Node) void {
             if (be.operator != .Plus) return false;
             if (be.left.* != .Identifier or !std.mem.eql(u8, be.left.Identifier.name, loop_var)) return false;
             inc_val = getFloatValue(be.right) orelse return false;
+        } else if (inc.* == .UpdateExpression) {
+            const u = inc.UpdateExpression;
+            if (!std.mem.eql(u8, u.name, loop_var)) return false;
+            if (u.prefix or u.operator != .Increment) return false;
+            inc_val = 1.0;
         } else if (inc.* == .BinaryExpression) {
             const be = inc.BinaryExpression;
             if (be.operator != .Assign) return false;
@@ -741,6 +746,11 @@ fn forStmt(self: *Compiler, n: *ast.Node) void {
             .BooleanLiteral => |v| self.c.op(if (v.value) .true_ else .false_),
             .NullLiteral => self.c.op(.null_),
             .VoidLiteral => self.c.op(.void_),
+            .BigIntLiteral => {
+                // BigInt literal: allocate at runtime via the AST evaluator.
+                // Falls back to evaluate() which knows how to make BigIntValue.
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
             .Identifier => |id| self.c.op2w(.get_global, self.c.emitS(id.name)),
             .BinaryExpression => |b| switch (b.operator) {
                 .Assign => {
@@ -749,6 +759,11 @@ fn forStmt(self: *Compiler, n: *ast.Node) void {
                         self.expr(b.right);
                         // set_prop already pushes the value back, no dup needed
                         self.c.op2w(.set_prop, self.c.emitS(b.left.MemberAccess.property));
+                    } else if (b.left.* == .ArrayIndex) {
+                        // ArrayIndex assignment (`obj[k] = v`, `arr[i] = v`) is
+                        // not directly supported in the VM bytecode. Defer to
+                        // the AST evaluator at runtime via eval_node.
+                        self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
                     } else {
                         self.expr(b.right);
                         if (b.left.* == .Identifier) {
@@ -779,27 +794,88 @@ fn forStmt(self: *Compiler, n: *ast.Node) void {
                     self.c.op(.bit_not);
                 },
                 else => {
-                    self.expr(b.left); self.expr(b.right);
                     switch (b.operator) {
-                        .Plus => self.c.op(.add), .Minus => self.c.op(.sub),
-                        .Multiply => self.c.op(.mul), .Divide => self.c.op(.div), .Modulo => self.c.op(.mod_),
-                        .Equal, .StrictEqual => self.c.op(.eq),
-                        .NotEqual, .StrictNotEqual => self.c.op(.ne),
-                        .LessThan => self.c.op(.lt), .GreaterThan => self.c.op(.gt),
-                        .LessThanOrEqual => { self.c.op(.gt); self.c.op(.not_); },
-                        .GreaterThanOrEqual => { self.c.op(.lt); self.c.op(.not_); },
-                        .And => self.c.op(.and_), .Or => self.c.op(.or_), .Nullish => self.c.op(.nullish),
-                        .Not => self.c.op(.not_),
-                        .BitAnd => self.c.op(.bit_and),
-                        .BitOr => self.c.op(.bit_or),
-                        .BitXor => self.c.op(.bit_xor),
-                        .LeftShift => self.c.op(.left_shift),
-                        .RightShift => self.c.op(.right_shift),
-                        else => {},
+                        .And => {
+                            // Short-circuit: if left is falsy, skip right (left stays on stack).
+                            //   expr(left); jump_if_false END; pop; expr(right); END:
+                            self.expr(b.left);
+                            const end = self.c.jmp(.jump_if_false);
+                            self.c.op(.pop);
+                            self.expr(b.right);
+                            self.c.ptch(end);
+                        },
+                        .Or => {
+                            // Short-circuit: if left is truthy, skip right (left stays on stack).
+                            //   expr(left); jump_if_true END; pop; expr(right); END:
+                            self.expr(b.left);
+                            const end = self.c.jmp(.jump_if_true);
+                            self.c.op(.pop);
+                            self.expr(b.right);
+                            self.c.ptch(end);
+                        },
+                        .Nullish => {
+                            // Short-circuit: if left is not nullish, skip right (left stays on stack).
+                            //   expr(left); jump_if_not_nullish END; pop; expr(right); END:
+                            self.expr(b.left);
+                            const end = self.c.jmp(.jump_if_not_nullish);
+                            self.c.op(.pop);
+                            self.expr(b.right);
+                            self.c.ptch(end);
+                        },
+                        else => {
+                            self.expr(b.left); self.expr(b.right);
+                            switch (b.operator) {
+                                .Plus => self.c.op(.add), .Minus => self.c.op(.sub),
+                                .Multiply => self.c.op(.mul), .Divide => self.c.op(.div), .Modulo => self.c.op(.mod_),
+                                .Equal => self.c.op(.eq),
+                                .StrictEqual => self.c.op(.strict_eq),
+                                .NotEqual => self.c.op(.ne),
+                                .StrictNotEqual => self.c.op(.strict_ne),
+                                .LessThan => self.c.op(.lt), .GreaterThan => self.c.op(.gt),
+                                .LessThanOrEqual => { self.c.op(.gt); self.c.op(.not_); },
+                                .GreaterThanOrEqual => { self.c.op(.lt); self.c.op(.not_); },
+                                .Not => self.c.op(.not_),
+                                .BitAnd => self.c.op(.bit_and),
+                                .BitOr => self.c.op(.bit_or),
+                                .BitXor => self.c.op(.bit_xor),
+                                .LeftShift => self.c.op(.left_shift),
+                                .RightShift => self.c.op(.right_shift),
+                                else => {},
+                            }
+                        },
                     }
                 },
             },
             .Assignment => |a| { self.expr(a.value); self.c.op(.dup); self.c.op2w(.set_global, self.c.emitS(a.name)); },
+            .UpdateExpression => |u| {
+                // For ++x / --x (prefix) leave the new value on the stack;
+                // for x++ / x-- (postfix) leave the original (pre-update) value.
+                //
+                // Bytecode for prefix:
+                //   get_global x; <const 1>; add|sub; dup; set_global x;
+                // Bytecode for postfix:
+                //   get_global x; get_global x; <const 1>; add|sub; dup;
+                //   set_global x; pop;
+                //
+                // The constant 1.0 is a Float; the VM's BigInt-aware add/sub
+                // coerces it to BigInt when the other operand is BigInt.
+                const arith_op: Op = if (u.operator == .Increment) .add else .sub;
+                if (u.prefix) {
+                    self.c.op2w(.get_global, self.c.emitS(u.name));
+                    self.c.emitC(.{ .float = 1.0 });
+                    self.c.op(arith_op);
+                    self.c.op(.dup);
+                    self.c.op2w(.set_global, self.c.emitS(u.name));
+                } else {
+                    self.c.op2w(.get_global, self.c.emitS(u.name));
+                    self.c.op2w(.get_global, self.c.emitS(u.name));
+                    self.c.emitC(.{ .float = 1.0 });
+                    self.c.op(arith_op);
+                    self.c.op(.dup);
+                    self.c.op2w(.set_global, self.c.emitS(u.name));
+                    self.c.op(.pop);
+                }
+            },
             .ArrayLiteral => |a| {
                 var has_spread = false;
                 for (a.elements) |e| {
@@ -1045,7 +1121,8 @@ pub const VM = struct {
 
     pub fn interpret(self: *VM, chunk: *Chunk) !void {
         self.c = chunk; self.ip = 0; self.sp = 0;
-        while (self.ip < self.c.code.items.len) {
+        while (true) {
+            if (self.ip >= self.c.code.items.len) break;
             const op: Op = @enumFromInt(self.c.code.items[self.ip]); self.ip += 1;
             switch (op) {
                 .constant => { const ci = self.readU16(); self.push(self.c.consts.items[ci]); if (self.sp >= 65000) std.debug.print("constant: sp={}, ip={}\n", .{self.sp, self.ip}); },
@@ -1053,6 +1130,12 @@ pub const VM = struct {
                 .null_ => self.push(.{ .null = {} }), .void_ => self.push(.{ .void = {} }),
                 .add, .sub, .mul, .div, .mod_ => {
                     const b = self.pop(); const a = self.pop();
+                    // BigInt + BigInt / BigInt + Number — handle directly here.
+                    if (a == .big_int or b == .big_int) {
+                        const result = vmBigIntArith(self.env.allocator, &self.env.bigints, op, a, b);
+                        self.push(result);
+                        continue;
+                    }
                     if (op == .add and (a == .string or b == .string)) {
                         var buf = std.ArrayList(u8).initCapacity(self.env.allocator, 64) catch unreachable;
                         defer buf.deinit(self.env.allocator);
@@ -1066,13 +1149,31 @@ pub const VM = struct {
                     }
                 },
                 .negate => { const v = toF64(self.pop()) orelse 0.0; self.push(.{ .float = -v }); },
-                .eq => self.push(.{ .boolean = valEq(self.pop(), self.pop()) }),
-                .ne => self.push(.{ .boolean = !valEq(self.pop(), self.pop()) }),
-                .lt => { const b = self.pop(); const a = self.pop(); const av = toF64(a) orelse 0.0; const bv = toF64(b) orelse 0.0; self.push(.{ .boolean = av < bv }); },
-                .gt => { const b = self.pop(); const a = self.pop(); const av = toF64(a) orelse 0.0; const bv = toF64(b) orelse 0.0; self.push(.{ .boolean = av > bv }); },
+                .eq => self.push(.{ .boolean = valEq(self.env.allocator, &self.env.bigints, self.pop(), self.pop()) }),
+                .ne => self.push(.{ .boolean = !valEq(self.env.allocator, &self.env.bigints, self.pop(), self.pop()) }),
+                .strict_eq => self.push(.{ .boolean = valStrictEq(self.pop(), self.pop()) }),
+                .strict_ne => self.push(.{ .boolean = !valStrictEq(self.pop(), self.pop()) }),
+                .lt => {
+                    const b = self.pop(); const a = self.pop();
+                    if (a == .big_int and b == .big_int) {
+                        self.push(.{ .boolean = a.big_int.compare(b.big_int) == .lt });
+                    } else {
+                        const av = toF64(a) orelse 0.0; const bv = toF64(b) orelse 0.0;
+                        self.push(.{ .boolean = av < bv });
+                    }
+                },
+                .gt => {
+                    const b = self.pop(); const a = self.pop();
+                    if (a == .big_int and b == .big_int) {
+                        self.push(.{ .boolean = a.big_int.compare(b.big_int) == .gt });
+                    } else {
+                        const av = toF64(a) orelse 0.0; const bv = toF64(b) orelse 0.0;
+                        self.push(.{ .boolean = av > bv });
+                    }
+                },
                 .not_ => self.push(.{ .boolean = !truthy(self.pop()) }),
-                .and_ => { const b = self.pop(); const a = self.pop(); self.push(.{ .boolean = truthy(a) and truthy(b) }); },
-                .or_ => { const b = self.pop(); const a = self.pop(); self.push(.{ .boolean = truthy(a) or truthy(b) }); },
+                .and_ => { const b = self.pop(); const a = self.pop(); self.push(if (truthy(a)) b else a); },
+                .or_ => { const b = self.pop(); const a = self.pop(); self.push(if (truthy(a)) a else b); },
                 .nullish => { const b = self.pop(); const a = self.pop(); self.push(if (a == .null or a == .void) b else a); },
                 .bit_and => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a & b }); },
                 .bit_or => { const b = toInt(self.pop()); const a = toInt(self.pop()); self.push(.{ .integer = a | b }); },
@@ -1100,6 +1201,7 @@ pub const VM = struct {
                          self.ip += 2 + ((@as(usize,hi) << 8) | lo); },
                 .jump_if_false => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2; if (!truthy(self.peek(0))) self.ip += (@as(usize,hi) << 8) | lo; },
                 .jump_if_true => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2; if (truthy(self.peek(0))) self.ip += (@as(usize,hi) << 8) | lo; },
+                .jump_if_not_nullish => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2; const v = self.peek(0); if (!(v == .null or v == .void)) self.ip += (@as(usize,hi) << 8) | lo; },
                 .loop => { const hi = self.c.code.items[self.ip]; const lo = self.c.code.items[self.ip+1]; self.ip += 2; self.ip -= (@as(usize,hi) << 8) | lo; },
                 .make_array => {
                     const cnt = self.c.code.items[self.ip]; self.ip += 1;
@@ -1128,9 +1230,32 @@ pub const VM = struct {
                             } else {
                                 self.push(.{ .void = {} });
                             }
+                        } else if (idx == .big_int) {
+                            // BigInt index: convert to i64 with precision check.
+                            // - Out-of-range / non-integer / negative -> undefined (void).
+                            // Per ES2020 ToIndex / ToIntegerOrInfinity semantics.
+                            const big = idx.big_int;
+                            if (big.eqlZero()) {
+                                self.push(arr.array.get(0) orelse .{ .void = {} });
+                            } else if (big.toI64()) |i| {
+                                if (i < 0) {
+                                    self.push(.{ .void = {} });
+                                } else {
+                                    self.push(arr.array.get(@intCast(i)) orelse .{ .void = {} });
+                                }
+                            } else {
+                                self.push(.{ .void = {} });
+                            }
                         } else {
-                            const i: usize = switch (idx) { .integer => |n| @intCast(n), .float => |n| @intFromFloat(n), else => return error.InvalidIndex };
-                            self.push(arr.array.get(i) orelse return error.IndexOutOfBounds);
+                            // Integer/float index with negative check.
+                            if (idx == .integer and idx.integer < 0) {
+                                self.push(.{ .void = {} });
+                            } else if (idx == .float and (idx.float < 0.0 or std.math.isNan(idx.float))) {
+                                self.push(.{ .void = {} });
+                            } else {
+                                const i: usize = switch (idx) { .integer => |n| @intCast(n), .float => |n| @intFromFloat(n), else => return error.InvalidIndex };
+                                self.push(arr.array.get(i) orelse .{ .void = {} });
+                            }
                         }
                     } else if (arr == .js_object) {
                         if (idx == .symbol) {
@@ -1382,6 +1507,7 @@ pub const VM = struct {
                     const val = self.pop();
                     const type_str: []const u8 = switch (val) {
                         .integer, .float => "number",
+                        .big_int => "bigint",
                         .string => "string",
                         .boolean => "boolean",
                         .void => "undefined",
@@ -1611,17 +1737,202 @@ pub const VM = struct {
     }
 };
 
-fn truthy(v: Value) bool { return switch (v) { .boolean => |b| b, .float => |f| f != 0.0, .integer => |i| i != 0, .string => |s| s.len > 0, .void,.null,.hole => false, else => true }; }
+fn truthy(v: Value) bool { return switch (v) {
+    .boolean => |b| b,
+    .float => |f| f != 0.0,
+    .integer => |i| i != 0,
+    .big_int => |b| !b.eqlZero(),
+    .string => |s| s.len > 0,
+    .void, .null, .hole => false,
+    else => true,
+}; }
 fn toF64(v: Value) ?f64 { return switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => null }; }
 fn toInt(v: Value) i64 { return switch (v) { .integer => |i| i, .float => |f| @intFromFloat(f), else => 0 }; }
-fn valEq(l: Value, r: Value) bool { return switch (l) {
-    .integer => |li| switch (r) { .integer => |ri| li==ri, .float => |rf| @as(f64,@floatFromInt(li))==rf, else => false },
+
+/// Convert an arbitrary Value to a *BigIntValue for arithmetic purposes.
+/// If the value is already a big_int, it's used as-is.
+/// If it's an integer or float (the latter only when it fits in i64), it's
+/// promoted. Otherwise returns null.
+fn vmCoerceBigInt(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntValue), v: Value) !?*ast.BigIntValue {
+    switch (v) {
+        .big_int => |b| return b,
+        .integer => |i| {
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        .float => |f| {
+            if (std.math.isNan(f) or f < @as(f64, @floatFromInt(std.math.minInt(i64))) or f > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                return null;
+            }
+            const i: i64 = @intFromFloat(f);
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        else => return null,
+    }
+}
+
+/// BigInt-aware arithmetic for VM. Returns a value to push on the stack.
+/// Only handles cases where at least one operand is big_int; otherwise
+/// would have been caught by the caller.
+fn vmBigIntArith(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntValue), op: Op, a: Value, b: Value) Value {
+    const la = vmCoerceBigInt(allocator, bigints_list, a) catch return .void;
+    const ra = vmCoerceBigInt(allocator, bigints_list, b) catch return .void;
+    const lb = la orelse return .void;
+    const rb = ra orelse return .void;
+
+    const result = ast.BigIntValue.init(allocator) catch return .void;
+    bigints_list.append(allocator, result) catch {};
+
+    switch (op) {
+        .add => {
+            // result = lb + rb
+            result.value.add(&lb.value, &rb.value) catch return .void;
+        },
+        .sub => {
+            // result = lb - rb
+            result.value.sub(&lb.value, &rb.value) catch return .void;
+        },
+        .mul => {
+            // result = lb * rb
+            result.value.mul(&lb.value, &rb.value) catch return .void;
+        },
+        .div => {
+            // result = lb / rb (floor div)
+            result.value.divFloor(&result.value, &lb.value, &rb.value) catch return .void;
+        },
+        .mod_ => {
+            // Use a temp q for the quotient (we only want the remainder).
+            var q = ast.BigIntValue.init(allocator) catch return .void;
+            bigints_list.append(allocator, q) catch {};
+            q.value.divFloor(&result.value, &lb.value, &rb.value) catch return .void;
+        },
+        else => return .void,
+    }
+    return .{ .big_int = result };
+}
+/// Try to coerce a Number (integer/float) into a `*BigIntValue` when the value
+/// is integer-exact and fits in i64. Returns null otherwise.
+fn vmCoerceNumberToBigInt(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntValue), v: Value) !?*ast.BigIntValue {
+    switch (v) {
+        .integer => |i| {
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        .float => |f| {
+            if (std.math.isNan(f)) return null;
+            if (f < @as(f64, @floatFromInt(std.math.minInt(i64))) or f > @as(f64, @floatFromInt(std.math.maxInt(i64)))) return null;
+            const i: i64 = @intFromFloat(f);
+            if (@as(f64, @floatFromInt(i)) != f) return null;
+            const tmp = ast.BigIntValue.fromString(allocator, "0") catch return null;
+            bigints_list.append(allocator, tmp) catch {};
+            tmp.value.set(i) catch return null;
+            return tmp;
+        },
+        else => return null,
+    }
+}
+
+/// Strict equality (`===`) — same type, same value. NaN never equal.
+fn valStrictEq(l: Value, r: Value) bool { return switch (l) {
+    .integer => |li| switch (r) { .integer => |ri| li==ri, else => false },
     .float => |lf| switch (r) { .float => |rf| lf==rf, .integer => |ri| lf==@as(f64,@floatFromInt(ri)), else => false },
+    .big_int => |lb| switch (r) { .big_int => |rb| lb.compare(rb) == .eq, else => false },
     .string => |ls| switch (r) { .string => |rs| std.mem.eql(u8,ls,rs), else => false },
     .boolean => |lb| switch (r) { .boolean => |rb| lb==rb, else => false },
     .void => r == .void, .null => r == .null, .hole => r == .void,
+    .symbol => |ls| switch (r) { .symbol => |rs| ls.id == rs.id, else => false },
     else => false,
 }; }
+
+/// Loose equality (`==`) — ECMAScript 7.2.14 IsLooselyEqual.
+fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntValue), l: Value, r: Value) bool {
+    // Step 1: same type → strict comparison.
+    if (std.meta.activeTag(l) == std.meta.activeTag(r)) {
+        return switch (l) {
+            .big_int => |lb| switch (r) { .big_int => |rb| lb.compare(rb) == .eq, else => unreachable },
+            .integer => |li| switch (r) { .integer => |ri| li == ri, else => unreachable },
+            .float => |lf| switch (r) { .float => |rf| lf == rf, else => unreachable },
+            .string => |ls| switch (r) { .string => |rs| std.mem.eql(u8, ls, rs), else => unreachable },
+            .boolean => |lb| switch (r) { .boolean => |rb| lb == rb, else => unreachable },
+            .void, .null, .hole => true,
+            else => false,
+        };
+    }
+
+    // Step 2/3: null == undefined (and vice-versa).
+    if ((l == .null and r == .void) or (l == .void and r == .null)) return true;
+
+    // null/undefined vs anything else → false.
+    if (l == .null or l == .void or r == .null or r == .void) return false;
+
+    // Step 4/5: Number (integer/float) ↔ String → coerce string to number.
+    {
+        const str_side: ?Value = if (l == .string) l else if (r == .string) r else null;
+        if (str_side != null) {
+            const num_side = if (l == .string) r else l;
+            const s = str_side.?.string;
+            const parsed = std.fmt.parseFloat(f64, s) catch std.math.nan(f64);
+            return switch (num_side) {
+                .integer => |i| parsed == @as(f64, @floatFromInt(i)),
+                .float => |f| parsed == f,
+                .big_int => blk: {
+                    if (std.math.isNan(parsed)) break :blk false;
+                    if (parsed < @as(f64, @floatFromInt(std.math.minInt(i64))) or parsed > @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk false;
+                    const i: i64 = @intFromFloat(parsed);
+                    if (@as(f64, @floatFromInt(i)) != parsed) break :blk false;
+                    const tmp = ast.BigIntValue.fromString(allocator, "0") catch break :blk false;
+                    bigints_list.append(allocator, tmp) catch {};
+                    tmp.value.set(i) catch break :blk false;
+                    break :blk num_side.big_int.compare(tmp) == .eq;
+                },
+                else => false,
+            };
+        }
+    }
+
+    // Step 6/7: BigInt ↔ Number → coerce number to BigInt if integer-exact.
+    {
+        const big_side = if (l == .big_int) l else if (r == .big_int) r else null;
+        if (big_side != null) {
+            const num_side = if (l == .big_int) r else l;
+            const coerced = vmCoerceNumberToBigInt(allocator, bigints_list, num_side) catch return false;
+            const other = coerced orelse return false;
+            return big_side.?.big_int.compare(other) == .eq;
+        }
+    }
+
+    // Step 8: BigInt ↔ String (no Number on the other side).
+    {
+        const big_side = if (l == .big_int) l else if (r == .big_int) r else null;
+        const str_side = if (l == .string) l else if (r == .string) r else null;
+        if (big_side != null and str_side != null) {
+            const s = str_side.?.string;
+            const parsed = ast.BigIntValue.fromString(allocator, s) catch return false;
+            bigints_list.append(allocator, parsed) catch {};
+            return big_side.?.big_int.compare(parsed) == .eq;
+        }
+    }
+
+    // Step 9/10: Boolean ↔ anything → coerce boolean to number.
+    {
+        const bool_side: ?Value = if (l == .boolean) l else if (r == .boolean) r else null;
+        if (bool_side != null) {
+            const other = if (l == .boolean) r else l;
+            const as_num: Value = .{ .integer = if (bool_side.? == .boolean and bool_side.?.boolean) @as(i64, 1) else @as(i64, 0) };
+            return valEq(allocator, bigints_list, as_num, other);
+        }
+    }
+
+    // Step 11/12: Object ↔ primitive → ToPrimitive not implemented yet.
+    return false;
+}
 fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { switch (v) {
     .string => |s| buf.appendSlice(a, s) catch {},
     .integer => |i| { var tmp: [32]u8 = undefined; const w = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch unreachable; buf.appendSlice(a, tmp[0..w.len]) catch {}; },
@@ -1634,17 +1945,23 @@ fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void { swit
             buf.appendSlice(a, tmp[0..w.len]) catch {};
         }
     },
+    .big_int => |b| {
+        const digits = b.toString(a) catch return;
+        defer a.free(digits);
+        buf.appendSlice(a, digits) catch {};
+        buf.appendSlice(a, "n") catch {};
+    },
     .boolean => |b| buf.appendSlice(a, if (b) "true" else "false") catch {},
     .void => buf.appendSlice(a, "undefined") catch {},
     .null => buf.appendSlice(a, "null") catch {},
     .hole => buf.appendSlice(a, "undefined") catch {},
     else => buf.appendSlice(a, "[object]") catch {},
-}
-}
+} }
 fn getFloatValue(node: *ast.Node) ?f64 {
     return switch (node.*) {
         .FloatLiteral => |v| v.value,
         .IntegerLiteral => |v| @floatFromInt(v.value),
+        .BigIntLiteral => null,
         else => null,
     };
 }

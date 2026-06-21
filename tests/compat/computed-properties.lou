@@ -1,0 +1,76 @@
+// Computed property keys in object literals (ES2015).
+// `{ [expr]: val }` evaluates `expr` and uses its string-coerced result as the property name.
+
+// --- Basic computed key with variable ---
+
+const field = "email";
+const user = { [field]: "alice@example.com" };
+console.log(user.email);
+
+// --- Computed key with string concatenation ---
+
+const obj = { ["hello" + "World"]: 42 };
+console.log(obj.helloWorld);
+
+// --- Computed keys with prefix concatenation ---
+
+const prefix = "get";
+const api = {
+    [prefix + "Users"]: 1,
+    [prefix + "Posts"]: 2
+};
+console.log(api.getUsers);
+console.log(api.getPosts);
+
+// --- Template literal as key ---
+
+const method = "fetch";
+const service = {
+    [`${method}Data`]: "data"
+};
+console.log(service.fetchData);
+
+// --- Multiple computed keys (separate declarations) ---
+
+const a = "x";
+const b = "y";
+const c = "z";
+const coords = { [a]: 1, [b]: 2, [c]: 3 };
+console.log(coords.x);
+console.log(coords.y);
+console.log(coords.z);
+
+// --- Numeric computed key (coerced to string) ---
+
+const numKey = { [42]: "answer", [3.14]: "pi" };
+console.log(numKey[42]);
+console.log(numKey["42"]);
+console.log(numKey[3.14]);
+
+// --- Mixed literal and computed ---
+
+const mixed = { literal: "L", [a]: 99, also: "A" };
+console.log(mixed.literal);
+console.log(mixed.x);
+console.log(mixed.also);
+
+// --- Computed key in nested object ---
+
+const outer = {
+    inner: {
+        ["computed"]: "deep value",
+        static: "static value"
+    }
+};
+console.log(outer.inner.computed);
+console.log(outer.inner.static);
+
+// --- Empty object with only computed properties ---
+
+const empty = { [a]: 1 };
+console.log(empty.x);
+
+// --- Computed key value via expression ---
+
+const dyn = { [(a + b)]: "ab" };
+console.log(dyn.xy);
