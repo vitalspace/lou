@@ -44,11 +44,60 @@ pub const ArrayObject = struct {
 
 pub const ObjectValue = struct {
      allocator: std.mem.Allocator,
-     properties: std.StringArrayHashMap(Value),
+     properties: StringHashMap,
+
+     /// Back-pointer to this object's prototype (the next link in the
+     /// chain). Used by getPropChain / lookupInChain to follow the
+     /// prototype chain during property lookup and method dispatch.
+     /// `null` means this object has no prototype (e.g. Object.create(null),
+     /// or the chain terminal at Object.prototype).
+     prototype: ?*ObjectValue = null,
+
+
+     pub const StringHashMap = struct {
+         map: std.StringArrayHashMapUnmanaged(Value),
+         allocator: std.mem.Allocator,
+
+         pub fn init(allocator: std.mem.Allocator) StringHashMap {
+             return .{ .map = .{}, .allocator = allocator };
+         }
+
+         pub fn deinit(self: *StringHashMap) void {
+             self.map.deinit(self.allocator);
+         }
+
+         pub fn get(self: *const StringHashMap, key: []const u8) ?Value {
+             return self.map.get(key);
+         }
+
+         pub fn put(self: *StringHashMap, key: []const u8, value: Value) !void {
+             try self.map.put(self.allocator, key, value);
+         }
+
+         pub fn contains(self: *const StringHashMap, key: []const u8) bool {
+             return self.map.contains(key);
+         }
+
+        pub fn remove(self: *StringHashMap, key: []const u8) bool {
+            const had = self.map.contains(key);
+            if (had) _ = self.map.swapRemove(key);
+            return had;
+        }
+
+         pub fn iterator(self: *const StringHashMap) std.StringArrayHashMapUnmanaged(Value).Iterator {
+             return self.map.iterator();
+         }
+     };
 
      pub fn init(allocator: std.mem.Allocator) !*ObjectValue {
+         return initWithProto(allocator, null);
+     }
+
+     /// Init an ObjectValue with an optional prototype link. Pass null
+     /// for an object with no prototype (e.g. Object.create(null)).
+     pub fn initWithProto(allocator: std.mem.Allocator, proto: ?*ObjectValue) !*ObjectValue {
          const obj = try allocator.create(ObjectValue);
-         obj.* = .{ .allocator = allocator, .properties = std.StringArrayHashMap(Value).init(allocator) };
+         obj.* = .{ .allocator = allocator, .properties = StringHashMap.init(allocator), .prototype = proto };
          return obj;
      }
 
@@ -56,38 +105,96 @@ pub const ObjectValue = struct {
          this.properties.deinit();
          this.allocator.destroy(this);
      }
+
+     /// Returns keys in ES for-in enumeration order:
+     /// 1. Integer indices (parseable as non-negative integer) in ascending numeric order
+     /// 2. String keys in insertion order (skipping @@-prefixed internal keys)
+     /// The result is an ArrayObject whose elements are .string Values (the key names).
+     pub fn getForInKeys(this: *ObjectValue, env_allocator: std.mem.Allocator, arrays: *std.ArrayList(*ArrayObject)) !*ArrayObject {
+         const keys_arr = try ArrayObject.init(env_allocator);
+         errdefer keys_arr.deinit();
+
+         var int_keys = try std.ArrayList(struct { key: []const u8, num: usize }).initCapacity(env_allocator, 0);
+         defer int_keys.deinit(env_allocator);
+         var str_keys = try std.ArrayList([]const u8).initCapacity(env_allocator, 0);
+         defer str_keys.deinit(env_allocator);
+
+         var it = this.properties.iterator();
+         while (it.next()) |entry| {
+             const key = entry.key_ptr.*;
+             // Skip internal @@-prefixed keys
+             if (key.len >= 2 and std.mem.eql(u8, key[0..2], "@@")) continue;
+             // Try parse as non-negative integer index.
+             // Must be canonical (no leading zeros except "0" itself)
+             // per ES 7.3.23 - only canonical numeric strings are array indices.
+             if (std.fmt.parseInt(usize, key, 10)) |num| {
+                 var buf: [32]u8 = undefined;
+                 const canonical = std.fmt.bufPrint(&buf, "{d}", .{num}) catch "_";
+                 if (std.mem.eql(u8, key, canonical)) {
+                     try int_keys.append(env_allocator, .{ .key = key, .num = num });
+                 } else {
+                     try str_keys.append(env_allocator, key);
+                 }
+             } else |_| {
+                 try str_keys.append(env_allocator, key);
+             }
+         }
+
+         // Sort integer keys by numeric value ascending
+         std.mem.sort(
+             @TypeOf(int_keys.items[0]),
+             int_keys.items,
+             {},
+             struct {
+                 fn lt(_: void, a: @TypeOf(int_keys.items[0]), b: @TypeOf(int_keys.items[0])) bool {
+                     return a.num < b.num;
+                 }
+             }.lt,
+         );
+
+         // Append integer keys first (already sorted ascending)
+         for (int_keys.items) |ik| {
+             try keys_arr.elements.append(env_allocator, .{ .string = ik.key });
+         }
+
+         // Append string keys in insertion order
+         for (str_keys.items) |sk| {
+             try keys_arr.elements.append(env_allocator, .{ .string = sk });
+         }
+
+         try arrays.append(env_allocator, keys_arr);
+         return keys_arr;
+     }
  };
 
+/// A closure: a function (AST node) coupled with the environment it was
+/// defined in (its lexical scope). Used when a function is defined inside
+/// another function and needs to capture variables from the outer scope.
 pub const ClosureValue = struct {
-    chunk_ptr: *ChunkType,
-    param_count: u8,
+    func_node: *AstNode,
+    /// Heap-allocated Environment that serves as the closure's lexical
+    /// scope. Owned by this ClosureValue — deinit calls release().
+    env: *anyopaque,
     allocator: std.mem.Allocator,
 
-    pub const ChunkType = struct {
-        code: std.ArrayList(u8),
-        constants: std.ArrayList(Value),
-        lines: std.ArrayList(u32),
-        allocator: std.mem.Allocator,
-    };
-
-    pub fn init(allocator: std.mem.Allocator, param_count: u8) !*ClosureValue {
+    /// The `env` parameter must be a heap-allocated `*Environment` that
+    /// this ClosureValue takes shared ownership of (via retain).
+    pub fn init(allocator: std.mem.Allocator, func_node: *AstNode, env: *anyopaque) !*ClosureValue {
         const obj = try allocator.create(ClosureValue);
-        const chunk = try allocator.create(ChunkType);
-        chunk.* = .{
-            .code = try std.ArrayList(u8).initCapacity(allocator, 256),
-            .constants = try std.ArrayList(Value).initCapacity(allocator, 64),
-            .lines = try std.ArrayList(u32).initCapacity(allocator, 256),
-            .allocator = allocator,
-        };
-        obj.* = .{ .chunk_ptr = chunk, .param_count = param_count, .allocator = allocator };
+        obj.* = .{ .func_node = func_node, .env = env, .allocator = allocator };
+        // Take shared ownership of the captured environment.
+        const e: *@import("../environment.zig").Environment = @alignCast(@ptrCast(env));
+        e.retain();
+        // Track in the root environment's global closures list so the
+        // closure is freed at program exit even if never stored in a
+        // values HashMap (e.g. immediately-consumed closures).
+        e.closures.append(e.allocator, obj) catch {};
         return obj;
     }
 
     pub fn deinit(this: *ClosureValue) void {
-        this.chunk_ptr.code.deinit(this.allocator);
-        this.chunk_ptr.constants.deinit(this.allocator);
-        this.chunk_ptr.lines.deinit(this.allocator);
-        this.allocator.destroy(this.chunk_ptr);
+        const e: *@import("../environment.zig").Environment = @alignCast(@ptrCast(this.env));
+        e.release();
         this.allocator.destroy(this);
     }
 };
@@ -180,12 +287,71 @@ pub const WellKnownSymbol = enum(u64) {
     toPrimitive = 6,
     toStringTag = 7,
     species = 8,
+    dispose = 9,
+    asyncDispose = 10,
 };
 
 pub fn symbolPropertyName(allocator: std.mem.Allocator, description: []const u8) ![]const u8 {
     const full = try std.fmt.allocPrint(allocator, "@@{s}", .{description});
     return full;
 }
+
+pub const RegExpValue = struct {
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    flags: []const u8,
+    global: bool,
+    ignore_case: bool,
+    multiline: bool,
+    dot_all: bool,
+    unicode: bool,
+    sticky: bool,
+    has_indices: bool,
+    last_index: u32,
+    cached: ?*anyopaque = null,
+    cached_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
+
+    pub fn init(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []const u8) !*RegExpValue {
+        const obj = try allocator.create(RegExpValue);
+        const pattern_dup = try allocator.dupe(u8, pattern);
+        errdefer allocator.free(pattern_dup);
+        const flags_dup = try allocator.dupe(u8, flags_str);
+        obj.* = .{
+            .allocator = allocator,
+            .pattern = pattern_dup,
+            .flags = flags_dup,
+            .global = std.mem.indexOfScalar(u8, flags_str, 'g') != null,
+            .ignore_case = std.mem.indexOfScalar(u8, flags_str, 'i') != null,
+            .multiline = std.mem.indexOfScalar(u8, flags_str, 'm') != null,
+            .dot_all = std.mem.indexOfScalar(u8, flags_str, 's') != null,
+            .unicode = std.mem.indexOfScalar(u8, flags_str, 'u') != null,
+            .sticky = std.mem.indexOfScalar(u8, flags_str, 'y') != null,
+            .has_indices = std.mem.indexOfScalar(u8, flags_str, 'd') != null,
+            .last_index = 0,
+            .cached = null,
+        };
+        return obj;
+    }
+
+    pub fn deinit(this: *RegExpValue) void {
+        this.allocator.free(this.pattern);
+        this.allocator.free(this.flags);
+        if (this.cached) |c| {
+            if (this.cached_deinit) |cleanup| {
+                cleanup(c, this.allocator);
+            }
+        }
+        this.allocator.destroy(this);
+    }
+
+    pub fn lastIndex(this: *const RegExpValue) u32 {
+        return this.last_index;
+    }
+
+    pub fn setLastIndex(this: *RegExpValue, idx: u32) void {
+        this.last_index = idx;
+    }
+};
 
 pub const BigIntValue = struct {
     allocator: std.mem.Allocator,
@@ -253,10 +419,12 @@ pub const Value = union(enum) {
     object: *const BuiltinObject,
     closure: *ClosureValue,
     iterator: *ArrayIterator,
+    array_iterator: *ArrayObject,
     js_object: *ObjectValue,
     function: *AstNode,
     generator: *GeneratorObject,
     symbol: *SymbolValue,
+    regexp: *RegExpValue,
     void: void,
     null: void,
     hole: void,
@@ -294,3 +462,158 @@ pub const BuiltinResult = union(enum) {
     value: Value,
     void,
 };
+
+/// Returns true if the value is callable (can be invoked as a function).
+/// Callable types: .function, .closure, .generator.
+pub fn isCallable(v: Value) bool {
+    return switch (v) {
+        .function, .closure, .generator => true,
+        else => false,
+    };
+}
+
+// === Unit tests for getForInKeys ===
+
+test "getForInKeys: integer keys sorted ascending, then string keys insertion order" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    // Insert in non-sorted order to verify sort
+    try obj.properties.put("z", .{ .float = 1.0 });
+    try obj.properties.put("2", .{ .float = 2.0 });
+    try obj.properties.put("a", .{ .float = 3.0 });
+    try obj.properties.put("10", .{ .float = 4.0 });
+    try obj.properties.put("b", .{ .float = 5.0 });
+    try obj.properties.put("0", .{ .float = 6.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    // Expected: "0", "2", "10", "z", "a", "b"
+    try std.testing.expectEqual(@as(usize, 6), keys.elements.items.len);
+    try std.testing.expectEqualStrings("0", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("2", keys.elements.items[1].string);
+    try std.testing.expectEqualStrings("10", keys.elements.items[2].string);
+    try std.testing.expectEqualStrings("z", keys.elements.items[3].string);
+    try std.testing.expectEqualStrings("a", keys.elements.items[4].string);
+    try std.testing.expectEqualStrings("b", keys.elements.items[5].string);
+}
+
+test "getForInKeys: non-canonical integer keys treated as strings" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    // "00" and "01" are NOT canonical — they must be treated as string keys
+    try obj.properties.put("a", .{ .float = 1.0 });
+    try obj.properties.put("00", .{ .float = 2.0 });
+    try obj.properties.put("0", .{ .float = 3.0 });
+    try obj.properties.put("01", .{ .float = 4.0 });
+    try obj.properties.put("b", .{ .float = 5.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    // Expected: "0" (int), then "a", "00", "01", "b" (strings in insertion order)
+    try std.testing.expectEqual(@as(usize, 5), keys.elements.items.len);
+    try std.testing.expectEqualStrings("0", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("a", keys.elements.items[1].string);
+    try std.testing.expectEqualStrings("00", keys.elements.items[2].string);
+    try std.testing.expectEqualStrings("01", keys.elements.items[3].string);
+    try std.testing.expectEqualStrings("b", keys.elements.items[4].string);
+}
+
+test "getForInKeys: @@-prefixed internal keys are skipped" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    try obj.properties.put("@@type", .{ .string = "MyType" });
+    try obj.properties.put("@@iterator", .{ .float = 1.0 });
+    try obj.properties.put("a", .{ .float = 2.0 });
+    try obj.properties.put("1", .{ .float = 3.0 });
+    try obj.properties.put("@@internal", .{ .float = 4.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    // Expected: "1" (int), then "a" (string). No @@ keys.
+    try std.testing.expectEqual(@as(usize, 2), keys.elements.items.len);
+    try std.testing.expectEqualStrings("1", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("a", keys.elements.items[1].string);
+}
+
+test "getForInKeys: only integer keys sorted ascending" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    try obj.properties.put("5", .{ .float = 1.0 });
+    try obj.properties.put("1", .{ .float = 2.0 });
+    try obj.properties.put("3", .{ .float = 3.0 });
+    try obj.properties.put("20", .{ .float = 4.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), keys.elements.items.len);
+    try std.testing.expectEqualStrings("1", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("3", keys.elements.items[1].string);
+    try std.testing.expectEqualStrings("5", keys.elements.items[2].string);
+    try std.testing.expectEqualStrings("20", keys.elements.items[3].string);
+}
+
+test "getForInKeys: only string keys preserve insertion order" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    try obj.properties.put("c", .{ .float = 1.0 });
+    try obj.properties.put("a", .{ .float = 2.0 });
+    try obj.properties.put("b", .{ .float = 3.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), keys.elements.items.len);
+    try std.testing.expectEqualStrings("c", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("a", keys.elements.items[1].string);
+    try std.testing.expectEqualStrings("b", keys.elements.items[2].string);
+}
+
+test "getForInKeys: empty object returns empty array" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), keys.elements.items.len);
+}
+

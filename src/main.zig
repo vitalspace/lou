@@ -11,6 +11,7 @@ const VM = @import("vm.zig").VM;
 const Compiler = @import("vm.zig").Compiler;
 const Chunk = @import("vm.zig").Chunk;
 const initSimboloObject = @import("builtins/symbol.zig").initSimboloObject;
+const objectPrototypeMod = @import("builtins/object/prototype.zig");
 const TypeChecker = @import("type_checker.zig").TypeChecker;
 
 const use_vm = true;
@@ -73,7 +74,7 @@ fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{
+    var gpa = std.heap.DebugAllocator(.{
         .thread_safe = true,
         .never_unmap = true,
         .retain_metadata = true,
@@ -131,6 +132,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var env_ = try Environment.initWithIo(allocator, null, io);
+    // Bootstrap Object.prototype singleton so plain object literals
+    // created later inherit it via their `.prototype` field.
+    env_.object_prototype = try objectPrototypeMod.createObjectPrototype(allocator, &env_.objects);
     defer env_.deinit();
 
     var dir_buf: []const u8 = ".";
@@ -141,6 +145,18 @@ pub fn main(init: std.process.Init) !void {
     env_.module_dir = dir_buf;
 
     try initSimboloObject(&env_);
+
+    // ES global constants
+    try env_.setConstant("NaN", .{ .float = std.math.nan(f64) });
+    try env_.setConstant("Infinity", .{ .float = std.math.inf(f64) });
+
+    // globalThis — the global object (js_object wrapper for the root environment).
+    // Set a self-referencing "globalThis" property so globalThis.globalThis === globalThis.
+    const global_this_obj = try Ast.ObjectValue.init(allocator);
+    try env_.objects.append(allocator, global_this_obj);
+    env_.global_this = global_this_obj;
+    try global_this_obj.properties.put("globalThis", .{ .js_object = global_this_obj });
+    try env_.setConstant("globalThis", .{ .js_object = global_this_obj });
 
     if (use_vm) {
         var chunk = Chunk.init(allocator);

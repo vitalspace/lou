@@ -1,0 +1,11 @@
+const obj = {};
+console.log(obj.toString());
+console.log(obj.hasOwnProperty("x"));
+console.log(obj.hasOwnProperty("toString"));
+console.log(obj.valueOf() === obj);
+console.log(typeof obj.toString);
+const obj2 = { x: 1 };
+console.log(obj2.toString());
+console.log(obj2.hasOwnProperty("x"));
+console.log(obj2.hasOwnProperty("toString"));
+console.log(obj2.valueOf() === obj2);

@@ -6,6 +6,14 @@ const builtinsTypes = @import("./types/types.zig");
 pub const Io = std.Io;
 pub const DEBUG_OPTIMIZATION = false;
 
+pub const DEBUG_TRACE = false;
+
+pub const tracePrint = struct {
+    pub fn call(comptime fmt: []const u8, args: anytype) void {
+        if (DEBUG_TRACE) std.debug.print(fmt, args);
+    }
+}.call;
+
 pub inline fn debugPrint(comptime fmt: []const u8, args: anytype) void {
     if (DEBUG_OPTIMIZATION) {
         std.debug.print(fmt, args);
@@ -48,8 +56,35 @@ pub const Environment = struct {
     objects: std.ArrayList(*ast.ObjectValue),
     symbols: std.ArrayList(*ast.SymbolValue),
     bigints: std.ArrayList(*ast.BigIntValue),
+    regexp_objects: std.ArrayList(*ast.RegExpValue),
     generators: std.ArrayList(*ast.GeneratorObject),
     owned_strings: std.ArrayList([]const u8),
+    /// Heap-allocated sub-environments that must outlive the current
+    /// scope — primarily per-iteration envs from `for (let/const ...)`
+    /// loops, whose reference may be captured by closures created in
+    /// the loop body. Each entry is deinit'd + destroyed during parent
+    /// env teardown so closures continue to read valid memory after
+    /// the loop has returned.
+    iter_envs: std.ArrayList(*Environment),
+    /// Heap-allocated closure captures. When an arrow/function/generator
+    /// declaration is evaluated inside a function-or-block scope, we
+    /// create a fresh heap-allocated block env as the closure's lexical
+    /// scope so that the captured pointer remains valid after the
+    /// enclosing scope returns. Tracked here for lifetime management.
+    closure_envs: std.ArrayList(*Environment),
+    /// Synthetic AST nodes created during testing / JSON parse.
+    /// Tracked so deinit can run freeAst on them.
+    synthetic_asts: std.ArrayList(*ast.Node),
+    /// Object.prototype — singleton shared by all plain object literals.
+    /// Holds stub dispatchers (toString, valueOf, hasOwnProperty) that
+    /// vm.zig recognizes via the `@@native = "ObjectProtoMethod"` marker.
+    /// Only set on the root environment so it outlives all derived
+    /// object literals whose `.prototype` field points at it.
+    object_prototype: ?*ast.ObjectValue = null,
+    /// The global this object (js_object wrapper for the root environment).
+    /// Only set on the root environment. Property reads/writes on this object
+    /// are synchronized with the root environment's values map.
+    global_this: ?*ast.ObjectValue = null,
     outer: ?*Environment,
     scope_kind: enum { block, function } = .function,
     return_hit: bool = false,
@@ -78,6 +113,19 @@ pub const Environment = struct {
     module_contents: std.ArrayList([]const u8),
     module_arenas: std.ArrayList(*std.heap.ArenaAllocator),
     module_cache: std.StringHashMap(ModuleCacheEntry),
+    /// Heap-allocated ClosureValue objects created by the per-iteration
+    /// closure-capture logic. Each ClosureValue wraps an AST function node
+    /// together with its captured environment. Tracked here so they are
+    /// freed at scope teardown (the captured env is separately tracked in
+    /// iter_envs/closure_envs, so we only destroy the ClosureValue wrapper).
+    closures: std.ArrayList(*ast.ClosureValue),
+    /// Mark this environment as a per-iteration env (heap-allocated by a
+    /// for-let/for-of/for-in loop). Used by the closure-capture logic
+    /// to decide whether to set `closure_env` on freshly-defined
+    /// ArrowFunction / FunctionDeclaration / GeneratorDeclaration nodes
+    /// — only heap-allocated iter envs are guaranteed to outlive their
+    /// natural scope.
+    is_iter_env: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, outer: ?*Environment) !Environment {
         return initWithIo(allocator, outer, if (outer) |o| o.io else null);
@@ -95,8 +143,13 @@ pub const Environment = struct {
         const objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0);
         const symbols = try std.ArrayList(*ast.SymbolValue).initCapacity(allocator, 0);
         const bigints = try std.ArrayList(*ast.BigIntValue).initCapacity(allocator, 0);
+        const regexp_objects = try std.ArrayList(*ast.RegExpValue).initCapacity(allocator, 0);
         const generators = try std.ArrayList(*ast.GeneratorObject).initCapacity(allocator, 0);
         const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+        const iter_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
+        const closure_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
+        const synthetic_asts = try std.ArrayList(*ast.Node).initCapacity(allocator, 0);
+        const closures = try std.ArrayList(*ast.ClosureValue).initCapacity(allocator, 0);
 
         const env = Environment{
             .allocator = allocator,
@@ -112,8 +165,14 @@ pub const Environment = struct {
             .objects = objects,
             .symbols = symbols,
             .bigints = bigints,
+            .regexp_objects = regexp_objects,
             .generators = generators,
             .owned_strings = owned_strings,
+            .iter_envs = iter_envs,
+            .closure_envs = closure_envs,
+            .synthetic_asts = synthetic_asts,
+            .closures = closures,
+            .global_this = null,
             .outer = outer,
             .exports = std.StringHashMap(ast.Value).init(allocator),
             .module_dir = null,
@@ -125,8 +184,37 @@ pub const Environment = struct {
         return env;
     }
 
+    pub fn initHeap(allocator: std.mem.Allocator, outer: ?*Environment) !*Environment {
+        const env_ptr = try allocator.create(Environment);
+        env_ptr.* = try init(allocator, outer);
+        return env_ptr;
+    }
+
+    pub fn initIterHeap(allocator: std.mem.Allocator, outer: *Environment) !*Environment {
+        const env_ptr = try allocator.create(Environment);
+        env_ptr.* = try initBlock(allocator, outer);
+        env_ptr.is_iter_env = true;
+        try outer.iter_envs.append(allocator, env_ptr);
+        return env_ptr;
+    }
+
+    pub fn retain(self: *Environment) void {
+        // Placeholder for shared-ownership semantics. Currently each
+        // heap-iter-env has exactly one owner (its parent, via iter_envs).
+        _ = self;
+    }
+
+    pub fn release(self: *Environment) void {
+        self.deinit();
+        self.allocator.destroy(self);
+    }
+
     pub fn initBlock(allocator: std.mem.Allocator, outer: *Environment) !Environment {
         const owned_strings = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+        const iter_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
+        const closure_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
+        const closures = try std.ArrayList(*ast.ClosureValue).initCapacity(allocator, 0);
+        const synthetic_asts = try std.ArrayList(*ast.Node).initCapacity(allocator, 0);
         const env = Environment{
             .allocator = allocator,
             .io = outer.io,
@@ -141,8 +229,14 @@ pub const Environment = struct {
             .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
             .symbols = try std.ArrayList(*ast.SymbolValue).initCapacity(allocator, 0),
             .bigints = try std.ArrayList(*ast.BigIntValue).initCapacity(allocator, 0),
+            .regexp_objects = try std.ArrayList(*ast.RegExpValue).initCapacity(allocator, 0),
             .generators = try std.ArrayList(*ast.GeneratorObject).initCapacity(allocator, 0),
             .owned_strings = owned_strings,
+            .iter_envs = iter_envs,
+            .closure_envs = closure_envs,
+            .synthetic_asts = synthetic_asts,
+            .closures = closures,
+            .global_this = null,
             .outer = outer,
             .scope_kind = .block,
             .exports = std.StringHashMap(ast.Value).init(allocator),
@@ -342,6 +436,38 @@ pub const Environment = struct {
             }
         }
         self.bigints.deinit(self.allocator);
+        for (self.regexp_objects.items) |r| {
+            r.deinit();
+        }
+        self.regexp_objects.deinit(self.allocator);
+
+        // Drain both heap-tracked env lists. These were kept alive past
+        // their natural scope so closures could safely reference them.
+        // We deinit each one (their own lists are drained recursively)
+        // and free the backing memory.
+        for (self.iter_envs.items) |iter_env| {
+            iter_env.deinit();
+            self.allocator.destroy(iter_env);
+        }
+        self.iter_envs.deinit(self.allocator);
+
+        for (self.closure_envs.items) |closure_env| {
+            closure_env.deinit();
+            self.allocator.destroy(closure_env);
+        }
+        self.closure_envs.deinit(self.allocator);
+
+        for (self.synthetic_asts.items) |node| {
+            ast.freeAst(self.allocator, node);
+        }
+        self.synthetic_asts.deinit(self.allocator);
+
+        // Free ClosureValue wrappers (the captured envs they point to
+        // are tracked separately in iter_envs/closure_envs).
+        for (self.closures.items) |cv| {
+            self.allocator.destroy(cv);
+        }
+        self.closures.deinit(self.allocator);
 
         self.exports.deinit();
         self.values.deinit();
