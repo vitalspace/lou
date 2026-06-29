@@ -5,6 +5,7 @@ const env_mod = @import("environment.zig");
 const debugPrint = env_mod.debugPrint;
 const optimizations = @import("optimizations.zig");
 const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
+const throwError = @import("./builtins/error.zig").throwError;
 
 pub const Environment = env_mod.Environment;
 
@@ -119,6 +120,8 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
         .void => right == .void,
         .null => right == .null,
         .hole => right == .void,
+        .array_iterator => right == .array_iterator,
+        .regexp => right == .regexp,
         .closure => right == .closure,
         .iterator => right == .iterator,
         .js_object => right == .js_object,
@@ -1051,7 +1054,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return value;
         },
         .UpdateExpression => |u| {
-            const current = env.get(u.name) orelse return error.UndefinedVariable;
+            const current = env.get(u.operand.Identifier.name) orelse return error.UndefinedVariable;
             const new_val = blk: {
                 switch (current) {
                     .big_int => |bi| {
@@ -1093,7 +1096,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     else => return error.InvalidAssignmentTarget,
                 }
             };
-            try env.setInScope(u.name, new_val);
+            try env.setInScope(u.operand.Identifier.name, new_val);
             return if (u.prefix) new_val else current;
         },
         .YieldExpression => |y| {
@@ -2243,6 +2246,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .symbol => "symbol",
                 .iterator => "object",
                 .hole => "undefined",
+                .array_iterator => "object",
+                .regexp => "object",
             };
             return .{ .string = type_str };
         },
@@ -2481,6 +2486,30 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return checkResult(try invokeFunctionNode(func_node, ne_args.items, env, ne_this), ne_this);
             }
         },
+                .UsingDeclaration => |v| {
+            _ = try evaluate(v.value, env);
+            return .{ .void = {} };
+        },
+        .VoidExpression => |v| {
+            _ = try evaluate(v.operand, env);
+            return .{ .void = {} };
+        },
+        .EmptyStatement => return .{ .void = {} },
+        .SwitchStatement => |s| {
+            _ = try evaluate(s.discriminant, env);
+            for (s.cases) |_| {
+                // Fallback: just return after first case
+                return .{ .void = {} };
+            }
+            return .{ .void = {} };
+        },
+        .SwitchCase => return .{ .void = {} },
+        .ImportMetaExpression => {
+            const obj = try ast.ObjectValue.init(env.allocator);
+            try env.objects.append(env.allocator, obj);
+            return .{ .js_object = obj };
+        },
+        .DynamicImportExpression => return .{ .js_object = try ast.ObjectValue.init(env.allocator) },
         .DirectCall => |dc| {
             const callee_val = try evaluate(dc.callee, env);
             if (callee_val == .generator) {
@@ -2544,7 +2573,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 if (builtin_obj.getMethod(m.property)) |_| {
                     return .{ .object = @ptrCast(builtin_obj) };
                 } else {
-                    return error.UndefinedMethod;
+                    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.property}) catch {
+                        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                        return error.Thrown;
+                    };
+                    defer env.allocator.free(_msg);
+                    _ = throwError(env, "TypeError", .{ .string = _msg });
+                    return error.Thrown;
                 }
             } else if (value == .iterator) {
                 return .{ .void = {} };
@@ -2587,7 +2622,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             try ma.append(env.allocator, value);
                             try ma.appendSlice(env.allocator, ema.items);
                             const arr_builtin = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                            const method_fn = arr_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const method_fn = arr_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                             const result = method_fn(ma.items, env);
                             return switch (result) {
                                 .value => |val| val,
@@ -2602,7 +2645,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                 stack_buf[idx + 1] = try evaluate(arg, env);
                             }
                             const arr_builtin = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                            const method_fn = arr_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const method_fn = arr_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                             const result = method_fn(stack_buf[0..total], env);
                             return switch (result) {
                                 .value => |val| val,
@@ -2617,7 +2668,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             try method_args.append(env.allocator, val);
                         }
                         const arr_builtin2 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                        const method_fn2 = arr_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                        const method_fn2 = arr_builtin2.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                         const result2 = method_fn2(method_args.items, env);
                         return switch (result2) {
                             .value => |val| val,
@@ -2630,7 +2689,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             try ma.append(env.allocator, value);
                             try ma.appendSlice(env.allocator, ema.items);
                             const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                            const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const method_fn = str_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                             const result = method_fn(ma.items, env);
                             return switch (result) {
                                 .value => |val| val,
@@ -2645,7 +2712,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                 stack_buf[idx + 1] = try evaluate(arg, env);
                             }
                             const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                            const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                            const method_fn = str_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                             const result = method_fn(stack_buf[0..total], env);
                             return switch (result) {
                                 .value => |val| val,
@@ -2660,11 +2735,86 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             try method_args.append(env.allocator, val);
                         }
                         const str_builtin2 = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                        const method_fn2 = str_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                        const method_fn2 = str_builtin2.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                         const result2 = method_fn2(method_args.items, env);
                         return switch (result2) {
                             .value => |val| val,
                             .void => .void,
+                        };
+                    } else if (value == .integer or value == .float) {
+                        if (expanded_method_args) |ema| {
+                            var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
+                            defer ma.deinit(env.allocator);
+                            try ma.append(env.allocator, value);
+                            try ma.appendSlice(env.allocator, ema.items);
+                            const num_builtin = env.getBuiltinObject("Number") orelse return error.UndefinedObject;
+                            const method_fn = num_builtin.getMethod(m.method) orelse {
+                                const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                                    _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                                    return error.Thrown;
+                                };
+                                defer env.allocator.free(_msg);
+                                _ = throwError(env, "TypeError", .{ .string = _msg });
+                                return error.Thrown;
+                            };
+                            const result = method_fn(ma.items, env);
+                            return switch (result) {
+                                .value => |val| val,
+                                .void => .{ .void = {} },
+                            };
+                        }
+                        var stack_buf: [16]ast.Value = undefined;
+                        stack_buf[0] = value;
+                        const total = 1 + m.arguments.len;
+                        if (total <= 16) {
+                            for (m.arguments, 0..) |arg, i| {
+                                stack_buf[1 + i] = try evaluate(arg, env);
+                            }
+                            const num_builtin2 = env.getBuiltinObject("Number") orelse return error.UndefinedObject;
+                            const method_fn2 = num_builtin2.getMethod(m.method) orelse {
+                                const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                                    _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                                    return error.Thrown;
+                                };
+                                defer env.allocator.free(_msg);
+                                _ = throwError(env, "TypeError", .{ .string = _msg });
+                                return error.Thrown;
+                            };
+                            const result2 = method_fn2(stack_buf[0..total], env);
+                            return switch (result2) {
+                                .value => |val| val,
+                                .void => .{ .void = {} },
+                            };
+                        }
+                        var method_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, total);
+                        defer method_args.deinit(env.allocator);
+                        try method_args.append(env.allocator, value);
+                        for (m.arguments) |arg| {
+                            const val = try evaluate(arg, env);
+                            try method_args.append(env.allocator, val);
+                        }
+                        const num_builtin3 = env.getBuiltinObject("Number") orelse return error.UndefinedObject;
+                        const method_fn3 = num_builtin3.getMethod(m.method) orelse {
+                            const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                                _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                                return error.Thrown;
+                            };
+                            defer env.allocator.free(_msg);
+                            _ = throwError(env, "TypeError", .{ .string = _msg });
+                            return error.Thrown;
+                        };
+                        const result3 = method_fn3(method_args.items, env);
+                        return switch (result3) {
+                            .value => |val| val,
+                            .void => .{ .void = {} },
                         };
                     } else if (value == .iterator) {
                         if (std.mem.eql(u8, m.method, "next")) {
@@ -2702,7 +2852,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         if (value.js_object.properties.get("@@type")) |type_val| {
                             if (type_val == .string) {
                                 const builtin_obj = env.getBuiltinObject(type_val.string) orelse return .{ .void = {} };
-                                const method_fn = builtin_obj.getMethod(m.method) orelse return .{ .void = {} };
+                                const method_fn = builtin_obj.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                                 if (expanded_method_args) |ema| {
                                     var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
                                     defer ma.deinit(env.allocator);
@@ -2749,7 +2907,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     return error.UndefinedObject;
                 };
                 const method = builtin_obj.getMethod(m.method) orelse {
-                    return error.UndefinedMethod;
+                    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                        return error.Thrown;
+                    };
+                    defer env.allocator.free(_msg);
+                    _ = throwError(env, "TypeError", .{ .string = _msg });
+                    return error.Thrown;
                 };
                 if (expanded_method_args) |ema| {
                     const result = method(ema.items, env);
@@ -2792,7 +2956,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     try ma.append(env.allocator, value);
                     try ma.appendSlice(env.allocator, ema.items);
                     const arr_obj = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                    const method_fn = arr_obj.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const method_fn = arr_obj.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                     const result = method_fn(ma.items, env);
                     return switch (result) {
                         .value => |val| val,
@@ -2807,7 +2979,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         stack_buf3[idx + 1] = try evaluate(arg, env);
                     }
                     const arr_obj3 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                    const method_fn3 = arr_obj3.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const method_fn3 = arr_obj3.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                     const result3 = method_fn3(stack_buf3[0..total3], env);
                     return switch (result3) {
                         .value => |val| val,
@@ -2822,7 +3002,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     try method_args.append(env.allocator, val);
                 }
                 const arr_obj4 = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
-                const method_fn4 = arr_obj4.getMethod(m.method) orelse return error.UndefinedMethod;
+                const method_fn4 = arr_obj4.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                 const result4 = method_fn4(method_args.items, env);
                 return switch (result4) {
                     .value => |val| val,
@@ -2865,7 +3053,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             } else if (value == .object) {
                 const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(value.object));
                 const method = bObjPtr.getMethod(m.method) orelse {
-                    return error.UndefinedMethod;
+                    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                        return error.Thrown;
+                    };
+                    defer env.allocator.free(_msg);
+                    _ = throwError(env, "TypeError", .{ .string = _msg });
+                    return error.Thrown;
                 };
                 var stack_buf4: [16]ast.Value = undefined;
                 var args4: []ast.Value = &[_]ast.Value{};
@@ -2889,7 +3083,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     try ma.append(env.allocator, value);
                     try ma.appendSlice(env.allocator, ema.items);
                     const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                    const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const method_fn = str_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                     const result = method_fn(ma.items, env);
                     return switch (result) {
                         .value => |val| val,
@@ -2904,7 +3106,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         stack_buf5[idx + 1] = try evaluate(arg, env);
                     }
                     const str_builtin = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                    const method_fn = str_builtin.getMethod(m.method) orelse return error.UndefinedMethod;
+                    const method_fn = str_builtin.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                     const result5 = method_fn(stack_buf5[0..total5], env);
                     return switch (result5) {
                         .value => |val| val,
@@ -2919,7 +3129,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     try method_args.append(env.allocator, val);
                 }
                 const str_builtin2 = env.getBuiltinObject("String") orelse return error.UndefinedObject;
-                const method_fn2 = str_builtin2.getMethod(m.method) orelse return error.UndefinedMethod;
+                const method_fn2 = str_builtin2.getMethod(m.method) orelse {
+    const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+        _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+        return error.Thrown;
+    };
+    defer env.allocator.free(_msg);
+    _ = throwError(env, "TypeError", .{ .string = _msg });
+    return error.Thrown;
+};
                 const result5 = method_fn2(method_args.items, env);
                 return switch (result5) {
                     .value => |val| val,
@@ -3199,7 +3417,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
     return error.NotAFunction;
 }
 
-fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
+pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
     switch (val) {
         .function => |fn_ptr| {
             const func_node: *ast.Node = @alignCast(@ptrCast(fn_ptr));
@@ -4295,4 +4513,50 @@ test "filter + findIndex chained with inline arrow functions" {
     , &env_);
     try std.testing.expect(result == .integer);
     try std.testing.expectEqual(@as(i64, 1), result.integer);
+}
+
+test "TypeError thrown when calling Map.size as function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expectError(error.Thrown, parseAndEvaluateProgram(
+        \\const m = new Map();
+        \\m.set("a", 1);
+        \\m.size();
+    , &env_));
+}
+
+test "TypeError thrown when calling Set.size as function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expectError(error.Thrown, parseAndEvaluateProgram(
+        \\const s = new Set();
+        \\s.add(1);
+        \\s.size();
+    , &env_));
+}
+
+test "TypeError thrown when calling Array.length as function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expectError(error.Thrown, parseAndEvaluateProgram(
+        \\const arr = [1, 2, 3];
+        \\arr.length();
+    , &env_));
+}
+
+test "TypeError thrown when calling String.length as function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expectError(error.Thrown, parseAndEvaluateProgram(
+        \\const str = "hi";
+        \\str.length();
+    , &env_));
 }
