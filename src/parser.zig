@@ -438,7 +438,11 @@ pub const Parser = struct {
                 if (this.current_token.type == .Identifier) {
                     const node = try this.allocator.create(ast.Node);
                     node.* = .{ .UpdateExpression = .{
-                        .name = this.current_token.literal,
+                        .operand = blk: {
+                            const ident = try this.allocator.create(ast.Node);
+                            ident.* = .{ .Identifier = .{ .name = this.current_token.literal } };
+                            break :blk ident;
+                        },
                         .prefix = true,
                         .operator = .Increment,
                     } };
@@ -479,7 +483,11 @@ pub const Parser = struct {
                 if (this.current_token.type == .Identifier) {
                     const node = try this.allocator.create(ast.Node);
                     node.* = .{ .UpdateExpression = .{
-                        .name = this.current_token.literal,
+                        .operand = blk: {
+                            const ident = try this.allocator.create(ast.Node);
+                            ident.* = .{ .Identifier = .{ .name = this.current_token.literal } };
+                            break :blk ident;
+                        },
                         .prefix = true,
                         .operator = .Decrement,
                     } };
@@ -544,7 +552,7 @@ pub const Parser = struct {
             this.nextToken(); // consume ++
             const node = try this.allocator.create(ast.Node);
             node.* = .{ .UpdateExpression = .{
-                .name = base.Identifier.name,
+                .operand = base,
                 .prefix = false,
                 .operator = .Increment,
             } };
@@ -556,7 +564,7 @@ pub const Parser = struct {
             this.nextToken(); // consume --
             const node = try this.allocator.create(ast.Node);
             node.* = .{ .UpdateExpression = .{
-                .name = base.Identifier.name,
+                .operand = base,
                 .prefix = false,
                 .operator = .Decrement,
             } };
@@ -776,12 +784,20 @@ pub const Parser = struct {
                 continue;
             }
 
+            // ES2015 §13.2.5.4: a property name in an object literal may be
+            // an IdentifierName (which includes reserved words like `fn`,
+            // `return`, `if`, ...), a string literal, or a numeric literal.
+            // `isPropertyName(tok_type)` already covers IdentifierName (we
+            // use it for member-access keys too), so we delegate to it for
+            // the Identifier-or-keyword branch. The String / Integer / Float
+            // cases stay explicit because their semantics are "use the
+            // literal as the key" (e.g. `{ "fn": 1 }` vs `{ fn: 1 }`).
             const key = switch (this.current_token.type) {
-                .String => this.current_token.literal,
-                .Identifier => this.current_token.literal,
-                .Integer => this.current_token.literal,
-                .Float => this.current_token.literal,
-                else => return error.ExpectedPropertyName,
+                .String, .Integer, .Float => this.current_token.literal,
+                else => blk: {
+                    if (!isPropertyName(this.current_token.type)) return error.ExpectedPropertyName;
+                    break :blk this.current_token.literal;
+                },
             };
             this.nextToken(); // consume key
 
@@ -1183,6 +1199,20 @@ pub const Parser = struct {
         return node;
     }
 
+    // Shared between parseArrowFunction and parseFunctionDeclaration.
+    // Arrow body is an `AssignmentExpression` per ES (NOT a statement);
+    // for non-arrow bodies, `fn foo() expr` / `function foo() expr` is
+    // shorthand for `fn foo() { return expr; }`. Don't use parseStatement
+    // here: it calls parseCommaExpression for non-keyword bodies, which
+    // greedily consumes any `,` token that follows (e.g. the property-list
+    // delimiter in an enclosing object literal). parseExpression
+    // (= parsePrecedece(.lowest)) respects the surrounding boundary,
+    // stopping at `,` / `}` / EOF so the caller's boundary-token check
+    // (also via parseExpression) can re-recognize the next property.
+    fn parseFunctionBody(p: *Parser) !*ast.Node {
+        return if (p.current_token.type == .LBrace) p.parseBlockStatement() else p.parseExpression();
+    }
+
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
         // Check if this is a generator function (function* or fn*)
         var is_generator = false;
@@ -1214,8 +1244,19 @@ pub const Parser = struct {
 
         var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
         defer parameters.deinit(this.allocator);
+        var rest_param: ?[]const u8 = null;
 
         while (this.current_token.type != .RParen) {
+            if (this.current_token.type == .DotDotDot) {
+                this.nextToken(); // consume ...
+                if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
+                    rest_param = this.current_token.literal;
+                    this.nextToken(); // consume parameter name
+                    break; // rest param must be last, exit loop
+                } else {
+                    return error.ExpectedIdentifier;
+                }
+            } else
             if (this.current_token.type != .Identifier) {
                 return error.ExpectedIdentifier;
             }
@@ -1231,7 +1272,7 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume ')'
 
-        const body = if (this.current_token.type == .LBrace) try this.parseBlockStatement() else try this.parseStatement();
+        const body = try this.parseFunctionBody();
 
         if (is_generator) {
             const node = try this.allocator.create(ast.Node);
@@ -1239,6 +1280,7 @@ pub const Parser = struct {
                 .name = name,
                 .parameters = try parameters.toOwnedSlice(this.allocator),
                 .body = body,
+                .rest_param = rest_param,
             } };
             return node;
         }
@@ -1248,6 +1290,7 @@ pub const Parser = struct {
             .name = name,
             .parameters = try parameters.toOwnedSlice(this.allocator),
             .body = body,
+            .rest_param = rest_param,
         } };
         return node;
     }
@@ -1257,8 +1300,19 @@ pub const Parser = struct {
 
         var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
         defer parameters.deinit(this.allocator);
+        var rest_param: ?[]const u8 = null;
 
         while (this.current_token.type != .RParen) {
+            if (this.current_token.type == .DotDotDot) {
+                this.nextToken(); // consume ...
+                if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
+                    rest_param = this.current_token.literal;
+                    this.nextToken(); // consume parameter name
+                    break; // rest param must be last, exit loop
+                } else {
+                    return error.ExpectedIdentifier;
+                }
+            } else
             if (this.current_token.type != .Identifier) {
                 return error.ExpectedIdentifier;
             }
@@ -1279,12 +1333,13 @@ pub const Parser = struct {
         }
         this.nextToken(); // consume '=>'
 
-        const body = if (this.current_token.type == .LBrace) try this.parseBlockStatement() else try this.parseStatement();
+        const body = try this.parseFunctionBody();
 
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .ArrowFunction = .{
             .parameters = try parameters.toOwnedSlice(this.allocator),
             .body = body,
+            .rest_param = rest_param,
         } };
         return node;
     }
@@ -1936,4 +1991,175 @@ test "parse ternary inside comma expression with assignment" {
     try std.testing.expect(ternary.* == .ConditionalExpression);
     try std.testing.expect(ternary.ConditionalExpression.condition.* == .Identifier);
     try std.testing.expectEqualStrings("cond", ternary.ConditionalExpression.condition.Identifier.name);
+}
+
+test "parse object literal with reserved-keyword key - fn" {
+    // ES2015 §13.2.5.4 allows IdentifierName (which includes reserved
+    // words like `fn`, `return`, `if`) as object-literal property keys.
+    const allocator = std.testing.allocator;
+    const input = "({ fn: 1 })";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 1), node.ObjectLiteral.properties.len);
+    try std.testing.expectEqualStrings("fn", node.ObjectLiteral.properties[0].key);
+    try std.testing.expect(node.ObjectLiteral.properties[0].value.* == .IntegerLiteral);
+    try std.testing.expectEqual(@as(i64, 1), node.ObjectLiteral.properties[0].value.IntegerLiteral.value);
+}
+
+test "parse object literal with reserved-keyword key - return" {
+    const allocator = std.testing.allocator;
+    const input = "({ return: 1 })";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 1), node.ObjectLiteral.properties.len);
+    try std.testing.expectEqualStrings("return", node.ObjectLiteral.properties[0].key);
+    try std.testing.expect(node.ObjectLiteral.properties[0].value.* == .IntegerLiteral);
+    try std.testing.expectEqual(@as(i64, 1), node.ObjectLiteral.properties[0].value.IntegerLiteral.value);
+}
+
+test "parse object literal with multiple reserved-keyword keys" {
+    // `{ if: 2, else: 3 }` — verifies the comma-delimited path also
+    // accepts reserved-keyword keys (and that follow-up keys are not
+    // accidentally consumed by a body-parser greediness).
+    const allocator = std.testing.allocator;
+    const input = "({ if: 2, else: 3 })";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 2), node.ObjectLiteral.properties.len);
+    try std.testing.expectEqualStrings("if", node.ObjectLiteral.properties[0].key);
+    try std.testing.expectEqual(@as(i64, 2), node.ObjectLiteral.properties[0].value.IntegerLiteral.value);
+    try std.testing.expectEqualStrings("else", node.ObjectLiteral.properties[1].key);
+    try std.testing.expectEqual(@as(i64, 3), node.ObjectLiteral.properties[1].value.IntegerLiteral.value);
+}
+
+test "parse object literal regression - plain identifier keys still work" {
+    // Sanity guard: the key-switch refactor must not break the
+    // pre-existing Identifier/String/Integer/Float paths.
+    const allocator = std.testing.allocator;
+    const input = "({ a: 1, \"b\": 2, 3: 'three' })";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 3), node.ObjectLiteral.properties.len);
+    try std.testing.expectEqualStrings("a", node.ObjectLiteral.properties[0].key);
+    try std.testing.expectEqualStrings("b", node.ObjectLiteral.properties[1].key);
+    try std.testing.expectEqualStrings("3", node.ObjectLiteral.properties[2].key);
+}
+
+test "parse object literal - true/false/null/undefined as keys" {
+    // Locks the contract that the lexer populates `tok.literal` with
+    // the source word for these keyword token types. Without that,
+    // `o.true` would resolve to an empty key and break all subsequent
+    // reads on the resulting object.
+    const allocator = std.testing.allocator;
+    const input = "({ true: 1, false: 2, null: 3, undefined: 4 })";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 4), node.ObjectLiteral.properties.len);
+    try std.testing.expectEqualStrings("true", node.ObjectLiteral.properties[0].key);
+    try std.testing.expectEqualStrings("false", node.ObjectLiteral.properties[1].key);
+    try std.testing.expectEqualStrings("null", node.ObjectLiteral.properties[2].key);
+    try std.testing.expectEqualStrings("undefined", node.ObjectLiteral.properties[3].key);
+}
+
+test "parse object literal - non-keyword token still errors" {
+    // Bounds guard: widening the key switch via isPropertyName MUST
+    // NOT accidentally accept tokens that are neither literals nor
+    // keywords. A bare `;` is neither, so it must still error.
+    const allocator = std.testing.allocator;
+    const input = "{ ;: 1 }";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ExpectedPropertyName, parser.parseExpression());
+}
+
+test "parse object literal - non-block function expression as value" {
+    // C-1 of the closed object-method-call edge cases. The compat file
+    // `tests/compat/object-method-call-edge-cases.lou` cannot exercise
+    // this — `function() 1` is invalid ES (function bodies must be
+    // BlockStatements per ECMAScript). This unit test is therefore the
+    // only future-detection surface for parseFunctionDeclaration's
+    // non-block body consolidation (parseExpression instead of
+    // parseStatement, via the shared `parseFunctionBody` helper).
+    //
+    // Pre-fix, parseStatement called parseCommaExpression which greedily
+    // consumed the comma after `1`, collapsing `1, g: 2` into a single
+    // property whose value was a CommaExpression — silently dropping
+    // the second property. Two phases assert the closed contract:
+
+    const allocator = std.testing.allocator;
+
+    // Phase A — structural: the full input parses to a 2-property
+    // ObjectLiteral whose first value is a FunctionDeclaration with a
+    // non-block IntegerLiteral body.
+    {
+        const input = "{ f: function() 1, g: 2 }";
+        var lexer = Lexer.init(input);
+        var parser = try Parser.init(&lexer, allocator);
+        defer parser.deinit();
+        const node = try parser.parseExpression();
+
+        try std.testing.expect(node.* == .ObjectLiteral);
+        try std.testing.expectEqual(@as(usize, 2), node.ObjectLiteral.properties.len);
+
+        // First property: f → function() 1
+        try std.testing.expectEqualStrings("f", node.ObjectLiteral.properties[0].key);
+        try std.testing.expect(node.ObjectLiteral.properties[0].value.* == .FunctionDeclaration);
+        const body = node.ObjectLiteral.properties[0].value.FunctionDeclaration.body;
+        try std.testing.expect(body.* == .IntegerLiteral);
+        try std.testing.expectEqual(@as(i64, 1), body.IntegerLiteral.value);
+
+        // Second property: g → 2. Its presence proves the comma after `1`
+        // was left intact — parseExpression does not fold boundary commas
+        // the way parseStatement → parseCommaExpression would.
+        try std.testing.expectEqualStrings("g", node.ObjectLiteral.properties[1].key);
+        try std.testing.expect(node.ObjectLiteral.properties[1].value.* == .IntegerLiteral);
+        try std.testing.expectEqual(@as(i64, 2), node.ObjectLiteral.properties[1].value.IntegerLiteral.value);
+
+        // After parsing the whole literal, current_token = .EOF —
+        // parseObjectLiteral's final `nextToken()` consumes `}`, and
+        // with no further input the lexer returns EOF. Both properties
+        // were consumed cleanly without comma greediness seizing the
+        // next key as a CommaExpression operand.
+        try std.testing.expect(parser.current_token.type == .EOF);
+    }
+
+    // Phase B — comma-position contract: when parseFunctionDeclaration
+    // returns with a non-block body in expression context, the trailing
+    // `,` MUST remain for the caller (current_token.type == .Comma) —
+    // i.e. parseExpression stops at the boundary token instead of
+    // folding it via parseCommaExpression. This is the explicit
+    // "current_token lands on the comma after the body" assertion.
+    {
+        const input = "function() 1, g: 2";
+        var lexer = Lexer.init(input);
+        var parser = try Parser.init(&lexer, allocator);
+        defer parser.deinit();
+        const node = try parser.parseExpression();
+
+        try std.testing.expect(node.* == .FunctionDeclaration);
+        try std.testing.expect(node.FunctionDeclaration.body.* == .IntegerLiteral);
+        try std.testing.expect(parser.current_token.type == .Comma);
+    }
 }
