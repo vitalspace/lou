@@ -1199,18 +1199,12 @@ pub const Parser = struct {
         return node;
     }
 
-    // Shared between parseArrowFunction and parseFunctionDeclaration.
-    // Arrow body is an `AssignmentExpression` per ES (NOT a statement);
-    // for non-arrow bodies, `fn foo() expr` / `function foo() expr` is
-    // shorthand for `fn foo() { return expr; }`. Don't use parseStatement
-    // here: it calls parseCommaExpression for non-keyword bodies, which
-    // greedily consumes any `,` token that follows (e.g. the property-list
-    // delimiter in an enclosing object literal). parseExpression
-    // (= parsePrecedece(.lowest)) respects the surrounding boundary,
-    // stopping at `,` / `}` / EOF so the caller's boundary-token check
-    // (also via parseExpression) can re-recognize the next property.
-    fn parseFunctionBody(p: *Parser) !*ast.Node {
-        return if (p.current_token.type == .LBrace) p.parseBlockStatement() else p.parseExpression();
+    // Shared by parseArrowFunction and parseFunctionDeclaration.
+    // Block bodies run parseBlockStatement; non-block bodies use
+    // parseExpression (NOT parseStatement — which via
+    // parseCommaExpression greedily consumes boundary tokens).
+    fn parseFunctionBody(this: *Parser) !*ast.Node {
+        return if (this.current_token.type == .LBrace) this.parseBlockStatement() else this.parseExpression();
     }
 
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
@@ -2137,11 +2131,8 @@ test "parse object literal - non-block function expression as value" {
         try std.testing.expect(node.ObjectLiteral.properties[1].value.* == .IntegerLiteral);
         try std.testing.expectEqual(@as(i64, 2), node.ObjectLiteral.properties[1].value.IntegerLiteral.value);
 
-        // After parsing the whole literal, current_token = .EOF —
-        // parseObjectLiteral's final `nextToken()` consumes `}`, and
-        // with no further input the lexer returns EOF. Both properties
-        // were consumed cleanly without comma greediness seizing the
-        // next key as a CommaExpression operand.
+        // After parseObjectLiteral's final nextToken() consumes '}',
+        // the lexer returns .EOF (no comma greediness seized g).
         try std.testing.expect(parser.current_token.type == .EOF);
     }
 
