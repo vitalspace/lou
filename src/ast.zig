@@ -11,11 +11,16 @@ pub const SymbolValue = @import("types/runtime.zig").SymbolValue;
 pub const WellKnownSymbol = @import("types/runtime.zig").WellKnownSymbol;
 pub const GeneratorObject = @import("types/runtime.zig").GeneratorObject;
 pub const BigIntValue = @import("types/runtime.zig").BigIntValue;
+pub const RegExpValue = @import("types/runtime.zig").RegExpValue;
 pub const symbolPropertyName = @import("types/runtime.zig").symbolPropertyName;
+
+pub const PropertyKind = enum { init, get, set };
 
 pub const Property = struct {
     key: []const u8,
     value: *Node,
+    kind: PropertyKind = .init,
+    key_expr: ?*Node = null,
 };
 
 pub const NodeType = enum {
@@ -37,6 +42,7 @@ pub const NodeType = enum {
     ConstantDeclaration,
     VariableDeclaration,
     LetDeclaration,
+    UsingDeclaration,
     BlockStatement,
     ForLoop,
     ForOfLoop,
@@ -66,6 +72,13 @@ pub const NodeType = enum {
     TryCatchFinally,
     ThrowStatement,
     TypeOfExpression,
+    DeleteExpression,
+    VoidExpression,
+    EmptyStatement,
+    SwitchStatement,
+    SwitchCase,
+    ImportMetaExpression,
+    DynamicImportExpression,
 };
 
 pub const Node = union(NodeType) {
@@ -114,21 +127,25 @@ pub const Node = union(NodeType) {
         value: *Node,
     },
     UpdateExpression: struct {
-        name: []const u8,
+        operand: *Node,   // Identifier, MemberAccess, or ArrayIndex
         prefix: bool,
         operator: TokenType, // .Increment or .Decrement
     },
     ConstantDeclaration: struct {
         name: []const u8,
-        value: *Node,
+        value: ?*Node,
     },
     VariableDeclaration: struct {
         name: []const u8,
-        value: *Node,
+        value: ?*Node,
     },
     LetDeclaration: struct {
         name: []const u8,
-        value: *Node,
+        value: ?*Node,
+    },
+    UsingDeclaration: struct {
+        name: []const u8,
+        value: ?*Node,
     },
     BlockStatement: struct {
         statements: []*Node,
@@ -171,6 +188,8 @@ pub const Node = union(NodeType) {
         name: []const u8,
         parameters: [][]const u8,
         body: *Node,
+        closure_env: ?*anyopaque = null,
+        rest_param: ?[]const u8 = null,
     },
     FunctionCall: struct {
         name: []const u8,
@@ -179,6 +198,8 @@ pub const Node = union(NodeType) {
     ArrowFunction: struct {
         parameters: [][]const u8,
         body: *Node,
+        closure_env: ?*anyopaque = null,
+        rest_param: ?[]const u8 = null,
     },
     MemberAccess: struct {
         object: *Node, // Nodo del objeto (ej: Identifier "console")
@@ -200,11 +221,13 @@ pub const Node = union(NodeType) {
         declaration: *Node,
         is_default: bool,
     },
-    GeneratorDeclaration: struct {
-        name: []const u8,
-        parameters: [][]const u8,
-        body: *Node,
-    },
+GeneratorDeclaration: struct {
+    name: []const u8,
+    parameters: [][]const u8,
+    body: *Node,
+    closure_env: ?*anyopaque = null,
+    rest_param: ?[]const u8 = null,
+},
     YieldExpression: struct {
         value: ?*Node, // null for bare yield
         is_star: bool, // true for yield*
@@ -253,6 +276,25 @@ pub const Node = union(NodeType) {
     TypeOfExpression: struct {
         operand: *Node,
     },
+    DeleteExpression: struct {
+        operand: *Node,
+    },
+    VoidExpression: struct {
+        operand: *Node,
+    },
+    EmptyStatement: void,
+    SwitchStatement: struct {
+        discriminant: *Node,
+        cases: []*Node,
+    },
+    SwitchCase: struct {
+        test_expr: ?*Node,
+        consequent: *Node,
+    },
+    ImportMetaExpression: struct {},
+    DynamicImportExpression: struct {
+        module_path: []const u8,
+    },
 };
 
 pub const ForOfKind = enum { Const, Var, Let };
@@ -280,11 +322,12 @@ pub fn getTokenPrecedence(token_type: TokenType) Precedence {
         .Exponent => .Highest,
 
         // Bitwise
-        .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift => .Comparison,
+        .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift, .UnsignedRightShift => .Comparison,
 
         // Comparison
         .Equal, .NotEqual, .StrictEqual, .StrictNotEqual => .Comparison,
         .LessThan, .LessThanOrEqual, .GreaterThan, .GreaterThanOrEqual => .Comparison,
+        .In, .InstanceOf => .Comparison,
 
         // Logical
         .And, .Or => .Logical,
@@ -296,7 +339,9 @@ pub fn getTokenPrecedence(token_type: TokenType) Precedence {
         .Pipe => .Logical,
 
         // Assignment
-        .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => .Assign,
+        .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign, .PowerAssign => .Assign,
+        .AndAssign, .OrAssign, .NullishAssign => .Assign,
+        .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign => .Assign,
 
         else => .lowest,
     };
@@ -337,7 +382,17 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("ObjectLiteral:\n", .{});
             for (o.properties, 0..) |prop, i| {
                 try printIdent(writer, depth + 1);
-                try writer.print("Property {d}: key=\"{s}\"\n", .{ i, prop.key });
+                const kind_str = switch (prop.kind) {
+                    .init => "",
+                    .get => "get ",
+                    .set => "set ",
+                };
+                if (prop.key_expr) |ke| {
+                    try writer.print("Property {d}: {s}[computed]\n", .{ i, kind_str });
+                    try printAst(ke, depth + 2, writer);
+                } else {
+                    try writer.print("Property {d}: {s}key=\"{s}\"\n", .{ i, kind_str, prop.key });
+                }
                 try printAst(prop.value, depth + 2, writer);
             }
         },
@@ -373,35 +428,63 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try printAst(a.value, depth + 2, writer);
         },
         .UpdateExpression => |u| {
-            try writer.print("UpdateExpression: {s}{s}{s}\n", .{
-                if (u.prefix) "++" else "",
-                u.name,
-                if (u.prefix) "" else if (u.operator == .Increment) "++" else "--",
+            try writer.print("UpdateExpression: {s}prefix={}\n", .{
+                if (u.operator == .Increment) "++" else "--",
+                u.prefix,
             });
+            try printAst(u.operand, depth + 1, writer);
         },
         .ConstantDeclaration => |c| {
             try writer.print("ConstantDeclaration:\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Name: {s}\n", .{c.name});
-            try printIdent(writer, depth + 1);
-            try writer.print("Value:\n", .{});
-            try printAst(c.value, depth + 2, writer);
+            if (c.value) |val| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try printAst(val, depth + 2, writer);
+            } else {
+                try printIdent(writer, depth + 1);
+                try writer.print("(no initializer)\n", .{});
+            }
         },
         .VariableDeclaration => |v| {
             try writer.print("VariableDeclaration:\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Name: {s}\n", .{v.name});
-            try printIdent(writer, depth + 1);
-            try writer.print("Value:\n", .{});
-            try printAst(v.value, depth + 2, writer);
+            if (v.value) |val| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try printAst(val, depth + 2, writer);
+            } else {
+                try printIdent(writer, depth + 1);
+                try writer.print("(no initializer)\n", .{});
+            }
         },
         .LetDeclaration => |v| {
             try writer.print("LetDeclaration:\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Name: {s}\n", .{v.name});
+            if (v.value) |val| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try printAst(val, depth + 2, writer);
+            } else {
+                try printIdent(writer, depth + 1);
+                try writer.print("(no initializer)\n", .{});
+            }
+        },
+        .UsingDeclaration => |v| {
+            try writer.print("UsingDeclaration:\n", .{});
             try printIdent(writer, depth + 1);
-            try writer.print("Value:\n", .{});
-            try printAst(v.value, depth + 2, writer);
+            try writer.print("Name: {s}\n", .{v.name});
+            if (v.value) |val| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Value:\n", .{});
+                try printAst(val, depth + 2, writer);
+            } else {
+                try printIdent(writer, depth + 1);
+                try writer.print("(no initializer)\n", .{});
+            }
         },
         .BlockStatement => |b| {
             try writer.print("BlockStatement:\n", .{});
@@ -509,6 +592,9 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
                 if (i > 0) try writer.print(", ", .{});
                 try writer.print("{s}", .{param});
             }
+            if (f.rest_param) |rp| {
+                try writer.print("{s}...{s}", .{ if (f.parameters.len > 0) ", " else "", rp });
+            }
             try writer.print("\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Body:\n", .{});
@@ -531,6 +617,9 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             for (f.parameters, 0..) |param, i| {
                 if (i > 0) try writer.print(", ", .{});
                 try writer.print("{s}", .{param});
+            }
+            if (f.rest_param) |rp| {
+                try writer.print("{s}...{s}", .{ if (f.parameters.len > 0) ", " else "", rp });
             }
             try writer.print("\n", .{});
             try printIdent(writer, depth + 1);
@@ -606,6 +695,9 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             for (g.parameters, 0..) |param, i| {
                 if (i > 0) try writer.print(", ", .{});
                 try writer.print("{s}", .{param});
+            }
+            if (g.rest_param) |rp| {
+                try writer.print("{s}...{s}", .{ if (g.parameters.len > 0) ", " else "", rp });
             }
             try writer.print("\n", .{});
             try printIdent(writer, depth + 1);
@@ -715,9 +807,50 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("Operand:\n", .{});
             try printAst(t.operand, depth + 2, writer);
         },
+        .DeleteExpression => |d| {
+            try writer.print("DeleteExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Operand:\n", .{});
+            try printAst(d.operand, depth + 2, writer);
+        },
+        .VoidExpression => |v| {
+            try writer.print("VoidExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Operand:\n", .{});
+            try printAst(v.operand, depth + 2, writer);
+        },
+        .EmptyStatement => try writer.print("EmptyStatement\n", .{}),
         .Elision => {
             try writer.print("Elision\n", .{});
         },
+        .SwitchStatement => |s| {
+            try writer.print("SwitchStatement:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Discriminant:\n", .{});
+            try printAst(s.discriminant, depth + 2, writer);
+            try printIdent(writer, depth + 1);
+            try writer.print("Cases:\n", .{});
+            for (s.cases) |c| {
+                try printAst(c, depth + 2, writer);
+            }
+        },
+        .SwitchCase => |sc| {
+            if (sc.test_expr) |t| {
+                try printIdent(writer, depth);
+                try writer.print("Case:\n", .{});
+                try printIdent(writer, depth + 1);
+                try writer.print("Test:\n", .{});
+                try printAst(t, depth + 2, writer);
+            } else {
+                try printIdent(writer, depth);
+                try writer.print("Default:\n", .{});
+            }
+            try printIdent(writer, depth + 1);
+            try writer.print("Consequent:\n", .{});
+            try printAst(sc.consequent, depth + 2, writer);
+        },
+        .ImportMetaExpression => try writer.print("ImportMetaExpression\n", .{}),
+        .DynamicImportExpression => |di| try writer.print("DynamicImportExpression: {s}\n", .{di.module_path}),
     }
 }
 
@@ -739,6 +872,7 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .ObjectLiteral => |o| {
             for (o.properties) |prop| {
                 freeAst(allocator, prop.value);
+                if (prop.key_expr) |ke| freeAst(allocator, ke);
             }
             allocator.free(o.properties);
         },
@@ -754,15 +888,20 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .Assignment => |a| {
             freeAst(allocator, a.value);
         },
-        .UpdateExpression => {},
+        .UpdateExpression => |u| {
+            freeAst(allocator, u.operand);
+        },
         .ConstantDeclaration => |c| {
-            freeAst(allocator, c.value);
+            if (c.value) |val| freeAst(allocator, val);
         },
         .VariableDeclaration => |v| {
-            freeAst(allocator, v.value);
+            if (v.value) |val| freeAst(allocator, val);
         },
         .LetDeclaration => |v| {
-            freeAst(allocator, v.value);
+            if (v.value) |val| freeAst(allocator, val);
+        },
+        .UsingDeclaration => |v| {
+            if (v.value) |val| freeAst(allocator, val);
         },
         .BlockStatement => |b| {
             for (b.statements) |stmt| {
@@ -896,6 +1035,26 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         .TypeOfExpression => |t| {
             freeAst(allocator, t.operand);
         },
+        .DeleteExpression => |d| {
+            freeAst(allocator, d.operand);
+        },
+        .VoidExpression => |v| {
+            freeAst(allocator, v.operand);
+        },
+        .EmptyStatement => {},
+        .SwitchStatement => |s| {
+            freeAst(allocator, s.discriminant);
+            for (s.cases) |c| {
+                freeAst(allocator, c);
+            }
+            allocator.free(s.cases);
+        },
+        .SwitchCase => |sc| {
+            if (sc.test_expr) |t| freeAst(allocator, t);
+            freeAst(allocator, sc.consequent);
+        },
+        .ImportMetaExpression => {},
+        .DynamicImportExpression => {},
     }
     allocator.destroy(node);
 }
@@ -1097,6 +1256,18 @@ test "freeAst - VariableDeclaration" {
     freeAst(allocator, node);
 }
 
+test "freeAst - VariableDeclaration without initializer" {
+    const allocator = std.testing.allocator;
+
+    const node = try allocator.create(Node);
+    node.* = Node{ .VariableDeclaration = .{
+        .name = "i",
+        .value = null,
+    } };
+
+    freeAst(allocator, node);
+}
+
 test "freeAst - BlockStatement" {
     const allocator = std.testing.allocator;
 
@@ -1253,7 +1424,7 @@ test "freeAst - ForLoop" {
 
     const init = try allocator.create(Node);
     init.* = Node{ .VariableDeclaration = .{ .name = "i", .value = try allocator.create(Node) } };
-    init.VariableDeclaration.value.* = Node{ .IntegerLiteral = .{ .value = 0 } };
+    init.VariableDeclaration.value.?.* = Node{ .IntegerLiteral = .{ .value = 0 } };
 
     const condition = try allocator.create(Node);
     condition.* = Node{ .BooleanLiteral = .{ .value = true } };

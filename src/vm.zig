@@ -59,6 +59,7 @@ pub const Op = enum(u8) {
     bit_not,
     left_shift,
     right_shift,
+    pow,
     eval_node,
     builtin,
     method_call,
@@ -450,14 +451,20 @@ pub const Compiler = struct {
             .LetDeclaration => |v| v.value,
             else => unreachable,
         };
-        if (val.* == .FunctionDeclaration or val.* == .ArrowFunction or val.* == .GeneratorDeclaration) {
-            self.env.setFunction(name, val) catch {};
+        const val_ptr = val orelse {
+            // No initializer → leave `undefined` on the stack.
+            self.c.op(.void_);
+            self.c.op2w(.def_global, self.c.emitS(name));
+            return;
+        };
+        if (val_ptr.* == .FunctionDeclaration or val_ptr.* == .ArrowFunction or val_ptr.* == .GeneratorDeclaration) {
+            self.env.setFunction(name, val_ptr) catch {};
             // Compile function body to bytecode
-            if (val.* == .FunctionDeclaration) {
-                self.compileFnBody(val);
-            } else if (val.* == .ArrowFunction) {
+            if (val_ptr.* == .FunctionDeclaration) {
+                self.compileFnBody(val_ptr);
+            } else if (val_ptr.* == .ArrowFunction) {
                 // Compile arrow body with the variable name (ast.ArrowFunction has no name field)
-                const body = val.ArrowFunction.body;
+                const body = val_ptr.ArrowFunction.body;
                 var chunk = Chunk.init(self.env.allocator);
                 var sub_comp = Compiler.init(self.env);
                 const body_stmts: [1]*ast.Node = .{body};
@@ -479,7 +486,7 @@ pub const Compiler = struct {
             }
             return;
         }
-        self.expr(val);
+        self.expr(val_ptr);
         self.c.op2w(.def_global, self.c.emitS(name));
     }
 
@@ -586,12 +593,12 @@ pub const Compiler = struct {
         const init_node = f.init orelse return false;
         const loop_var = switch (init_node.*) {
             .VariableDeclaration => |v| blk: {
-                const val = getFloatValue(v.value) orelse return false;
+                const val = getFloatValue(v.value orelse return false) orelse return false;
                 if (val != 0.0) return false;
                 break :blk v.name;
             },
             .LetDeclaration => |v| blk: {
-                const val = getFloatValue(v.value) orelse return false;
+                const val = getFloatValue(v.value orelse return false) orelse return false;
                 if (val != 0.0) return false;
                 break :blk v.name;
             },
@@ -913,6 +920,15 @@ pub const Compiler = struct {
                         self.c.op2w(.set_global, self.c.emitS(name));
                     }
                 },
+                .AndAssign, .OrAssign, .NullishAssign => {
+                    // Logical assignments have short-circuit semantics:
+                    //   a &&= b → if a is truthy, a = b; return new a
+                    //   a ||= b → if a is falsy, a = b; return new a
+                    //   a ??= b → if a is null/undefined, a = b; return new a
+                    // Delegate to the evaluator via eval_node since proper
+                    // short-circuit bytecode with assignment is non-trivial.
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                },
                 .Not => {
                     // !x is parsed as BinaryExpression(left=false, op=Not, right=x)
                     self.expr(b.right);
@@ -981,6 +997,7 @@ pub const Compiler = struct {
                                 .BitXor => self.c.op(.bit_xor),
                                 .LeftShift => self.c.op(.left_shift),
                                 .RightShift => self.c.op(.right_shift),
+                                .Exponent => self.c.op(.pow),
                                 else => {},
                             }
                         },
@@ -1040,14 +1057,18 @@ pub const Compiler = struct {
             },
             .ObjectLiteral => |o| {
                 var has_spread = false;
+                var has_computed = false;
                 for (o.properties) |prop| {
                     if (prop.value.* == .SpreadExpression) {
                         has_spread = true;
-                        break;
+                    }
+                    if (prop.key_expr != null) {
+                        has_computed = true;
                     }
                 }
-                if (has_spread) {
-                    // Defer evaluation to runtime via eval_node opcode
+                if (has_spread or has_computed) {
+                    // Defer evaluation to runtime via eval_node opcode.
+                    // Computed property keys must be evaluated at runtime.
                     self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
                 } else {
                     self.c.op(.make_object);
@@ -1427,6 +1448,32 @@ pub const VM = struct {
                         } });
                     }
                 },
+                .pow => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    if (a == .big_int and b == .big_int) {
+                        const base = a.big_int;
+                        const exp_val = b.big_int.toI64() orelse {
+                            self.push(.{ .float = std.math.inf(f64) });
+                            continue;
+                        };
+                        if (exp_val < 0) {
+                            self.push(.{ .float = 0.0 });
+                            continue;
+                        }
+                        var result = try builtinsTypes.BigIntValue.init(self.env.allocator);
+                        self.env.bigints.append(self.env.allocator, result) catch {};
+                        result.value.pow(&base.value, @intCast(exp_val)) catch {
+                            self.push(.{ .void = {} });
+                            continue;
+                        };
+                        self.push(.{ .big_int = result });
+                    } else {
+                        const av = toF64(a) orelse 0.0;
+                        const bv = toF64(b) orelse 0.0;
+                        self.push(.{ .float = std.math.pow(f64, av, bv) });
+                    }
+                },
                 .negate => {
                     const v = toF64(self.pop()) orelse 0.0;
                     self.push(.{ .float = -v });
@@ -1656,6 +1703,20 @@ pub const VM = struct {
                         } else {
                             const key = switch (idx) {
                                 .string => |s| s,
+                                .integer => |i| blk: {
+                                    var buf: [32]u8 = undefined;
+                                    const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                                    const owned = try self.env.allocator.dupe(u8, s);
+                                    self.env.owned_strings.append(self.env.allocator, owned) catch {};
+                                    break :blk owned;
+                                },
+                                .float => |f| blk: {
+                                    var buf: [64]u8 = undefined;
+                                    const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                                    const owned = try self.env.allocator.dupe(u8, s);
+                                    self.env.owned_strings.append(self.env.allocator, owned) catch {};
+                                    break :blk owned;
+                                },
                                 else => return error.InvalidIndex,
                             };
                             self.push(arr.js_object.properties.get(key) orelse .{ .void = {} });
@@ -1871,11 +1932,7 @@ pub const VM = struct {
                                     .void => self.push(.{ .void = {} }),
                                 }
                             } else {
-                                // Plain object literal (no @@type): dispatch via own
-                                // property lookup, walking the prototype chain if not
-                                // found on the object directly. This makes inherited
-                                // methods like `toString` / `hasOwnProperty` on
-                                // Object.prototype invocable.
+                                // First try prototype chain walk for own/ inherited properties.
                                 const found = blk: {
                                     var o: ?*ast.ObjectValue = obj.js_object;
                                     var depth: u8 = 0;
@@ -1895,6 +1952,28 @@ pub const VM = struct {
                                     } else if (runtime.isCallable(prop_val)) {
                                         const r = try callFunctionValue(prop_val, args.items, self.env, obj);
                                         self.push(r);
+                                    } else {
+                                        return self.throwTypeError(m);
+                                    }
+                                } else if (type_tag != null and type_tag.? == .string) {
+                                    // Prototype chain walk failed. Try generic @@type dispatch:
+                                    // look up a builtin object by the type name and dispatch to its methods.
+                                    // Supports Date, Error, WeakRef, DisposableStack, etc.
+                                    const type_name = type_tag.?.string;
+                                    if (self.env.getBuiltinObject(type_name)) |bObj| {
+                                        args.insert(self.env.allocator, 0, obj) catch {};
+                                        const md = bObj.getMethod(m) orelse {
+                                            if (obj.js_object.properties.get(m)) |prop_val| {
+                                                if (!runtime.isCallable(prop_val)) return self.throwTypeError(m);
+                                            }
+                                            self.push(.{ .void = {} });
+                                            continue;
+                                        };
+                                        const r = md(args.items, self.env);
+                                        switch (r) {
+                                            .value => |v| self.push(v),
+                                            .void => self.push(.{ .void = {} }),
+                                        }
                                     } else {
                                         return self.throwTypeError(m);
                                     }
@@ -2093,10 +2172,8 @@ pub const VM = struct {
                                     .void => self.push(.{ .void = {} }),
                                 }
                             } else {
-                                // Plain object literal (no @@type): dispatch via own
-                                // property lookup, walking the prototype chain if not
-                                // found directly. Padding args with [obj] matches the
-                                // ac>0 path semantics — the receiver is passed positionally.
+                                // Generic @@type dispatch: if the js_object has an @@type
+                                // property matching a builtin object, dispatch to its methods.
                                 const found = blk: {
                                     var o: ?*ast.ObjectValue = obj.js_object;
                                     var depth: u8 = 0;
@@ -2116,6 +2193,27 @@ pub const VM = struct {
                                         var tmp = [_]Value{obj};
                                         const r = try callFunctionValue(prop_val, tmp[0..], self.env, obj);
                                         self.push(r);
+                                    } else {
+                                        return self.throwTypeError(m);
+                                    }
+                                } else if (type_tag != null and type_tag.? == .string) {
+                                    // Prototype chain walk failed. Try generic @@type dispatch:
+                                    // look up a builtin object by the type name and dispatch to its methods.
+                                    const type_name = type_tag.?.string;
+                                    if (self.env.getBuiltinObject(type_name)) |bObj| {
+                                        var tmp = [_]Value{obj};
+                                        const md = bObj.getMethod(m) orelse {
+                                            if (obj.js_object.properties.get(m)) |prop_val| {
+                                                if (!runtime.isCallable(prop_val)) return self.throwTypeError(m);
+                                            }
+                                            self.push(.{ .void = {} });
+                                            continue;
+                                        };
+                                        const r = md(tmp[0..], self.env);
+                                        switch (r) {
+                                            .value => |v| self.push(v),
+                                            .void => self.push(.{ .void = {} }),
+                                        }
                                     } else {
                                         return self.throwTypeError(m);
                                     }

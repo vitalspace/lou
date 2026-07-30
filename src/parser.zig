@@ -12,6 +12,7 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     arena_child: std.mem.Allocator,
+    dest_tmp_counter: u32 = 0,
 
     pub fn init(lexer: *Lexer, allocator: std.mem.Allocator) !Parser {
         const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -160,6 +161,12 @@ pub const Parser = struct {
                 .Fn => break :stmt try this.parseFunctionDeclaration(),
                 .Import => break :stmt try this.parseImportStatement(),
                 .Export => break :stmt try this.parseExportStatement(),
+                .Semicolon => {
+                    this.nextToken(); // consume ';'
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .VoidLiteral = .{} };
+                    break :stmt node;
+                },
                 .Identifier => {
                     // Check for labeled statement: `identifier: statement`
                     if (this.peek_token.type == .Colon) {
@@ -202,6 +209,23 @@ pub const Parser = struct {
                     }
                 },
                 .LBrace => break :stmt try this.parseBlockStatement(),
+                .LBracket => {
+                    // Try array destructuring assignment: [a, b] = expr
+                    // Use backtracking: save state, try parsing as destructured assign;
+                    // if it doesn't end with '=', backtrack and parse as expression.
+                    const saved_lexer = this.lexer.*;
+                    const saved_current = this.current_token;
+                    const saved_peek = this.peek_token;
+
+                    if (this.parseDestructuredAssign()) |result| {
+                        break :stmt result;
+                    } else |_| {
+                        this.lexer.* = saved_lexer;
+                        this.current_token = saved_current;
+                        this.peek_token = saved_peek;
+                        break :stmt try this.parseCommaExpression();
+                    }
+                },
                 else => break :stmt try this.parseCommaExpression(),
             }
         };
@@ -224,8 +248,458 @@ pub const Parser = struct {
         return result;
     }
 
+    fn genDestTempName(this: *Parser) ![]const u8 {
+        var buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "_dest{d}", .{this.dest_tmp_counter});
+        this.dest_tmp_counter += 1;
+        return try this.allocator.dupe(u8, name);
+    }
+
+    fn makeIdentNode(this: *Parser, name: []const u8) !*ast.Node {
+        const n = try this.allocator.create(ast.Node);
+        n.* = .{ .Identifier = .{ .name = name } };
+        return n;
+    }
+
+    /// Create a binding node: VariableDeclaration when decl_mode is true,
+    /// Assignment when decl_mode is false.
+    fn makeBindNode(this: *Parser, name: []const u8, value: *ast.Node, decl_mode: bool) !*ast.Node {
+        const n = try this.allocator.create(ast.Node);
+        if (decl_mode) {
+            n.* = .{ .VariableDeclaration = .{ .name = name, .value = value } };
+        } else {
+            n.* = .{ .Assignment = .{ .name = name, .value = value } };
+        }
+        return n;
+    }
+
+    /// Parse a destructured declaration: const/let/var [a, b] = expr  or  const/let/var {x, y} = expr.
+    /// Returns a BlockStatement containing VarDeclaration nodes for the temp and all bindings.
+    fn parseDestructuredDecl(this: *Parser, decl_kind: TokenType) !*ast.Node {
+        _ = decl_kind; // ignored — all destructured bindings use VariableDeclaration for correct scoping
+
+        var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 8);
+        defer stmts.deinit(this.allocator);
+
+        const temp_name = try this.genDestTempName();
+        const temp_ident = try this.makeIdentNode(temp_name);
+
+        // Parse the pattern recursively, using temp_ident as the source access
+        try this.parseDestructuredPattern(temp_ident, &stmts, true);
+
+        // Expect '='
+        if (this.current_token.type != .Assign) return error.ExpectedAssign;
+        this.nextToken();
+
+        // Parse RHS
+        const rhs = try this.parseExpression();
+
+        // Build temp decl: var _dest0 = <rhs>
+        const temp_decl = try this.allocator.create(ast.Node);
+        temp_decl.* = .{ .VariableDeclaration = .{ .name = temp_name, .value = rhs } };
+
+        // Build BlockStatement: [temp_decl, binding1, binding2, ...]
+        var all_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, stmts.items.len + 1);
+        defer all_stmts.deinit(this.allocator);
+        try all_stmts.append(this.allocator, temp_decl);
+        for (stmts.items) |s| try all_stmts.append(this.allocator, s);
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .BlockStatement = .{ .statements = try all_stmts.toOwnedSlice(this.allocator) } };
+        return node;
+    }
+
+    /// Parse a destructuring pattern (array or object) recursively.
+    /// `source` is an expression node that evaluates to the value being destructured.
+    /// When `decl_mode` is true, appends VariableDeclaration nodes to `stmts`
+    /// (for const/let/var declarations). When false, appends Assignment nodes
+    /// (for destructuring assignments like [a, b] = expr).
+    fn parseDestructuredPattern(this: *Parser, source: *ast.Node, stmts: *std.ArrayList(*ast.Node), decl_mode: bool) !void {
+        const is_array = this.current_token.type == .LBracket;
+        this.nextToken(); // consume '[' or '{'
+
+        if (is_array) {
+            var idx: usize = 0;
+            while (this.current_token.type != .RBracket) {
+                // Elision: skip empty slots
+                if (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                    idx += 1;
+                    continue;
+                }
+
+                // Rest element: ...restName or ...nestedPattern
+                if (this.current_token.type == .DotDotDot) {
+                    this.nextToken(); // consume '...'
+
+                    // Nested destructuring rest: ...[pat] or ...{pat}
+                    if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+                        // Create a temp for the sliced rest: _destN = source.slice(idx)
+                        const rest_temp_name = try this.genDestTempName();
+                        const rest_temp_ident = try this.makeIdentNode(rest_temp_name);
+
+                        // Build source.slice(idx) call
+                        const idx_node = try this.allocator.create(ast.Node);
+                        idx_node.* = .{ .IntegerLiteral = .{ .value = @intCast(idx) } };
+                        const slice_args = try this.allocator.alloc(*ast.Node, 1);
+                        slice_args[0] = idx_node;
+                        const slice_call = try this.allocator.create(ast.Node);
+                        slice_call.* = .{ .MethodCall = .{
+                            .object = source,
+                            .method = "slice",
+                            .arguments = slice_args,
+                        } };
+
+                        // Declare: var _destN = source.slice(idx)
+                        const rest_temp_decl = try this.allocator.create(ast.Node);
+                        rest_temp_decl.* = .{ .VariableDeclaration = .{ .name = rest_temp_name, .value = slice_call } };
+                        try stmts.append(this.allocator, rest_temp_decl);
+
+                        // Parse the nested destructuring pattern on the sliced rest
+                        try this.parseDestructuredPattern(rest_temp_ident, stmts, decl_mode);
+
+                        while (this.current_token.type == .Comma) this.nextToken();
+                        break;
+                    }
+
+                    const bind_name = this.current_token.literal;
+                    this.nextToken(); // consume name
+
+                    // Build source.slice(idx) so rest gets only remaining elements
+                    const idx_node = try this.allocator.create(ast.Node);
+                    idx_node.* = .{ .IntegerLiteral = .{ .value = @intCast(idx) } };
+                    const slice_args = try this.allocator.alloc(*ast.Node, 1);
+                    slice_args[0] = idx_node;
+                    const slice_call = try this.allocator.create(ast.Node);
+                    slice_call.* = .{ .MethodCall = .{
+                        .object = source,
+                        .method = "slice",
+                        .arguments = slice_args,
+                    } };
+
+                    const decl = try this.makeBindNode(bind_name, slice_call, decl_mode);
+                    try stmts.append(this.allocator, decl);
+
+                    while (this.current_token.type == .Comma) this.nextToken();
+                    break;
+                }
+
+                // Nested pattern: [ or { at element position
+                if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+                    const idx_node = try this.allocator.create(ast.Node);
+                    idx_node.* = .{ .IntegerLiteral = .{ .value = @intCast(idx) } };
+
+                    // Build access: source[idx]
+                    const sub_source = try this.allocator.create(ast.Node);
+                    sub_source.* = .{ .ArrayIndex = .{ .array = source, .index = idx_node } };
+
+                    // Create a temp to hold the sub-source so we can apply
+                    // a whole-pattern default after the nested pattern is parsed.
+                    const inner_temp_name = try this.genDestTempName();
+                    const inner_temp_ident = try this.makeIdentNode(inner_temp_name);
+                    const saved_stmts_len = stmts.items.len;
+                    try this.parseDestructuredPattern(inner_temp_ident, stmts, decl_mode);
+
+                    // Handle nested whole-pattern default: [a, [b, c] = defaultArr]
+                    var nested_default: ?*ast.Node = null;
+                    if (this.current_token.type == .Assign) {
+                        this.nextToken(); // consume '='
+                        nested_default = try this.parseExpression();
+                    }
+
+                    // Build: var _destN = sub_source ?? defaultValue  (or just sub_source)
+                    const inner_value: *ast.Node = if (nested_default) |def| blk: {
+                        const nullish = try this.allocator.create(ast.Node);
+                        nullish.* = .{ .BinaryExpression = .{
+                            .left = sub_source,
+                            .operator = .Nullish,
+                            .right = def,
+                        } };
+                        break :blk nullish;
+                    } else sub_source;
+                    const inner_decl = try this.allocator.create(ast.Node);
+                    inner_decl.* = .{ .VariableDeclaration = .{ .name = inner_temp_name, .value = inner_value } };
+                    try stmts.insert(this.allocator, saved_stmts_len, inner_decl);
+
+                    idx += 1;
+
+                    if (this.current_token.type == .Comma) {
+                        this.nextToken();
+                    } else if (this.current_token.type != .RBracket) {
+                        return error.ExpectedCommaOrRBracket;
+                    }
+                    continue;
+                }
+
+                // Regular binding: name or name = default
+                const bind_name = this.current_token.literal;
+                this.nextToken(); // consume name
+
+                // Check for default value: name = expr
+                var default_val: ?*ast.Node = null;
+                if (this.current_token.type == .Assign) {
+                    this.nextToken();
+                    default_val = try this.parseExpression();
+                }
+
+                // Build index literal
+                const idx_node = try this.allocator.create(ast.Node);
+                idx_node.* = .{ .IntegerLiteral = .{ .value = @intCast(idx) } };
+
+                // Build access: source[idx]
+                const access = try this.allocator.create(ast.Node);
+                access.* = .{ .ArrayIndex = .{ .array = source, .index = idx_node } };
+
+                // Apply default with ??
+                const value = if (default_val) |dv| blk: {
+                    const nullish = try this.allocator.create(ast.Node);
+                    nullish.* = .{ .BinaryExpression = .{
+                        .left = access,
+                        .operator = .Nullish,
+                        .right = dv,
+                    } };
+                    break :blk nullish;
+                } else access;
+
+                const decl = try this.makeBindNode(bind_name, value, decl_mode);
+                try stmts.append(this.allocator, decl);
+
+                idx += 1;
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken();
+                } else if (this.current_token.type != .RBracket) {
+                    return error.ExpectedCommaOrRBracket;
+                }
+            }
+            this.nextToken(); // consume ']'
+        } else {
+            // Object pattern: { x, y: renamed, z = 10, ...rest }
+            while (this.current_token.type != .RBrace) {
+                // Rest element: ...restName
+                if (this.current_token.type == .DotDotDot) {
+                    this.nextToken(); // consume '...'
+                    const bind_name = this.current_token.literal;
+                    this.nextToken(); // consume name
+
+                    const decl = try this.makeBindNode(bind_name, source, decl_mode);
+                    try stmts.append(this.allocator, decl);
+
+                    if (this.current_token.type == .Comma) this.nextToken();
+                    continue;
+                }
+
+                // Parse property key
+                if (!isPropertyName(this.current_token.type) and
+                    this.current_token.type != .String and
+                    this.current_token.type != .Integer and
+                    this.current_token.type != .Float)
+                {
+                    return error.ExpectedPropertyName;
+                }
+                const prop_name = this.current_token.literal;
+                this.nextToken(); // consume key
+
+                if (this.current_token.type == .Colon) {
+                    this.nextToken(); // consume ':'
+
+                    // Nested pattern: { propName : { innerPat } } or { propName : [ innerPat ] }
+                    if (this.current_token.type == .LBrace or this.current_token.type == .LBracket) {
+                        // Build access: source.prop_name
+                        const sub_source = try this.allocator.create(ast.Node);
+                        sub_source.* = .{ .MemberAccess = .{ .object = source, .property = prop_name } };
+
+                        // Create a temp to hold the sub-source so we can apply
+                        // a whole-pattern default after the nested pattern is parsed.
+                        const inner_temp_name = try this.genDestTempName();
+                        const inner_temp_ident = try this.makeIdentNode(inner_temp_name);
+                        const saved_stmts_len = stmts.items.len;
+                        try this.parseDestructuredPattern(inner_temp_ident, stmts, decl_mode);
+
+                        // Handle nested whole-pattern default: { a: { b, c } = defaultValue }
+                        var nested_default: ?*ast.Node = null;
+                        if (this.current_token.type == .Assign) {
+                            this.nextToken(); // consume '='
+                            nested_default = try this.parseExpression();
+                        }
+
+                        // Build: var _destN = sub_source ?? defaultValue  (or just sub_source)
+                        const inner_value: *ast.Node = if (nested_default) |def| blk: {
+                            const nullish = try this.allocator.create(ast.Node);
+                            nullish.* = .{ .BinaryExpression = .{
+                                .left = sub_source,
+                                .operator = .Nullish,
+                                .right = def,
+                            } };
+                            break :blk nullish;
+                        } else sub_source;
+                        const inner_decl = try this.allocator.create(ast.Node);
+                        inner_decl.* = .{ .VariableDeclaration = .{ .name = inner_temp_name, .value = inner_value } };
+                        try stmts.insert(this.allocator, saved_stmts_len, inner_decl);
+
+                        if (this.current_token.type == .Comma) {
+                            this.nextToken();
+                        } else if (this.current_token.type != .RBrace) {
+                            return error.ExpectedCommaOrRBrace;
+                        }
+                        continue;
+                    }
+
+                    // Rename: propName : bindName
+                    const bind_name = this.current_token.literal;
+                    this.nextToken(); // consume binding name
+
+                    var default_val: ?*ast.Node = null;
+                    if (this.current_token.type == .Assign) {
+                        this.nextToken();
+                        default_val = try this.parseExpression();
+                    }
+
+                    const access = try this.allocator.create(ast.Node);
+                    access.* = .{ .MemberAccess = .{ .object = source, .property = prop_name } };
+
+                    const value = if (default_val) |dv| blk: {
+                        const nullish = try this.allocator.create(ast.Node);
+                        nullish.* = .{ .BinaryExpression = .{
+                            .left = access,
+                            .operator = .Nullish,
+                            .right = dv,
+                        } };
+                        break :blk nullish;
+                    } else access;
+
+                    const decl = try this.makeBindNode(bind_name, value, decl_mode);
+                    try stmts.append(this.allocator, decl);
+
+                    if (this.current_token.type == .Comma) {
+                        this.nextToken();
+                    } else if (this.current_token.type != .RBrace) {
+                        return error.ExpectedCommaOrRBrace;
+                    }
+                    continue;
+                }
+
+                // Shorthand: { propName } — binding name = property name
+                const bind_name = prop_name;
+
+                var default_val: ?*ast.Node = null;
+                if (this.current_token.type == .Assign) {
+                    this.nextToken();
+                    default_val = try this.parseExpression();
+                }
+
+                const access = try this.allocator.create(ast.Node);
+                access.* = .{ .MemberAccess = .{ .object = source, .property = prop_name } };
+
+                const value = if (default_val) |dv| blk: {
+                    const nullish = try this.allocator.create(ast.Node);
+                    nullish.* = .{ .BinaryExpression = .{
+                        .left = access,
+                        .operator = .Nullish,
+                        .right = dv,
+                    } };
+                    break :blk nullish;
+                } else access;
+
+                const decl = try this.makeBindNode(bind_name, value, decl_mode);
+                try stmts.append(this.allocator, decl);
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken();
+                } else if (this.current_token.type != .RBrace) {
+                    return error.ExpectedCommaOrRBrace;
+                }
+            }
+            this.nextToken(); // consume '}'
+        }
+    }
+
+    /// Parse a destructuring assignment: [a, b] = expr  or  ({x, y} = expr).
+    /// The calling context has already determined this is a destructuring assignment
+    /// (not a declaration or expression). Returns a BlockStatement containing:
+    /// [var _dest0 = rhs, a = _dest0[0], b = _dest0[1], ...].
+    fn parseDestructuredAssign(this: *Parser) !*ast.Node {
+        var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 8);
+        defer stmts.deinit(this.allocator);
+
+        const temp_name = try this.genDestTempName();
+        const temp_ident = try this.makeIdentNode(temp_name);
+
+        // Parse the pattern recursively (decl_mode=false for Assignment nodes)
+        try this.parseDestructuredPattern(temp_ident, &stmts, false);
+
+        // Expect '='
+        if (this.current_token.type != .Assign) return error.ExpectedAssign;
+        this.nextToken();
+
+        // Parse RHS
+        const rhs = try this.parseExpression();
+
+        // Build temp decl: var _dest0 = <rhs>
+        const temp_decl = try this.allocator.create(ast.Node);
+        temp_decl.* = .{ .VariableDeclaration = .{ .name = temp_name, .value = rhs } };
+
+        // Build BlockStatement: [temp_decl, binding1, binding2, ...]
+        var all_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, stmts.items.len + 1);
+        defer all_stmts.deinit(this.allocator);
+        try all_stmts.append(this.allocator, temp_decl);
+        for (stmts.items) |s| try all_stmts.append(this.allocator, s);
+        // The RHS value (stored in temp) is the return value of the assignment expression.
+        try all_stmts.append(this.allocator, temp_ident);
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .BlockStatement = .{ .statements = try all_stmts.toOwnedSlice(this.allocator) } };
+        return node;
+    }
+
+    /// Parse a parenthesized destructuring assignment: ({x, y} = expr) or ([a, b] = expr).
+    /// Consumes '(', the pattern, '=', the RHS expression, and the closing ')'.
+    fn parseParenthesizedDestructuredAssign(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume '('
+
+        var stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 8);
+        defer stmts.deinit(this.allocator);
+
+        const temp_name = try this.genDestTempName();
+        const temp_ident = try this.makeIdentNode(temp_name);
+
+        // Parse the pattern recursively (decl_mode=false for Assignment nodes)
+        try this.parseDestructuredPattern(temp_ident, &stmts, false);
+
+        // Expect '=' (the pattern is directly followed by =, NOT by ')',
+        // because in ({a} = expr) the closing ) is at the very end)
+        if (this.current_token.type != .Assign) return error.ExpectedAssign;
+        this.nextToken();
+
+        // Parse RHS
+        const rhs = try this.parseExpression();
+
+        // Expect ')' — the closing paren of the parenthesized expression
+        if (this.current_token.type != .RParen) return error.ExpectedRParen;
+        this.nextToken(); // consume ')'
+
+        // Build temp decl: var _dest0 = <rhs>
+        const temp_decl = try this.allocator.create(ast.Node);
+        temp_decl.* = .{ .VariableDeclaration = .{ .name = temp_name, .value = rhs } };
+
+        // Build BlockStatement: [temp_decl, binding1, binding2, ..., temp_ident]
+        var all_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, stmts.items.len + 2);
+        defer all_stmts.deinit(this.allocator);
+        try all_stmts.append(this.allocator, temp_decl);
+        for (stmts.items) |s| try all_stmts.append(this.allocator, s);
+        // The RHS value (stored in temp) is the return value of the assignment expression.
+        try all_stmts.append(this.allocator, temp_ident);
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .BlockStatement = .{ .statements = try all_stmts.toOwnedSlice(this.allocator) } };
+        return node;
+    }
+
     fn parseConstantDeclaration(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'const'
+        if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+            return this.parseDestructuredDecl(.Const);
+        }
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
@@ -241,6 +715,9 @@ pub const Parser = struct {
 
     fn parseVariableDeclaration(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'var'
+        if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+            return this.parseDestructuredDecl(.Var);
+        }
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
@@ -255,6 +732,9 @@ pub const Parser = struct {
 
     fn parseLetDeclaration(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'let'
+        if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+            return this.parseDestructuredDecl(.Let);
+        }
         const name = this.current_token.literal;
         this.nextToken(); // consume identifier
         this.nextToken(); // consume '='
@@ -361,7 +841,21 @@ pub const Parser = struct {
                 base = node;
             },
             .LBracket => {
-                base = try this.parseArrayLiteral();
+                // Try array destructuring assignment in expression context: [a, b] = expr
+                // Use backtracking: save state, try parsing as destructured assign;
+                // if it doesn't end with '=', backtrack and parse as array literal.
+                const saved_lexer_expr = this.lexer.*;
+                const saved_current_expr = this.current_token;
+                const saved_peek_expr = this.peek_token;
+
+                if (this.parseDestructuredAssign()) |result| {
+                    return result;
+                } else |_| {
+                    this.lexer.* = saved_lexer_expr;
+                    this.current_token = saved_current_expr;
+                    this.peek_token = saved_peek_expr;
+                    base = try this.parseArrayLiteral();
+                }
             },
             .Identifier => {
                 base = try this.parseIdentifier();
@@ -413,7 +907,8 @@ pub const Parser = struct {
                 base = node;
             },
             .LParen => {
-                // Try arrow function first; if it fails, parse as grouped expression
+                // Try arrow function first; if it fails, try destructuring;
+                // if that also fails, parse as grouped expression.
                 const saved_lexer = this.lexer.*;
                 const saved_current = this.current_token;
                 const saved_peek = this.peek_token;
@@ -424,33 +919,35 @@ pub const Parser = struct {
                     this.lexer.* = saved_lexer;
                     this.current_token = saved_current;
                     this.peek_token = saved_peek;
-                    this.nextToken(); // consume '('
-                    base = try this.parseCommaExpression();
-                    if (this.current_token.type != .RParen) {
-                        return error.ExpectedRParen;
+
+                    // Try parenthesized destructuring: ({a, b} = expr) or ([a, b] = expr)
+                    if (this.parseParenthesizedDestructuredAssign()) |result| {
+                        return result;
+                    } else |_| {
+                        // Parse as grouped expression
+                        this.lexer.* = saved_lexer;
+                        this.current_token = saved_current;
+                        this.peek_token = saved_peek;
+                        this.nextToken(); // consume '('
+                        base = try this.parseCommaExpression();
+                        if (this.current_token.type != .RParen) {
+                            return error.ExpectedRParen;
+                        }
+                        this.nextToken(); // consume ')'
                     }
-                    this.nextToken(); // consume ')'
                 }
             },
             .Increment => {
-                // Handle pre-increment operator like ++i
-                this.nextToken();
-                if (this.current_token.type == .Identifier) {
-                    const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .UpdateExpression = .{
-                        .operand = blk: {
-                            const ident = try this.allocator.create(ast.Node);
-                            ident.* = .{ .Identifier = .{ .name = this.current_token.literal } };
-                            break :blk ident;
-                        },
-                        .prefix = true,
-                        .operator = .Increment,
-                    } };
-                    this.nextToken();
-                    return node;
-                } else {
-                    return error.UnexpectedToken;
-                }
+                // Handle pre-increment operator like ++i, ++obj.x, ++arr[0]
+                this.nextToken(); // consume '++'
+                const operand = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .UpdateExpression = .{
+                    .operand = operand,
+                    .prefix = true,
+                    .operator = .Increment,
+                } };
+                return node;
             },
             .Minus => {
                 // Unary minus: -literal, -identifier, -(expr), etc.
@@ -478,24 +975,16 @@ pub const Parser = struct {
                 }
             },
             .Decrement => {
-                // Handle pre-decrement operator like --i
-                this.nextToken();
-                if (this.current_token.type == .Identifier) {
-                    const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .UpdateExpression = .{
-                        .operand = blk: {
-                            const ident = try this.allocator.create(ast.Node);
-                            ident.* = .{ .Identifier = .{ .name = this.current_token.literal } };
-                            break :blk ident;
-                        },
-                        .prefix = true,
-                        .operator = .Decrement,
-                    } };
-                    this.nextToken();
-                    return node;
-                } else {
-                    return error.UnexpectedToken;
-                }
+                // Handle pre-decrement operator like --i, --obj.x, --arr[0]
+                this.nextToken(); // consume '--'
+                const operand = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .UpdateExpression = .{
+                    .operand = operand,
+                    .prefix = true,
+                    .operator = .Decrement,
+                } };
+                return node;
             },
             .Not => {
                 // Handle logical NOT operator like !x
@@ -510,12 +999,44 @@ pub const Parser = struct {
                 node.BinaryExpression.left.* = .{ .BooleanLiteral = .{ .value = false } };
                 return node;
             },
+            .Import => {
+                // import.meta expression
+                this.nextToken(); // consume 'import'
+                if (this.current_token.type == .Dot and this.peek_token.type == .Identifier and
+                    std.mem.eql(u8, this.peek_token.literal, "meta"))
+                {
+                    this.nextToken(); // consume '.'
+                    this.nextToken(); // consume 'meta'
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .ImportMetaExpression = .{} };
+                    base = node;
+                } else {
+                    // Dynamic import() not yet implemented
+                    return error.UnexpectedToken;
+                }
+            },
             .TypeOf => {
                 // Handle typeof operator: typeof expr
                 this.nextToken(); // consume 'typeof'
                 const expr = try this.parsePrimary();
                 const node = try this.allocator.create(ast.Node);
                 node.* = .{ .TypeOfExpression = .{ .operand = expr } };
+                return node;
+            },
+            .Delete => {
+                // Handle delete operator: delete obj.prop
+                this.nextToken(); // consume 'delete'
+                const expr = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .DeleteExpression = .{ .operand = expr } };
+                return node;
+            },
+            .Void => {
+                // Handle void operator: void expr
+                this.nextToken(); // consume 'void'
+                const expr = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .VoidExpression = .{ .operand = expr } };
                 return node;
             },
             .BitNot => {
@@ -547,8 +1068,8 @@ pub const Parser = struct {
             }
         }
 
-        // Post-increment: i++
-        if (this.current_token.type == .Increment and base.* == .Identifier) {
+        // Post-increment: i++, obj.x++, arr[0]++
+        if (this.current_token.type == .Increment and isValidLhs(base)) {
             this.nextToken(); // consume ++
             const node = try this.allocator.create(ast.Node);
             node.* = .{ .UpdateExpression = .{
@@ -559,8 +1080,8 @@ pub const Parser = struct {
             return node;
         }
 
-        // Post-decrement: i--
-        if (this.current_token.type == .Decrement and base.* == .Identifier) {
+        // Post-decrement: i--, obj.x--, arr[0]--
+        if (this.current_token.type == .Decrement and isValidLhs(base)) {
             this.nextToken(); // consume --
             const node = try this.allocator.create(ast.Node);
             node.* = .{ .UpdateExpression = .{
@@ -572,6 +1093,13 @@ pub const Parser = struct {
         }
 
         return base;
+    }
+
+    fn isValidLhs(node: *const ast.Node) bool {
+        return switch (node.*) {
+            .Identifier, .MemberAccess, .ArrayIndex => true,
+            else => false,
+        };
     }
 
     fn parseBinaryExpression(this: *Parser, left: ast.Node, op: TokenType, right: ast.Node) !*ast.Node {
@@ -588,7 +1116,16 @@ pub const Parser = struct {
 
     fn parseIntegerLiteral(this: *Parser) !*ast.Node {
         const node = try this.allocator.create(ast.Node);
-        const value = try std.fmt.parseInt(i64, this.current_token.literal, 10);
+        const literal = this.current_token.literal;
+        // Detect base from prefix: 0x=hex, 0o=octal, 0b=binary, otherwise decimal
+        const base: u8 = if (literal.len >= 2 and literal[0] == '0') switch (literal[1]) {
+            'x', 'X' => 16,
+            'o', 'O' => 8,
+            'b', 'B' => 2,
+            else => 10,
+        } else 10;
+        const digits = if (base != 10) literal[2..] else literal;
+        const value = try std.fmt.parseInt(i64, digits, base);
         node.* = .{ .IntegerLiteral = .{ .value = value } };
         this.nextToken();
         return node;
@@ -656,7 +1193,48 @@ pub const Parser = struct {
                     '\'' => try buf.append(this.allocator, '\''),
                     '"' => try buf.append(this.allocator, '"'),
                     '0' => try buf.append(this.allocator, 0),
+                    'x' => {
+                        if (i + 3 < raw.len and isHexDigits(raw[i + 2 .. i + 4])) {
+                            const val = std.fmt.parseInt(u8, raw[i + 2 .. i + 4], 16) catch unreachable;
+                            try buf.append(this.allocator, val);
+                            i += 4;
+                            continue;
+                        }
+                        try buf.append(this.allocator, '\\');
+                        try buf.append(this.allocator, 'x');
+                        i += 2;
+                        continue;
+                    },
                     'u' => {
+                        // Handle \u{XXXXX} (braced code point)
+                        if (i + 2 < raw.len and raw[i + 2] == '{') {
+                            const close = std.mem.indexOfScalar(u8, raw[i + 3 ..], '}') orelse {
+                                try buf.append(this.allocator, '\\');
+                                try buf.append(this.allocator, 'u');
+                                try buf.append(this.allocator, '{');
+                                i += 3;
+                                continue;
+                            };
+                            if (close > 0 and isHexDigits(raw[i + 3 .. i + 3 + close])) {
+                                const cp = std.fmt.parseInt(u21, raw[i + 3 .. i + 3 + close], 16) catch unreachable;
+                                var encoded: [4]u8 = undefined;
+                                const len = std.unicode.utf8Encode(cp, &encoded) catch {
+                                    try buf.append(this.allocator, '\\');
+                                    try buf.append(this.allocator, 'u');
+                                    try buf.append(this.allocator, '{');
+                                    i += 3;
+                                    continue;
+                                };
+                                try buf.appendSlice(this.allocator, encoded[0..len]);
+                                i += 3 + close + 1;
+                                continue;
+                            }
+                            try buf.append(this.allocator, '\\');
+                            try buf.append(this.allocator, 'u');
+                            try buf.append(this.allocator, '{');
+                            i += 3;
+                            continue;
+                        }
                         if (i + 5 < raw.len and isHexDigits(raw[i + 2 .. i + 6])) {
                             const hi = std.fmt.parseInt(u21, raw[i + 2 .. i + 6], 16) catch unreachable;
                             if (hi >= 0xD800 and hi <= 0xDBFF and i + 11 < raw.len and raw[i + 6] == '\\' and raw[i + 7] == 'u' and isHexDigits(raw[i + 8 .. i + 12])) {
@@ -775,6 +1353,28 @@ pub const Parser = struct {
                 const spread_node = try this.allocator.create(ast.Node);
                 spread_node.* = .{ .SpreadExpression = .{ .value = expr } };
                 try properties.append(this.allocator, .{ .key = "", .value = spread_node });
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                } else if (this.current_token.type != .RBrace) {
+                    return error.ExpectedCommaOrRBrace;
+                }
+                continue;
+            }
+
+            // Handle computed property key: [expr]
+            if (this.current_token.type == .LBracket) {
+                this.nextToken(); // consume '['
+                const key_expr = try this.parseExpression();
+                if (this.current_token.type != .RBracket) return error.ExpectedRBracket;
+                this.nextToken(); // consume ']'
+
+                if (this.current_token.type != .Colon) return error.ExpectedColon;
+                this.nextToken(); // consume ':'
+
+                const value = try this.parseExpression();
+
+                try properties.append(this.allocator, .{ .key = "", .value = value, .key_expr = key_expr });
 
                 if (this.current_token.type == .Comma) {
                     this.nextToken(); // consume ','
@@ -904,6 +1504,103 @@ pub const Parser = struct {
                     } };
                     return node;
                 }
+            } else if (this.current_token.type == .LBracket or this.current_token.type == .LBrace) {
+                // Destructuring pattern in for...of: for (const [a, b] of iter) {}
+                // Strategy: desugar to for (const _tmp of iter) { const [a, b] = _tmp; body }
+                const dest_saved_lexer = this.lexer.*;
+                const dest_saved_current = this.current_token;
+                const dest_saved_peek = this.peek_token;
+
+                var destr_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 8);
+
+                const temp_name = try this.genDestTempName();
+                const temp_ident = try this.makeIdentNode(temp_name);
+
+                // Try to parse the destructuring pattern
+                const pattern_ok = this.parseDestructuredPattern(temp_ident, &destr_stmts, true);
+                if (pattern_ok) {
+                    if (this.current_token.type == .Of) {
+                        // For-of destructuring: for (const [a, b] of iter) { body }
+                        this.nextToken(); // consume 'of'
+                        const iterable = try this.parseExpression();
+
+                        if (this.current_token.type != .RParen) {
+                            return error.ExpectedRParen;
+                        }
+                        this.nextToken(); // consume ')'
+
+                        const original_body = try this.parseStatement();
+
+                        // Wrap body: { const [a, b] = _tmp; original_body }
+                        var body_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, destr_stmts.items.len + 1);
+                        defer body_stmts.deinit(this.allocator);
+                        for (destr_stmts.items) |s| try body_stmts.append(this.allocator, s);
+                        try body_stmts.append(this.allocator, original_body);
+
+                        const new_body = try this.allocator.create(ast.Node);
+                        new_body.* = .{ .BlockStatement = .{ .statements = try body_stmts.toOwnedSlice(this.allocator) } };
+
+                        // Clean up the temp ArrayList (not the elements — they're now in BlockStatement)
+                        destr_stmts.deinit(this.allocator);
+
+                        const node = try this.allocator.create(ast.Node);
+                        node.* = .{ .ForOfLoop = .{
+                            .kind = switch (decl_kind) {
+                                .Const => .Const,
+                                .Var => .Var,
+                                .Let => .Let,
+                                else => unreachable,
+                            },
+                            .variable = temp_name,
+                            .iterable = iterable,
+                            .body = new_body,
+                        } };
+                        return node;
+                    }
+
+                    if (this.current_token.type == .In) {
+                        this.nextToken(); // consume 'in'
+                        const object = try this.parseExpression();
+
+                        if (this.current_token.type != .RParen) {
+                            return error.ExpectedRParen;
+                        }
+                        this.nextToken(); // consume ')'
+
+                        const original_body = try this.parseStatement();
+
+                        // Wrap body: { const [a, b] = _tmp; original_body }
+                        var body_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, destr_stmts.items.len + 1);
+                        defer body_stmts.deinit(this.allocator);
+                        for (destr_stmts.items) |s| try body_stmts.append(this.allocator, s);
+                        try body_stmts.append(this.allocator, original_body);
+
+                        const new_body = try this.allocator.create(ast.Node);
+                        new_body.* = .{ .BlockStatement = .{ .statements = try body_stmts.toOwnedSlice(this.allocator) } };
+
+                        destr_stmts.deinit(this.allocator);
+
+                        const node = try this.allocator.create(ast.Node);
+                        node.* = .{ .ForInLoop = .{
+                            .kind = switch (decl_kind) {
+                                .Const => .Const,
+                                .Var => .Var,
+                                .Let => .Let,
+                                else => unreachable,
+                            },
+                            .variable = temp_name,
+                            .object = object,
+                            .body = new_body,
+                        } };
+                        return node;
+                    }
+                } else |_| {
+                    // Pattern parsing failed, backtrack
+                    destr_stmts.deinit(this.allocator);
+                    this.lexer.* = dest_saved_lexer;
+                    this.current_token = dest_saved_current;
+                    this.peek_token = dest_saved_peek;
+                }
             }
 
             // Not a for...of or for...in, restore state and fall through to regular for loop parsing
@@ -912,7 +1609,10 @@ pub const Parser = struct {
             this.peek_token = saved_peek;
         }
 
-        // Parse initialization (optional) — supports comma-separated initializers
+        // Parse initialization (optional) — supports comma-separated initializers.
+        // For `var` and `let`, each binding may be initialized with `=` OR
+        // intentionally left uninitialized (`for (var i; ...)` /
+        // `for (let x;;)`). `const` always requires `=` per ES2015.
         var init_stmt: ?*ast.Node = null;
         if (this.current_token.type != .Semicolon) {
             if (this.current_token.type == .Var or this.current_token.type == .Let or this.current_token.type == .Const) {
@@ -922,19 +1622,32 @@ pub const Parser = struct {
                 var init_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
                 defer init_stmts.deinit(this.allocator);
 
+                // Helper closure: build one decl node with name + optional value.
+                // const still requires `=`; var/let allow either '=' or
+                // a `;`/`)`/`/`/`{` boundary (no initializer).
+                const build_decl = struct {
+                    fn build(p: *Parser, kind: TokenType, name: []const u8) anyerror!*ast.Node {
+                        const opt_value: ?*ast.Node = if (p.current_token.type == .Assign) blk: {
+                            p.nextToken(); // consume '='
+                            break :blk try p.parseExpression();
+                        } else if (kind == .Const) {
+                            return error.ExpectedAssign;
+                        } else null;
+                        const n = try p.allocator.create(ast.Node);
+                        n.* = switch (kind) {
+                            .Var => .{ .VariableDeclaration = .{ .name = name, .value = opt_value } },
+                            .Let => .{ .LetDeclaration = .{ .name = name, .value = opt_value } },
+                            .Const => .{ .ConstantDeclaration = .{ .name = name, .value = opt_value.? } },
+                            else => unreachable,
+                        };
+                        return n;
+                    }
+                }.build;
+
                 {
                     const name = this.current_token.literal;
                     this.nextToken(); // consume identifier
-                    if (this.current_token.type != .Assign) return error.ExpectedAssign;
-                    this.nextToken(); // consume '='
-                    const value = try this.parseExpression();
-                    const n = try this.allocator.create(ast.Node);
-                    n.* = switch (decl_type) {
-                        .Var => .{ .VariableDeclaration = .{ .name = name, .value = value } },
-                        .Let => .{ .LetDeclaration = .{ .name = name, .value = value } },
-                        .Const => .{ .ConstantDeclaration = .{ .name = name, .value = value } },
-                        else => unreachable,
-                    };
+                    const n = try build_decl(this, decl_type, name);
                     try init_stmts.append(this.allocator, n);
                 }
 
@@ -942,16 +1655,7 @@ pub const Parser = struct {
                     this.nextToken(); // consume ','
                     const name = this.current_token.literal;
                     this.nextToken(); // consume identifier
-                    if (this.current_token.type != .Assign) return error.ExpectedAssign;
-                    this.nextToken(); // consume '='
-                    const value = try this.parseExpression();
-                    const n = try this.allocator.create(ast.Node);
-                    n.* = switch (decl_type) {
-                        .Var => .{ .VariableDeclaration = .{ .name = name, .value = value } },
-                        .Let => .{ .LetDeclaration = .{ .name = name, .value = value } },
-                        .Const => .{ .ConstantDeclaration = .{ .name = name, .value = value } },
-                        else => unreachable,
-                    };
+                    const n = try build_decl(this, decl_type, name);
                     try init_stmts.append(this.allocator, n);
                 }
 
@@ -1200,19 +1904,123 @@ pub const Parser = struct {
     }
 
     // Shared by parseArrowFunction and parseFunctionDeclaration.
-    // Block bodies run parseBlockStatement; non-block bodies use
+    // Block bodies call parseBlockStatement; non-block bodies call
     // parseExpression (NOT parseStatement — which via
     // parseCommaExpression greedily consumes boundary tokens).
     fn parseFunctionBody(this: *Parser) !*ast.Node {
         return if (this.current_token.type == .LBrace) this.parseBlockStatement() else this.parseExpression();
     }
 
+    /// Parse parameter list for functions/arrows/generators.
+    /// Returns parameter names, optional rest param, and any destructured
+    /// binding statements that should be prepended to the function body.
+    fn parseFunctionParameters(this: *Parser) !struct {
+        names: [][]const u8,
+        rest_param: ?[]const u8,
+        destructured_preamble: ?*ast.Node,
+    } {
+        var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
+        defer parameters.deinit(this.allocator);
+        var rest_param: ?[]const u8 = null;
+        var preamble_stmts = std.ArrayList(*ast.Node).initCapacity(this.allocator, 4) catch {
+            return error.OutOfMemory;
+        };
+
+        while (this.current_token.type != .RParen) {
+            // Rest parameter: ...restName
+            if (this.current_token.type == .DotDotDot) {
+                this.nextToken(); // consume '...'
+                if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
+                    rest_param = this.current_token.literal;
+                    this.nextToken(); // consume parameter name
+                    break; // rest param must be last
+                } else {
+                    preamble_stmts.deinit(this.allocator);
+                    return error.ExpectedIdentifier;
+                }
+            }
+            // Destructured parameter: { pattern } or [ pattern ]
+            else if (this.current_token.type == .LBrace or this.current_token.type == .LBracket) {
+                const temp_name = try this.genDestTempName();
+                const temp_ident = try this.makeIdentNode(temp_name);
+                this.parseDestructuredPattern(temp_ident, &preamble_stmts, true) catch |err| {
+                    preamble_stmts.deinit(this.allocator);
+                    return err;
+                };
+                try parameters.append(this.allocator, temp_name);
+                // Whole-pattern default: function f({x, y} = defaultValue)
+                if (this.current_token.type == .Assign) {
+                    this.nextToken(); // consume '='
+                    const default_expr = this.parseExpression() catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                    // Create assignment: temp_name = temp_name ?? default_expr
+                    const ident_ref = this.makeIdentNode(temp_name) catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                    const nullish = this.allocator.create(ast.Node) catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                    nullish.* = .{ .BinaryExpression = .{
+                        .left = ident_ref,
+                        .operator = .Nullish,
+                        .right = default_expr,
+                    } };
+                    const reassign = this.allocator.create(ast.Node) catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                    reassign.* = .{ .Assignment = .{ .name = temp_name, .value = nullish } };
+                    preamble_stmts.insert(this.allocator, 0, reassign) catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                }
+            }
+            // Plain identifier parameter
+            else if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
+                try parameters.append(this.allocator, this.current_token.literal);
+                this.nextToken(); // consume parameter name
+            } else {
+                preamble_stmts.deinit(this.allocator);
+                return error.ExpectedIdentifier;
+            }
+
+            // After a parameter, expect ',' (more params) or ')' (end)
+            if (this.current_token.type == .RParen) break;
+            if (this.current_token.type != .Comma) {
+                preamble_stmts.deinit(this.allocator);
+                return error.ExpectedComma;
+            }
+            this.nextToken(); // consume ','
+        }
+
+        const destructured_preamble: ?*ast.Node = if (preamble_stmts.items.len > 0) blk: {
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .BlockStatement = .{ .statements = try preamble_stmts.toOwnedSlice(this.allocator) } };
+            break :blk node;
+        } else blk: {
+            preamble_stmts.deinit(this.allocator);
+            break :blk null;
+        };
+
+        return .{
+            .names = try parameters.toOwnedSlice(this.allocator),
+            .rest_param = rest_param,
+            .destructured_preamble = destructured_preamble,
+        };
+    }
+
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'fn'
+
         // Check if this is a generator function (function* or fn*)
         var is_generator = false;
-        if (this.peek_token.type == .Multiply) {
+        if (this.current_token.type == .Multiply) {
             is_generator = true;
-            this.nextToken(); // consume 'function'/'fn'
             this.nextToken(); // consume '*'
         }
 
@@ -1220,61 +2028,49 @@ pub const Parser = struct {
         if (this.current_token.type == .Identifier) {
             name = this.current_token.literal;
             this.nextToken(); // consume identifier
-        } else if (this.peek_token.type == .Identifier) {
-            this.nextToken(); // consume 'fn'
-            name = this.current_token.literal;
-            this.nextToken(); // consume identifier
-    } else {
-        if (!is_generator) {
-            this.nextToken(); // consume 'fn' (anonymous function)
         }
-        // For anonymous generators, 'fn' and '*' are already consumed above
-    }
 
         if (this.current_token.type != .LParen) {
             return error.ExpectedLParen;
         }
         this.nextToken(); // consume '('
 
-        var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
-        defer parameters.deinit(this.allocator);
-        var rest_param: ?[]const u8 = null;
-
-        while (this.current_token.type != .RParen) {
-            if (this.current_token.type == .DotDotDot) {
-                this.nextToken(); // consume ...
-                if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
-                    rest_param = this.current_token.literal;
-                    this.nextToken(); // consume parameter name
-                    break; // rest param must be last, exit loop
-                } else {
-                    return error.ExpectedIdentifier;
-                }
-            } else
-            if (this.current_token.type != .Identifier) {
-                return error.ExpectedIdentifier;
-            }
-            try parameters.append(this.allocator, this.current_token.literal);
-            this.nextToken(); // consume parameter
-
-            if (this.current_token.type == .RParen) break;
-
-            if (this.current_token.type != .Comma) {
-                return error.ExpectedComma;
-            }
-            this.nextToken(); // consume ','
-        }
+        const params = try this.parseFunctionParameters();
         this.nextToken(); // consume ')'
 
         const body = try this.parseFunctionBody();
+        const final_body = if (params.destructured_preamble) |preamble| blk: {
+            // Prepend destructured bindings to the function body
+            if (body.* == .BlockStatement) {
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, body.BlockStatement.statements.len + 1);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                for (body.BlockStatement.statements) |s| try new_stmts.append(this.allocator, s);
+                this.allocator.free(body.BlockStatement.statements);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            } else {
+                // Expression body: wrap in BlockStatement with preamble
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                const ret = try this.allocator.create(ast.Node);
+                ret.* = .{ .ReturnStatement = .{ .value = body } };
+                try new_stmts.append(this.allocator, ret);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            }
+        } else body;
 
         if (is_generator) {
             const node = try this.allocator.create(ast.Node);
             node.* = .{ .GeneratorDeclaration = .{
                 .name = name,
-                .parameters = try parameters.toOwnedSlice(this.allocator),
-                .body = body,
-                .rest_param = rest_param,
+                .parameters = params.names,
+                .body = final_body,
+                .rest_param = params.rest_param,
             } };
             return node;
         }
@@ -1282,9 +2078,9 @@ pub const Parser = struct {
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .FunctionDeclaration = .{
             .name = name,
-            .parameters = try parameters.toOwnedSlice(this.allocator),
-            .body = body,
-            .rest_param = rest_param,
+            .parameters = params.names,
+            .body = final_body,
+            .rest_param = params.rest_param,
         } };
         return node;
     }
@@ -1292,34 +2088,7 @@ pub const Parser = struct {
     fn parseArrowFunction(this: *Parser) !*ast.Node {
         this.nextToken(); // consume '('
 
-        var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
-        defer parameters.deinit(this.allocator);
-        var rest_param: ?[]const u8 = null;
-
-        while (this.current_token.type != .RParen) {
-            if (this.current_token.type == .DotDotDot) {
-                this.nextToken(); // consume ...
-                if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
-                    rest_param = this.current_token.literal;
-                    this.nextToken(); // consume parameter name
-                    break; // rest param must be last, exit loop
-                } else {
-                    return error.ExpectedIdentifier;
-                }
-            } else
-            if (this.current_token.type != .Identifier) {
-                return error.ExpectedIdentifier;
-            }
-            try parameters.append(this.allocator, this.current_token.literal);
-            this.nextToken(); // consume parameter
-
-            if (this.current_token.type == .RParen) break;
-
-            if (this.current_token.type != .Comma) {
-                return error.ExpectedComma;
-            }
-            this.nextToken(); // consume ','
-        }
+        const params = try this.parseFunctionParameters();
         this.nextToken(); // consume ')'
 
         if (this.current_token.type != .Arrow) {
@@ -1328,12 +2097,36 @@ pub const Parser = struct {
         this.nextToken(); // consume '=>'
 
         const body = try this.parseFunctionBody();
+        const final_body = if (params.destructured_preamble) |preamble| blk: {
+            // Prepend destructured bindings to the function body
+            if (body.* == .BlockStatement) {
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, body.BlockStatement.statements.len + 1);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                for (body.BlockStatement.statements) |s| try new_stmts.append(this.allocator, s);
+                this.allocator.free(body.BlockStatement.statements);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            } else {
+                // Expression body: wrap in BlockStatement with preamble
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                const ret = try this.allocator.create(ast.Node);
+                ret.* = .{ .ReturnStatement = .{ .value = body } };
+                try new_stmts.append(this.allocator, ret);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            }
+        } else body;
 
         const node = try this.allocator.create(ast.Node);
         node.* = .{ .ArrowFunction = .{
-            .parameters = try parameters.toOwnedSlice(this.allocator),
-            .body = body,
-            .rest_param = rest_param,
+            .parameters = params.names,
+            .body = final_body,
+            .rest_param = params.rest_param,
         } };
         return node;
     }
@@ -2086,6 +2879,93 @@ test "parse object literal - non-keyword token still errors" {
     defer parser.deinit();
 
     try std.testing.expectError(error.ExpectedPropertyName, parser.parseExpression());
+}
+
+test "parse for loop - var without initializer" {
+    // `for (var i; i < 10; i++)` is valid ES — `var` allows no initializer.
+    const allocator = std.testing.allocator;
+    const input = "for (var i; i < 3; i++) {}";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    try std.testing.expect(node.* == .ForLoop);
+    try std.testing.expect(node.ForLoop.init != null);
+    try std.testing.expect(node.ForLoop.init.?.* == .VariableDeclaration);
+    try std.testing.expectEqualStrings("i", node.ForLoop.init.?.VariableDeclaration.name);
+    try std.testing.expect(node.ForLoop.init.?.VariableDeclaration.value == null);
+}
+
+test "parse for loop - let without initializer" {
+    // `for (let x;;) { break; }` is valid ES — `let` allows no initializer
+    // (and `let` with no condition is also valid).
+    const allocator = std.testing.allocator;
+    const input = "for (let x;;) { break; }";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    try std.testing.expect(node.* == .ForLoop);
+    try std.testing.expect(node.ForLoop.init.?.* == .LetDeclaration);
+    try std.testing.expectEqualStrings("x", node.ForLoop.init.?.LetDeclaration.name);
+    try std.testing.expect(node.ForLoop.init.?.LetDeclaration.value == null);
+}
+
+test "parse for loop - mixed init/no-init with var and comma" {
+    // `for (var i = 0, j; i < 3; i++)` — var with mixed init across the
+    // comma-list produces a BlockStatement-of-decls.
+    const allocator = std.testing.allocator;
+    const input = "for (var i = 0, j; i < 3; i++) {}";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    try std.testing.expect(node.* == .ForLoop);
+    try std.testing.expect(node.ForLoop.init.?.* == .BlockStatement);
+    const stmts = node.ForLoop.init.?.BlockStatement.statements;
+    try std.testing.expectEqual(@as(usize, 2), stmts.len);
+
+    // First: i = 0 (value present)
+    try std.testing.expect(stmts[0].* == .VariableDeclaration);
+    try std.testing.expectEqualStrings("i", stmts[0].VariableDeclaration.name);
+    try std.testing.expect(stmts[0].VariableDeclaration.value != null);
+
+    // Second: j; (no value)
+    try std.testing.expect(stmts[1].* == .VariableDeclaration);
+    try std.testing.expectEqualStrings("j", stmts[1].VariableDeclaration.name);
+    try std.testing.expect(stmts[1].VariableDeclaration.value == null);
+}
+
+test "parse for loop - const without initializer is SyntaxError" {
+    // ECMAScript §14.7.4.5: const bindings in for-init MUST have an initializer.
+    const allocator = std.testing.allocator;
+    const input = "for (const c;;) {}";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ExpectedAssign, parser.parseStatement());
+}
+
+test "parse for loop - var with initializer still works (regression)" {
+    // Sanity guard: existing `for (var i = 0; ...)` shape must remain a
+    // VariableDeclaration with non-null value.
+    const allocator = std.testing.allocator;
+    const input = "for (var i = 0; i < 3; i++) {}";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+
+    try std.testing.expect(node.* == .ForLoop);
+    try std.testing.expect(node.ForLoop.init.?.* == .VariableDeclaration);
+    try std.testing.expectEqualStrings("i", node.ForLoop.init.?.VariableDeclaration.name);
+    try std.testing.expect(node.ForLoop.init.?.VariableDeclaration.value != null);
+    try std.testing.expect(node.ForLoop.init.?.VariableDeclaration.value.?.* == .IntegerLiteral);
+    try std.testing.expectEqual(@as(i64, 0), node.ForLoop.init.?.VariableDeclaration.value.?.IntegerLiteral.value);
 }
 
 test "parse object literal - non-block function expression as value" {

@@ -4,6 +4,7 @@ const builtinsTypes = @import("./types/types.zig");
 const Env = @import("environment.zig");
 const Environment = Env.Environment;
 const debugPrint = Env.debugPrint;
+const DEBUG_OPTIMIZATION = Env.DEBUG_OPTIMIZATION;
 
 fn getFloatValue(node: *ast.Node) ?f64 {
     return switch (node.*) {
@@ -99,7 +100,7 @@ pub fn optimizeArrayPushLoop(w: @TypeOf(@as(ast.Node, undefined).WhileLoop), env
         array_val.array.elements.appendAssumeCapacity(.{ .float = i });
     }
 
-    debugPrint("[ARRAY PUSH OPTIMIZATION] ✓ Completed, pushed {d} elements\n", .{iterations});
+    if (DEBUG_OPTIMIZATION) debugPrint("[ARRAY PUSH OPTIMIZATION] ✓ Completed, pushed {d} elements\n", .{iterations});
 
     try env.values.put(loop_var, .{ .float = i });
 
@@ -123,22 +124,25 @@ pub fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: 
     else
         f.init.?.LetDeclaration.name;
 
-    debugPrint("[OPTIMIZATION] init_name: {s}\n", .{init_name});
+    if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] init_name: {s}\n", .{init_name});
 
-    const init_value_node: *ast.Node = if (f.init.?.* == .VariableDeclaration)
-        f.init.?.VariableDeclaration.value
-    else
-        f.init.?.LetDeclaration.value;
+    const init_value_node: *ast.Node = if (f.init.?.* == .VariableDeclaration) blk: {
+        const opt = f.init.?.VariableDeclaration.value orelse return null;
+        break :blk opt;
+    } else blk: {
+        const opt = f.init.?.LetDeclaration.value orelse return null;
+        break :blk opt;
+    };
 
     const initial_value: f64 = switch (init_value_node.*) {
         .FloatLiteral => |v| v.value,
         .IntegerLiteral => |v| @floatFromInt(v.value),
         else => {
-            debugPrint("[OPTIMIZATION] FAIL: init value not number, it is: {s}\n", .{@tagName(init_value_node.*)});
+            if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] FAIL: init value not number, it is: {s}\n", .{@tagName(init_value_node.*)});
             return null;
         },
     };
-    debugPrint("[OPTIMIZATION] initial_value: {d}\n", .{initial_value});
+    if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] initial_value: {d}\n", .{initial_value});
 
     const loop_var = init_name;
 
@@ -175,16 +179,16 @@ pub fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: 
     const is_less_than = cond.operator == .LessThan;
 
     if (!is_less_than) {
-        debugPrint("[OPTIMIZATION] FAILED: operator is not LessThan, it is: {any}\n", .{cond.operator});
+        if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] FAILED: operator is not LessThan, it is: {any}\n", .{cond.operator});
         return null;
     }
 
     if (f.increment == null) {
-        debugPrint("[OPTIMIZATION] FAILED: increment is null\n", .{});
+        if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] FAILED: increment is null\n", .{});
         return null;
     }
 
-    debugPrint("[OPTIMIZATION] Increment type: {s}\n", .{@tagName(f.increment.?.*)});
+    if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] Increment type: {s}\n", .{@tagName(f.increment.?.*)});
 
     var increment_value: f64 = undefined;
 
@@ -217,7 +221,8 @@ pub fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: 
     } else if (f.increment.?.* == .UpdateExpression) {
         const inc = f.increment.?.UpdateExpression;
 
-        if (!std.mem.eql(u8, inc.name, loop_var)) {
+        if (inc.operand.* != .Identifier) return null;
+        if (!std.mem.eql(u8, inc.operand.Identifier.name, loop_var)) {
             return null;
         }
         if (inc.prefix) {
@@ -298,7 +303,7 @@ pub fn optimizeSimpleForLoop(f: @TypeOf(@as(ast.Node, undefined).ForLoop), env: 
                 {
                     std.debug.print("", .{});
                     const acc_val = env.get(acc_name) orelse {
-                        debugPrint("[OPTIMIZATION] acc {s} not in env\n", .{acc_name});
+                        if (DEBUG_OPTIMIZATION) debugPrint("[OPTIMIZATION] acc {s} not in env\n", .{acc_name});
                         return null;
                     };
                     const acc_start = switch (acc_val) {

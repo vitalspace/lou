@@ -431,7 +431,31 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                 } else {
                     const val = try evaluate(prop.value, env);
-                    try obj.properties.put(prop.key, val);
+                    const key = if (prop.key_expr) |ke| blk: {
+                        const key_val = try evaluate(ke, env);
+                        break :blk switch (key_val) {
+                            .string => |s| s,
+                            .integer => |i| blk2: {
+                                var buf: [32]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk2 owned;
+                            },
+                            .float => |f| blk2: {
+                                var buf: [64]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk2 owned;
+                            },
+                            .boolean => |b| if (b) "true" else "false",
+                            .null => "null",
+                            .void => "undefined",
+                            else => "[object Object]",
+                        };
+                    } else prop.key;
+                    try obj.properties.put(key, val);
                 }
             }
 
@@ -546,6 +570,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .function = @ptrCast(funcNode) };
             } else if (env.get(i.name)) |value| {
                 return value;
+            } else if (env.getBuiltinObject(i.name)) |obj| {
+                return .{ .object = @ptrCast(obj) };
             } else {
                 return error.UndefinedVariable;
             }
@@ -619,7 +645,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             if (b.operator == .PlusAssign or b.operator == .MinusAssign or
                 b.operator == .MultiplyAssign or b.operator == .DivideAssign or
-                b.operator == .ModuloAssign)
+                b.operator == .ModuloAssign or b.operator == .UnsignedRightShiftAssign or
+                b.operator == .LeftShiftAssign or b.operator == .RightShiftAssign)
             {
                 if (b.left.* != .Identifier) {
                     return error.InvalidAssignment;
@@ -693,6 +720,29 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         },
                         else => return error.TypeMismatch,
                     },
+                    .UnsignedRightShiftAssign => switch (current_val) {
+                        .integer => |lv| switch (right_val) {
+                            .integer => |rv| ast.Value{
+                                .integer = @as(i64, @as(u32, @bitCast(@as(i32, @truncate(lv)))) >> @as(u5, @intCast(rv & 0x1f))),
+                            },
+                            else => return error.TypeMismatch,
+                        },
+                        else => return error.TypeMismatch,
+                    },
+                    .LeftShiftAssign => switch (current_val) {
+                        .integer => |lv| switch (right_val) {
+                            .integer => |rv| ast.Value{ .integer = lv << @intCast(rv) },
+                            else => return error.TypeMismatch,
+                        },
+                        else => return error.TypeMismatch,
+                    },
+                    .RightShiftAssign => switch (current_val) {
+                        .integer => |lv| switch (right_val) {
+                            .integer => |rv| ast.Value{ .integer = lv >> @intCast(rv) },
+                            else => return error.TypeMismatch,
+                        },
+                        else => return error.TypeMismatch,
+                    },
                     else => unreachable,
                 };
                 try env.setInScope(name, result);
@@ -727,6 +777,71 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .void, .null => try evaluate(b.right, env),
                     else => left,
                 };
+            }
+
+            // Logical assignment: &&=, ||=, ??= with short-circuit semantics.
+            if (b.operator == .AndAssign or b.operator == .OrAssign or b.operator == .NullishAssign) {
+                const current = try evaluate(b.left, env);
+                const should_assign = switch (b.operator) {
+                    .AndAssign => switch (current) {
+                        .boolean => |v| v,
+                        .integer => |v| v != 0,
+                        .float => |v| v != 0.0 and !std.math.isNan(v),
+                        .string => |v| v.len > 0,
+                        else => current != .void and current != .null,
+                    },
+                    .OrAssign => switch (current) {
+                        .boolean => |v| !v,
+                        .integer => |v| v == 0,
+                        .float => |v| v == 0.0 or std.math.isNan(v),
+                        .string => |v| v.len == 0,
+                        else => current == .void or current == .null,
+                    },
+                    .NullishAssign => current == .void or current == .null,
+                    else => unreachable,
+                };
+                if (should_assign) {
+                    const val = try evaluate(b.right, env);
+                    // Set the value on the LHS target (Identifier, MemberAccess, or ArrayIndex)
+                    switch (b.left.*) {
+                        .Identifier => |ident| {
+                            try env.setInScope(ident.name, val);
+                        },
+                        .MemberAccess => |m| {
+                            const obj_val = try evaluate(m.object, env);
+                            if (obj_val == .js_object) {
+                                try obj_val.js_object.properties.put(m.property, val);
+                            } else return error.InvalidAssignment;
+                        },
+                        .ArrayIndex => |ai| {
+                            const obj_val = try evaluate(ai.array, env);
+                            const idx_val = try evaluate(ai.index, env);
+                            if (obj_val == .array) {
+                                const index = switch (idx_val) {
+                                    .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else return error.InvalidAssignmentTarget,
+                                    else => return error.InvalidAssignmentTarget,
+                                };
+                                try obj_val.array.set(index, val);
+                            } else if (obj_val == .js_object) {
+                                const key: []const u8 = switch (idx_val) {
+                                    .string => |s| s,
+                                    .integer => |i| blk: {
+                                        var buf: [32]u8 = undefined;
+                                        const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                                        const owned = try env.allocator.dupe(u8, s);
+                                        env.owned_strings.append(env.allocator, owned) catch {};
+                                        break :blk owned;
+                                    },
+                                    else => return error.InvalidIndex,
+                                };
+                                try obj_val.js_object.properties.put(key, val);
+                            } else return error.InvalidAssignment;
+                        },
+                        else => return error.InvalidAssignmentTarget,
+                    }
+                    return val;
+                }
+                return current;
             }
 
             if (b.operator == .Pipe) {
@@ -879,6 +994,83 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .string = owned };
             }
 
+            if (b.operator == .In) {
+                // ECMAScript 12.9.3: check if `left` is a property of `right`.
+                // The left operand is coerced to a string; the right must be an object.
+                const key = switch (left) {
+                    .string => |s| s,
+                    .integer => |i| blk: {
+                        var buf: [32]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                        const owned = try env.allocator.dupe(u8, s);
+                        env.owned_strings.append(env.allocator, owned) catch {};
+                        break :blk owned;
+                    },
+                    .float => |f| blk: {
+                        var buf: [64]u8 = undefined;
+                        const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                        const owned = try env.allocator.dupe(u8, s);
+                        env.owned_strings.append(env.allocator, owned) catch {};
+                        break :blk owned;
+                    },
+                    .boolean => |bv| if (bv) "true" else "false",
+                    .symbol => |sym| blk: {
+                        const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
+                        env.owned_strings.append(env.allocator, prop_name) catch {};
+                        break :blk prop_name;
+                    },
+                    else => return .{ .boolean = false },
+                };
+                return switch (right) {
+                    .js_object => |obj| .{ .boolean = obj.properties.contains(key) },
+                    .array => |arr| blk: {
+                        const index = std.fmt.parseInt(usize, key, 10) catch break :blk ast.Value{ .boolean = false };
+                        break :blk .{ .boolean = index < arr.elements.items.len };
+                    },
+                    .string => |s| blk: {
+                        const index = std.fmt.parseInt(usize, key, 10) catch break :blk ast.Value{ .boolean = false };
+                        break :blk .{ .boolean = index < s.len };
+                    },
+                    else => .{ .boolean = false },
+                };
+            }
+
+            if (b.operator == .InstanceOf) {
+                // ECMAScript 12.9.4: left instanceof right.
+                // If left is a primitive value, return false immediately.
+                switch (left) {
+                    .array, .js_object, .function, .closure, .generator, .iterator => {},
+                    else => return .{ .boolean = false },
+                }
+                // Get the constructor name from the right operand.
+                const constructor_name: ?[]const u8 = switch (right) {
+                    .object => |obj_ptr| blk: {
+                        const impl: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj_ptr));
+                        break :blk impl.name;
+                    },
+                    else => null,
+                };
+                const name = constructor_name orelse return .{ .boolean = false };
+                // Check the left operand's type identity.
+                return .{ .boolean = switch (left) {
+                    .array => std.mem.eql(u8, name, "Array") or std.mem.eql(u8, name, "Object"),
+                    .js_object => |obj| blk: {
+                        const tag = obj.properties.get("@@type");
+                        if (tag) |t| {
+                            if (t == .string and std.mem.eql(u8, t.string, name)) break :blk true;
+                            // Error subtypes: check @@subtype (e.g. "SyntaxError")
+                            const subtype = obj.properties.get("@@subtype");
+                            if (subtype) |st| {
+                                if (st == .string and std.mem.eql(u8, st.string, name)) break :blk true;
+                            }
+                        }
+                        // Plain objects match "Object" constructor.
+                        break :blk std.mem.eql(u8, name, "Object");
+                    },
+                    else => false,
+                } };
+            }
+
             if (left == .big_int and right == .big_int) {
                 const lb = left.big_int;
                 const rb = right.big_int;
@@ -922,7 +1114,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     .Equal, .StrictEqual => return .{ .boolean = lb.compare(rb) == .eq },
                     .NotEqual, .StrictNotEqual => return .{ .boolean = lb.compare(rb) != .eq },
-                    .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift => return error.UnsupportedOperator,
+                    .BitAnd, .BitOr, .BitXor, .LeftShift, .RightShift, .UnsignedRightShift => return error.UnsupportedOperator,
                     else => return error.UnsupportedOperator,
                 }
                 return .{ .big_int = result };
@@ -1007,6 +1199,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .BitXor => .{ .integer = left_int ^ right_int },
                     .LeftShift => .{ .integer = left_int << @intCast(right_int) },
                     .RightShift => .{ .integer = left_int >> @intCast(right_int) },
+                    .UnsignedRightShift => .{
+                        .integer = @as(i64, @as(u32, @bitCast(@as(i32, @truncate(left_int)))) >> @as(u5, @intCast(right_int & 0x1f))),
+                    },
                     else => return error.UnsupportedOperator,
                 };
             }
@@ -1025,6 +1220,16 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }.convert;
             const left_num = toNum(left);
             const right_num = toNum(right);
+
+            // ES spec: any relational comparison with NaN returns false
+            if (std.math.isNan(left_num) or std.math.isNan(right_num)) {
+                switch (b.operator) {
+                    .LessThan, .LessThanOrEqual, .GreaterThan, .GreaterThanOrEqual => {
+                        return .{ .boolean = false };
+                    },
+                    else => {},
+                }
+            }
 
             return switch (b.operator) {
                 .Plus => .{ .float = left_num + right_num },
@@ -1045,6 +1250,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .BitXor => .{ .integer = @as(i64, @intFromFloat(left_num)) ^ @as(i64, @intFromFloat(right_num)) },
                 .LeftShift => .{ .integer = @as(i64, @intFromFloat(left_num)) << @intCast(@as(i64, @intFromFloat(right_num))) },
                 .RightShift => .{ .integer = @as(i64, @intFromFloat(left_num)) >> @intCast(@as(i64, @intFromFloat(right_num))) },
+                .UnsignedRightShift => .{
+                    .integer = @as(i64, @as(u32, @bitCast(@as(i32, @truncate(@as(i64, @intFromFloat(left_num)))))) >> @as(u5, @intCast(@as(u64, @bitCast(@as(i64, @intFromFloat(right_num)))) & 0x1f))),
+                },
                 else => return error.UnsupportedOperator,
             };
         },
@@ -1054,7 +1262,41 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return value;
         },
         .UpdateExpression => |u| {
-            const current = env.get(u.operand.Identifier.name) orelse return error.UndefinedVariable;
+            // Resolve the current value from the operand
+            const current = blk: {
+                switch (u.operand.*) {
+                    .Identifier => |ident| {
+                        const val = env.get(ident.name) orelse break :blk null;
+                        break :blk val;
+                    },
+                    .MemberAccess => |m| {
+                        const obj_val = try evaluate(m.object, env);
+                        if (obj_val == .js_object) {
+                            if (obj_val.js_object.properties.get(m.property)) |val| {
+                                break :blk val;
+                            }
+                        }
+                        break :blk null;
+                    },
+                    .ArrayIndex => |ai| {
+                        const obj_val = try evaluate(ai.array, env);
+                        const idx_val = try evaluate(ai.index, env);
+                        if (obj_val == .array) {
+                            const index = switch (idx_val) {
+                                .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else break :blk null,
+                                else => break :blk null,
+                            };
+                            if (index < obj_val.array.elements.items.len) {
+                                const val = obj_val.array.elements.items[index];
+                                break :blk if (val == .hole) null else val;
+                            }
+                        }
+                        break :blk null;
+                    },
+                    else => return error.InvalidAssignmentTarget,
+                }
+            } orelse return error.UndefinedVariable;
+
             const new_val = blk: {
                 switch (current) {
                     .big_int => |bi| {
@@ -1096,7 +1338,28 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     else => return error.InvalidAssignmentTarget,
                 }
             };
-            try env.setInScope(u.operand.Identifier.name, new_val);
+            // Store the new value back
+            switch (u.operand.*) {
+                .Identifier => |ident| try env.setInScope(ident.name, new_val),
+                .MemberAccess => |m| {
+                    const obj_val = try evaluate(m.object, env);
+                    if (obj_val == .js_object) {
+                        try obj_val.js_object.properties.put(m.property, new_val);
+                    }
+                },
+                .ArrayIndex => |ai| {
+                    const obj_val = try evaluate(ai.array, env);
+                    const idx_val = try evaluate(ai.index, env);
+                    if (obj_val == .array) {
+                        const index = switch (idx_val) {
+                            .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else return error.InvalidAssignmentTarget,
+                            else => return error.InvalidAssignmentTarget,
+                        };
+                        try obj_val.array.set(index, new_val);
+                    }
+                },
+                else => return error.InvalidAssignmentTarget,
+            }
             return if (u.prefix) new_val else current;
         },
         .YieldExpression => |y| {
@@ -1249,37 +1512,48 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .ConstantDeclaration => |c| {
-            if (c.value.* == .FunctionDeclaration or c.value.* == .ArrowFunction or c.value.* == .GeneratorDeclaration) {
-                try env.setFunction(c.name, c.value);
+            // const always has a value at the AST level — the parser
+            // rejects `for (const x;;)` so c.value.? is safe here.
+            const val_expr = c.value.?;
+            if (val_expr.* == .FunctionDeclaration or val_expr.* == .ArrowFunction or val_expr.* == .GeneratorDeclaration) {
+                try env.setFunction(c.name, val_expr);
                 try env.setConstant(c.name, .{ .float = 0.0 });
                 return .{ .float = 0.0 };
             } else {
-                const value = try evaluate(c.value, env);
+                const value = try evaluate(val_expr, env);
                 try env.setConstant(c.name, value);
                 return value;
             }
         },
         .VariableDeclaration => |v| {
-            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction or v.value.* == .GeneratorDeclaration) {
-                try env.setFunction(v.name, v.value);
-                try env.setVar(v.name, .{ .float = 0.0 });
-                return .{ .float = 0.0 };
-            } else {
-                const value = try evaluate(v.value, env);
+            if (v.value) |val_expr| {
+                if (val_expr.* == .FunctionDeclaration or val_expr.* == .ArrowFunction or val_expr.* == .GeneratorDeclaration) {
+                    try env.setFunction(v.name, val_expr);
+                    try env.setVar(v.name, .{ .float = 0.0 });
+                    return .{ .float = 0.0 };
+                }
+                const value = try evaluate(val_expr, env);
                 try env.setVar(v.name, value);
                 return value;
             }
+            // No initializer — declared but undefined (`for (var i; ...)`)
+            try env.setVar(v.name, .{ .void = {} });
+            return .{ .void = {} };
         },
         .LetDeclaration => |v| {
-            if (v.value.* == .FunctionDeclaration or v.value.* == .ArrowFunction or v.value.* == .GeneratorDeclaration) {
-                try env.setFunction(v.name, v.value);
-                try env.setLet(v.name, .{ .float = 0.0 });
-                return .{ .float = 0.0 };
-            } else {
-                const value = try evaluate(v.value, env);
+            if (v.value) |val_expr| {
+                if (val_expr.* == .FunctionDeclaration or val_expr.* == .ArrowFunction or val_expr.* == .GeneratorDeclaration) {
+                    try env.setFunction(v.name, val_expr);
+                    try env.setLet(v.name, .{ .float = 0.0 });
+                    return .{ .float = 0.0 };
+                }
+                const value = try evaluate(val_expr, env);
                 try env.setLet(v.name, value);
                 return value;
             }
+            // No initializer — declared but undefined (`for (let x;;)`)
+            try env.setLet(v.name, .{ .void = {} });
+            return .{ .void = {} };
         },
         .BlockStatement => |b| {
             var has_block_scope = false;
@@ -2227,8 +2501,69 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
             return result;
         },
+        .DeleteExpression => |d| {
+            // delete operator: delete obj.prop, delete arr[idx]
+            // In non-strict mode, delete always returns true
+            switch (d.operand.*) {
+                .MemberAccess => |m| {
+                    const obj_val = try evaluate(m.object, env);
+                    if (obj_val == .js_object) {
+                        _ = obj_val.js_object.properties.remove(m.property);
+                    }
+                    return .{ .boolean = true };
+                },
+                .ArrayIndex => |ai| {
+                    const obj_val = try evaluate(ai.array, env);
+                    const idx_val = try evaluate(ai.index, env);
+                    if (obj_val == .js_object) {
+                        const key = switch (idx_val) {
+                            .string => |s| s,
+                            .integer => |i| blk: {
+                                var buf: [32]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk owned;
+                            },
+                            .float => |f| blk: {
+                                var buf: [64]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+                                const owned = try env.allocator.dupe(u8, s);
+                                env.owned_strings.append(env.allocator, owned) catch {};
+                                break :blk owned;
+                            },
+                            else => return error.InvalidIndex,
+                        };
+                        _ = obj_val.js_object.properties.remove(key);
+                    } else if (obj_val == .array) {
+                        const index: i64 = switch (idx_val) {
+                            .integer => |i| i,
+                            .float => |f| @intFromFloat(f),
+                            else => return error.InvalidIndex,
+                        };
+                        if (index >= 0) {
+                            const uidx = @as(usize, @intCast(index));
+                            if (uidx < obj_val.array.elements.items.len) {
+                                obj_val.array.elements.items[uidx] = .{ .hole = {} };
+                            }
+                        }
+                    }
+                    return .{ .boolean = true };
+                },
+                else => {
+                    // delete on identifier or other expression returns true (non-strict)
+                    _ = try evaluate(d.operand, env);
+                    return .{ .boolean = true };
+                },
+            }
+        },
         .TypeOfExpression => |t| {
-            const val = try evaluate(t.operand, env);
+            const val = evaluate(t.operand, env) catch |err| {
+                if (err == error.UndefinedVariable) {
+                    return .{ .string = "undefined" };
+                }
+                return err;
+            };
             const type_str: []const u8 = switch (val) {
                 .integer => "number",
                 .float => "number",
@@ -2487,7 +2822,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
                 .UsingDeclaration => |v| {
-            _ = try evaluate(v.value, env);
+            if (v.value) |val_expr| {
+                _ = try evaluate(val_expr, env);
+            }
             return .{ .void = {} };
         },
         .VoidExpression => |v| {
@@ -2507,6 +2844,28 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         .ImportMetaExpression => {
             const obj = try ast.ObjectValue.init(env.allocator);
             try env.objects.append(env.allocator, obj);
+            // Populate import.meta.url with the module's file path
+            const url = if (env.module_dir) |dir| blk: {
+                var buf = std.ArrayList(u8).initCapacity(env.allocator, 64) catch break :blk "";
+                buf.appendSlice(env.allocator, "file://") catch {};
+                buf.appendSlice(env.allocator, dir) catch {};
+                const s = buf.toOwnedSlice(env.allocator) catch break :blk "";
+                env.owned_strings.append(env.allocator, s) catch {};
+                break :blk s;
+            } else "file:///module";
+            if (url.len > 0) {
+                try obj.properties.put("url", .{ .string = url });
+            }
+            // import.meta.resolve is a stub function
+            const resolve_buf = try env.allocator.create(ast.Node);
+
+            env.synthetic_asts.append(env.allocator, resolve_buf) catch {};
+            resolve_buf.* = .{ .ArrowFunction = .{
+                .parameters = try env.allocator.dupe([]const u8, &.{"specifier"}),
+                .body = try env.allocator.create(ast.Node),
+            } };
+            resolve_buf.ArrowFunction.body.* = .{ .StringLiteral = .{ .value = "file:///resolved" } };
+            try obj.properties.put("resolve", .{ .function = @ptrCast(resolve_buf) });
             return .{ .js_object = obj };
         },
         .DynamicImportExpression => return .{ .js_object = try ast.ObjectValue.init(env.allocator) },
@@ -3619,6 +3978,39 @@ pub fn evaluateGeneratorThrow(gen: *GeneratorObject, caller_env: *Environment, a
     return error.ExceptionThrown;
 }
 
+/// `eval(code)` — parses and evaluates `code` as Lou source in the current
+/// environment. Throws SyntaxError on parse failure.
+pub fn evalFn(args: []ast.Value, env: *builtinsTypes.Environment) builtinsTypes.BuiltinResult {
+    if (args.len == 0 or args[0] != .string) return .{ .value = .{ .void = {} } };
+
+    const source = args[0].string;
+
+    var lexer = Lexer.init(source);
+    var parser = Parser.init(&lexer, env.allocator) catch return .{ .value = .{ .void = {} } };
+    errdefer parser.deinit();
+
+    const program = parser.parseProgram() catch {
+        parser.deinit();
+        _ = throwError(env, "SyntaxError", .{ .string = "eval parse error" });
+        return .{ .void = {} };
+    };
+
+    // Note: AST nodes are owned by the parser's arena and will be freed
+    // when parser.deinit() is called. Do NOT append to synthetic_asts.
+
+    var result: ast.Value = .{ .void = {} };
+    @setEvalBranchQuota(2000);
+    for (program) |stmt| {
+        result = evaluate(stmt, @as(*Environment, @ptrCast(env))) catch {
+            parser.deinit();
+            return .{ .value = .{ .void = {} } };
+        };
+    }
+
+    parser.deinit();
+    return .{ .value = result };
+}
+
 // --- Environment tests ---
 
 test "Environment - set and get" {
@@ -4255,7 +4647,7 @@ test "evaluate function declaration and call" {
     var env_ = try Environment.init(allocator, null);
     defer env_.deinit();
 
-    const result_struct = try parseProgramNoFree("fn add(a, b) { return a + b }", &env_);
+    const result_struct = try parseProgramNoFree("function add(a, b) { return a + b }", &env_);
     var parser = result_struct.parser;
     defer parser.deinit();
     _ = try evaluate(result_struct.statements[0], &env_);

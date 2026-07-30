@@ -146,6 +146,9 @@ pub fn main(init: std.process.Init) !void {
 
     try initSimboloObject(&env_);
 
+    // Register eval builtin
+    try env_.builtins.put("eval", @import("evaluator.zig").evalFn);
+
     // ES global constants
     try env_.setConstant("NaN", .{ .float = std.math.nan(f64) });
     try env_.setConstant("Infinity", .{ .float = std.math.inf(f64) });
