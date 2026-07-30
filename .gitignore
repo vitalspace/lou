@@ -4,4 +4,11 @@ http/
 optimizations/
 bench.sh
 profiler/
-js/
+js/*.bak
+*.bak2
+*.original
+*.py
+out*.txt
+minimal-error.lou
+.zig-cache/
+zig-out/
