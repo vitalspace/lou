@@ -1,7 +1,8 @@
 # Default Parameters in Compat Test File
 
 ## status
-completado
+
+**pendiente (drift corrected 2026-07-30)** — previously marked `completado` but `tests/compat/default-parameters.lou` FAILs per compat baseline (43P/39F/1S)
 
 ## Problema
 `tests/compat/default-parameters.lou` falla con `error: UndefinedVariable`, aunque los unit tests de `default-parameters` pasan:

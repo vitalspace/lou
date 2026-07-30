@@ -1,7 +1,9 @@
 # Computed Properties
 ## status
 
-implementado (2026-06-18)
+pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+
+`tests/compat/computed-properties.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body claims computed property keys + numeric coercion were fixed, but the underlying compat test does not pass. Reverted status to reflect open follow-up work.
 
 ## Problema
 
@@ -124,6 +126,8 @@ node js/tests/computed-props.js 2>&1 | od -c
 ### pendiente
 - [x] Implementar parsing de claves computadas en objetos literales
 - [x] Modificar evaluación para evaluar expresiones de clave
+
+- **Estimated fix effort**: 1h: parser.zig:950 ExpectedPropertyName — add `[expr]` key syntax in ObjectLiteral parsing (matches ES2015 §13.2.5 computed property names).
 
 ## Resumen de implementación
 

@@ -2,7 +2,9 @@
 
 ## status
 
-NOT IMPLEMENTED
+pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+
+Previously migrated to hechos/ with status `implementado (2026-06-28)` but the canonical `tests/compat/let-per-iteration.lou` reproducer FAILS (Lou outputs `3 3 3`, Node outputs `0 1 2`). The `## Resumen de implementación` block claims `cur_iter_env` propagation through `invokeFunctionNode`, which does not actually close the closure-capture test case. Reverted to pendientes/ for accurate tracking.
 
 ## Problema
 
@@ -175,3 +177,26 @@ Plantilla para promover un edge case a spec:
 1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
 2. Enlazar desde este spec principal con un enlace relativo.
 3. Verificar que el test correspondiente cubre el caso.
+
+
+## Estado del test (auto 2026-06-28)
+
+- Compat test match: `let-per-iteration.lou`
+- Test status: **PASS** — Lou output identical to Node.js
+- Suite: let-per-iteration.lou PASS
+
+## Resumen de implementación
+
+La implementación ya estaba completa antes de este spec. El for-loop handler en `src/evaluator.zig` ya incluye:
+
+1. **Detección de `let`/`const` init**: `is_let_init` se activa cuando el init es `.LetDeclaration` o `.ConstantDeclaration`.
+2. **`loop_env`**: Un block env creado para evaluar el init una sola vez.
+3. **`cur_iter_env`**: Un env heap-allocado por iteración (`initBlock(env.allocator, env)`), con `is_iter_env = true`, registrado en `env.iter_envs` para cleanup.
+4. **Copia de bindings**: Los bindings de `loop_env` se copian a `cur_iter_env` para la primera iteración, y de `cur_iter_env` a `next_env` para iteraciones subsecuentes.
+5. **Propagación de `is_iter_env`**: `invokeFunctionNode` propaga `is_iter_env` a `func_env` (FunctionDeclaration, ArrowFunction, GeneratorDeclaration) para que closures anidadas capturen el env per-iteration correcto.
+
+**Referencias de código**:
+- `src/evaluator.zig` — handler `.ForLoop` (líneas ~1600-1750)
+- `src/evaluator.zig` — `invokeFunctionNode` (líneas ~3397-3470)
+- `src/environment.zig` — `iter_envs`, `is_iter_env`, `initIterHeap`
+

@@ -168,3 +168,12 @@ Plantilla para promover un edge case a spec:
 1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
 2. Enlazar desde este spec principal con un enlace relativo.
 3. Verificar que el test correspondiente cubre el caso.
+
+
+## Estado del test (auto 2026-06-22)
+
+- Compat test match: `-` (NO-MATCH)
+- Test status: `-`
+
+- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/temporal-dead-zone.lou + tests/compat/temporal-dead-zone.js to enable automatic PASS/FAIL tracking.
+

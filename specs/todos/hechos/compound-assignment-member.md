@@ -1,7 +1,10 @@
 # Compound Assignment on MemberAccess
 
 ## status
-implementado
+
+pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+
+`tests/compat/compound-assignment-member.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body claims the stack-underflow bug was fixed via VM + evaluator refactor, but the compat test still produces a diff against Node. Reverted status.
 
 ## Problema
 `tests/compat/compound-assignment-member.lou` falla con `STACK UNDERFLOW` panic:
@@ -55,6 +58,8 @@ diff <(./zig-out/bin/lou run tests/compat/compound-assignment-member.lou) \
 
 ## pendiente
 - ~~Implementar compound assignment sobre MemberAccess/ArrayIndex en VM bytecode compiler.~~
+
+- **Estimated fix effort**: 2h: add vm.zig opcode path for MemberAccess LHS with compound assignment (+=, -=, *=, /=, %=). Currently stack underflow in .pop means no value is pushed for the LHS member after evaluation.
 
 ## Solución
 Dos bugs relacionados, uno en VM y otro en evaluator.

@@ -296,3 +296,12 @@ Plantilla para promover un edge case a spec:
 1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
 2. Enlazar desde este spec principal con un enlace relativo.
 3. Verificar que el test correspondiente cubre el caso.
+
+
+## Estado del test (auto 2026-06-22)
+
+- Compat test match: `bigint-prototype.lou` (FUZZY — bigint)
+- Test status: `PASS`
+
+- Disposition: test PASSES — but stays in pendientes/ because match is FUZZY on tokens; verify spec scope matches the test (manual confirmation required before move).
+

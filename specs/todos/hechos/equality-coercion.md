@@ -2,7 +2,9 @@
 
 ## status
 
-COMPLETADO
+pendiente (drift corrected 2026-06-29; previously falsely marked COMPLETADO)
+
+`tests/compat/equality-coercion.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body's `## Cambios aplicados` block describes changes that did not actually close the test. Reverted status to accurately reflect that the feature is not yet matching Node semantics.
 
 ## Problema
 

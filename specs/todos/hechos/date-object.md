@@ -1,7 +1,13 @@
 # Date
 ## status
 
-implementado (2026-06-18)
+**pendiente (drift corrected 2026-07-30)** — previously marked `implementado` but `tests/compat/date-object.lou` FAILs per compat baseline (43P/39F/1S)
+
+## Estado del test (auto 2026-06-22)
+
+- Compat test match: `date-object.lou`
+- Test status: `FAIL` (1 diff remaining: line 12 `false`→`true` — pre-existing `string.length` bug, not Date-specific)
+- Line 17 (`d2 - d1`) now PASSES: `toF64`/`toNum` extract `timestamp_ms` from Date js_objects.
 
 ## Problema
 
@@ -136,7 +142,18 @@ node js/tests/date.js 2>&1 | od -c
 
 ## Resumen de implementación
 
-### Tipo `DateValue`
+### Tipo (2026-06-22: rewired from `.date` to `.js_object`)
+
+The original implementation used a `.date` variant on the `Value` union with a `DateValue` struct. After changes to the codebase, the `.date` variant was removed. The entire Date module was rewritten to use `.js_object` with:
+- `@@type` property set to `"Date"`
+- `timestamp_ms` stored as `.float` property
+
+- `src/builtins/date/constructor.zig`: Creates `ObjectValue` with `@@type="Date"` and `timestamp_ms` as `.float`. Handles all 4 overloads (no args, number, string, components).
+- `src/builtins/date/methods.zig`: All 28 prototype methods rewritten — helper `getTimestamp`/`setTimestamp`/`requireDate` extract/store the float timestamp via `js_object.properties`. UTC getters now correctly use `partsFromTimestamp` (UTC) instead of `partsFromTimestampLocal`.
+- `src/vm.zig`: `method_call` opcode dispatches `@@type="Date"` to `DATE_OBJECT` methods (both with-args and zero-args branches).
+- `src/builtins/builtins.zig` + `src/builtins/builtinObjects.zig`: Date registered.
+
+### Tipo `DateValue` (original, now removed)
 
 - `src/types/runtime.zig`: nuevo struct `DateValue { allocator, timestamp_ms, iso_string }`. Añadido al union `Value` como `.date`. `src/types/types.zig` lo re-exporta y `src/ast.zig` también.
 - `src/environment.zig`: añadido `dates: std.ArrayList(*ast.DateValue)` al entorno (ciclo de vida similar a `regexps`, `bigints`). Se inicializa en `initWithIo` y `initBlock`, y se libera (o se mueve al outer) en `deinit`.

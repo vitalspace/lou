@@ -2,7 +2,9 @@
 
 ## status
 
-NOT IMPLEMENTED
+NOT IMPLEMENTED (drift corrected 2026-06-29)
+
+The `NOT IMPLEMENTED` header was already accurate — `for (var x; ...)` and `for (let x;;)` still emit `'error: ExpectedAssign'`. The file lived in hechos/ by mistake; moved back to pendientes/ where unmatched status headers belong.
 
 ## Problema
 
@@ -170,3 +172,12 @@ Plantilla para promover un edge case a spec:
 1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
 2. Enlazar desde este spec principal con un enlace relativo.
 3. Verificar que el test correspondiente cubre el caso.
+
+
+## Estado del test (auto 2026-06-22)
+
+- Compat test match: `-` (NO-MATCH)
+- Test status: `-`
+
+- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/for-var-no-init.lou + tests/compat/for-var-no-init.js to enable automatic PASS/FAIL tracking.
+

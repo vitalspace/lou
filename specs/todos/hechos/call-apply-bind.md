@@ -1,7 +1,7 @@
 # Function.prototype.call / apply / bind
 
 ## status
-implementado
+FAIL (Nunca pasó)
 
 ## Problema
 
@@ -130,6 +130,8 @@ bash tests/compat/run.sh
 - [x] Re-bind: `bound.bind({...})` mantiene el this original (Node behavior)
 - [x] Tests compat (Lou vs Node idénticos)
 - [x] Unit tests
+
+- **Estimated fix effort**: 3h: implement Function.prototype.call/apply/bind in builtin FunctionObject (wasm-style). Current parser error needs investigation — likely the test uses arrow syntax vs the jou parser expects.
 
 ## Edge cases encontrados durante implementación
 

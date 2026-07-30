@@ -2,7 +2,36 @@
 
 ## status
 
-pendiente
+COMPLETADO (2026-06-29)
+
+## Resumen de implementación
+
+**Bug**: en el VM bytecode compiler, el opcode `.method_call` para un receiver `js_object` sin `@@type` (object literal plano) tenía dos `else` branches buggy: uno buscaba métodos de Array (incorrecto), otro hacía `push(void)` (silencioso). Resultado: `o.f()` retornaba `undefined`.
+
+**Fix**:
+
+1. `src/evaluator.zig` (línea 3420): `fn callFunctionValue` → `pub fn callFunctionValue` (lo usa `vm.zig`). Añadida rama `.closure => |cv|` que invoca la closure con su captured env (cubre el caso `o.f = () => ...`).
+
+2. `src/vm.zig` (`.method_call` opcode, dos ramas):
+   - `ac > 0` (con args): reemplaza el fallback Array por user-property dispatch vía `obj.js_object.properties.get(m)` → `runtime.isCallable(prop_val)` → `callFunctionValue(prop_val, args.items, env, obj)` (con `this_val = obj`).
+   - `ac == 0` (sin args): mismo dispatch, con `tmp = [_]Value{obj}; callFunctionValue(prop_val, &tmp, env, obj)`.
+   - En ambos casos, si la propiedad no existe o no es callable → `self.throwTypeError(m)` (antes silenciaba con `void`).
+
+3. `src/builtins/number/number_object.zig` (línea 98): fix no relacionado pero bloqueaba `zig build` — la rama `.big_int` de `numberIsSafeInteger` usaba un `blk: { ... break :blk }` que Zig 0.16 rechaza como initializer de field. Reemplazado por `if/else`.
+
+**Compat test**: `tests/compat/object-method-call.{js,lou}` cubre 1 fn, N fns, `this` binding, argumentos, recursión (`o.fact(5)` → 120). PASS (diff vacío contra `node`).
+
+**Edge cases verificados**:
+- Arrow-function como propiedad (`{ f: () => 99 }`): falla por limit del parser (no confundir; es `parsePrimary` quien lo rechaza, no la fase de dispatch). Independiente de este spec.
+- Inheritance via prototype chain (`o.hasOwnProperty('x')`): ahora lanza `TypeError` (antes silenciaba con `void`). Ambos son incorrectos respecto al ES spec; el nuevo comportamiento es al menos no silencioso. Pendiente: lookup en `Object.prototype` (spec separado).
+- `runtime.isCallable` cubre tanto `.function` como `.closure`.
+
+**Verificación**:
+```bash
+./zig-out/bin/lou run tests/compat/object-method-call.lou   # → 42, function, 1, 2, 99, 5, 6, 200, Hi Ada, 120
+diff <(...lou...) <(node tests/compat/object-method-call.js)  # vacío
+```
+
 
 ## Problema
 
@@ -217,3 +246,25 @@ Plantilla para promover un edge case a spec:
 1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
 2. Enlazar desde este spec principal con un enlace relativo.
 3. Verificar que el test correspondiente cubre el caso.
+
+
+## Estado del test (auto 2026-06-22)
+
+- Compat test match: `call-apply-bind.lou` (FUZZY — call)
+- Test status: `FAIL`
+
+- Diff excerpt:
+
+```
+1,26c1,16
+< error: UnexpectedToken
+< /home/lou/src/parser.zig:585:21: 0x13eed2d in parsePrimary (main.zig)
+<             else => return error.UnexpectedToken,^
+< /home/lou/src/parser.zig:311:20: 0x13f076c in parsePrecedece (main.zig)
+<         var left = try this.parsePrimary();
+<                    ^
+< /home/lou/src/parser.zig:52:22: 0x13f0f50 in parseCommaExpression (main.zig)
+```
+
+- Disposition: stays in pendientes/ — fuzzy-matched test currently FAILS, see diff excerpt below.
+

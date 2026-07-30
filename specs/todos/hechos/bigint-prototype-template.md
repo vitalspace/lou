@@ -1,7 +1,10 @@
 # BigInt — `toString`/`toLocaleString` + Template literal interpolation
 
 ## status
-implementado
+
+pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+
+`tests/compat/bigint-prototype.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body claims BigInt `toString`, `toLocaleString`, and template-literal interpolation are wired up, but the compat test does not pass byte-identical against Node. Reverted status to accurately reflect open follow-up work.
 
 ## Problema
 
