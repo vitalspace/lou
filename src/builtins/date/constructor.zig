@@ -1,31 +1,33 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
-const Ast = @import("../../ast.zig");
 const DateUtils = @import("date_utils.zig");
 
 /// `Date(...)` and `new Date(...)` constructor.
 ///
+/// Creates a `.js_object` with `@@type="Date"` and `timestamp_ms` as `.float`.
+///
 /// Signature (matches ECMAScript):
-///   - `Date()` — returns the current timestamp as a string (not a Date
-///     instance). For `new Date()` without args, returns a Date for "now".
-///   - `Date(value)` where value is number-like — Date from epoch ms.
-///   - `Date(string)` — Date from ISO 8601 string.
-///   - `Date(year, month, day?, hours?, minutes?, seconds?, ms?)` — Date
+///   - `new Date()` — current time
+///   - `new Date(value)` where value is number-like — Date from epoch ms
+///   - `new Date(string)` — Date from ISO 8601 string
+///   - `new Date(year, month, day?, hours?, minutes?, seconds?, ms?)` — Date
 ///     from components. Month is 0-indexed (JS legacy).
 pub fn DateConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
-    const ts = currentTimeMs();
-    const now_iso = DateUtils.parseIsoDate("1970-01-01") orelse 0; // placeholder
-
     const alloc = env.allocator;
+
+    // Create the js_object that will hold the Date data.
+    const obj = Types.ObjectValue.init(alloc) catch return .{ .value = .{ .void = {} } };
+    env.objects.append(alloc, obj) catch {
+        obj.deinit();
+        return .{ .value = .{ .void = {} } };
+    };
+    obj.properties.put("@@type", .{ .string = "Date" }) catch {};
 
     // Empty arg list — current time.
     if (args.len == 0) {
-        const d = Types.DateValue.init(alloc, ts, "") catch return .{ .value = .{ .void = {} } };
-        env.dates.append(alloc, d) catch {
-            d.deinit();
-            return .{ .value = .{ .void = {} } };
-        };
-        return .{ .value = .{ .date = d } };
+        const ts = currentTimeMs();
+        obj.properties.put("timestamp_ms", .{ .float = @as(f64, @floatFromInt(ts)) }) catch {};
+        return .{ .value = .{ .js_object = obj } };
     }
 
     // One argument: timestamp (number) or string.
@@ -34,48 +36,41 @@ pub fn DateConstructor(args: []Types.Value, env: *Types.Environment) Types.Built
         switch (arg) {
             .string => |s| {
                 if (DateUtils.parseIsoDate(s)) |parsed| {
-                    const d = Types.DateValue.init(alloc, parsed, s) catch return .{ .value = .{ .void = {} } };
-                    env.dates.append(alloc, d) catch {
-                        d.deinit();
-                        return .{ .value = .{ .void = {} } };
-                    };
-                    return .{ .value = .{ .date = d } };
+                    obj.properties.put("timestamp_ms", .{ .float = @as(f64, @floatFromInt(parsed)) }) catch {};
+                    return .{ .value = .{ .js_object = obj } };
                 }
                 // Unrecognized string: return Invalid Date (NaN timestamp).
-                const d = Types.DateValue.init(alloc, std.math.maxInt(i64), "") catch return .{ .value = .{ .void = {} } };
-                env.dates.append(alloc, d) catch {
-                    d.deinit();
-                    return .{ .value = .{ .void = {} } };
-                };
-                return .{ .value = .{ .date = d } };
+                obj.properties.put("timestamp_ms", .{ .float = std.math.nan(f64) }) catch {};
+                return .{ .value = .{ .js_object = obj } };
             },
             .integer, .float => {
-                const ms: i64 = switch (arg) {
-                    .integer => |i| i,
-                    .float => |f| @as(i64, @intFromFloat(f)),
+                const ms: f64 = switch (arg) {
+                    .integer => |i| @floatFromInt(i),
+                    .float => |f| f,
                     else => unreachable,
                 };
-                const d = Types.DateValue.init(alloc, ms, "") catch return .{ .value = .{ .void = {} } };
-                env.dates.append(alloc, d) catch {
-                    d.deinit();
-                    return .{ .value = .{ .void = {} } };
-                };
-                return .{ .value = .{ .date = d } };
+                obj.properties.put("timestamp_ms", .{ .float = ms }) catch {};
+                return .{ .value = .{ .js_object = obj } };
             },
             else => {
                 // Coerce to number (e.g. Date object → its timestamp).
-                const ms: i64 = switch (arg) {
-                    .date => |d| d.timestamp_ms,
-                    .integer => |i| i,
-                    .float => |f| @as(i64, @intFromFloat(f)),
-                    else => 0,
+                const ms: f64 = switch (arg) {
+                    .js_object => |o| blk: {
+                        if (o.properties.get("timestamp_ms")) |ts| {
+                            break :blk switch (ts) {
+                                .float => |f| f,
+                                .integer => |i| @floatFromInt(i),
+                                else => std.math.nan(f64),
+                            };
+                        }
+                        break :blk std.math.nan(f64);
+                    },
+                    .integer => |i| @floatFromInt(i),
+                    .float => |f| f,
+                    else => std.math.nan(f64),
                 };
-                const d = Types.DateValue.init(alloc, ms, "") catch return .{ .value = .{ .void = {} } };
-                env.dates.append(alloc, d) catch {
-                    d.deinit();
-                    return .{ .value = .{ .void = {} } };
-                };
-                return .{ .value = .{ .date = d } };
+                obj.properties.put("timestamp_ms", .{ .float = ms }) catch {};
+                return .{ .value = .{ .js_object = obj } };
             },
         }
     }
@@ -90,13 +85,8 @@ pub fn DateConstructor(args: []Types.Value, env: *Types.Environment) Types.Built
     const millisecond: u16 = if (args.len >= 7) @intCast(toInt(args[6])) else 0;
 
     const ts2 = DateUtils.timestampFromLocalParts(year, month, day, hour, minute, second, millisecond);
-    const d2 = Types.DateValue.init(alloc, ts2, "") catch return .{ .value = .{ .void = {} } };
-    env.dates.append(alloc, d2) catch {
-        d2.deinit();
-        return .{ .value = .{ .void = {} } };
-    };
-    _ = now_iso;
-    return .{ .value = .{ .date = d2 } };
+    obj.properties.put("timestamp_ms", .{ .float = @as(f64, @floatFromInt(ts2)) }) catch {};
+    return .{ .value = .{ .js_object = obj } };
 }
 
 fn toInt(v: Types.Value) i64 {
@@ -128,10 +118,14 @@ test "DateConstructor - no args returns current time" {
     const after = currentTimeMs();
 
     try testing.expect(result == .value);
-    try testing.expect(result.value == .date);
-    const d = result.value.date;
-    const ts = d.timestamp_ms;
-    try testing.expect(ts >= before and ts <= after);
+    try testing.expect(result.value == .js_object);
+    const tag = result.value.js_object.properties.get("@@type");
+    try testing.expect(tag != null);
+    try testing.expectEqualStrings("Date", tag.?.string);
+    const ts_val = result.value.js_object.properties.get("timestamp_ms");
+    try testing.expect(ts_val != null);
+    const ts = ts_val.?.float;
+    try testing.expect(ts >= @as(f64, @floatFromInt(before)) and ts <= @as(f64, @floatFromInt(after)));
 }
 
 test "DateConstructor - from timestamp" {
@@ -142,7 +136,10 @@ test "DateConstructor - from timestamp" {
     var args = [_]Types.Value{.{ .float = 1705314600000.0 }};
     const result = DateConstructor(&args, &env);
     try testing.expect(result == .value);
-    try testing.expectEqual(@as(i64, 1705314600000), result.value.date.timestamp_ms);
+    try testing.expect(result.value == .js_object);
+    const ts_val = result.value.js_object.properties.get("timestamp_ms");
+    try testing.expect(ts_val != null);
+    try testing.expectEqual(@as(i64, 1705314600000), @as(i64, @intFromFloat(ts_val.?.float)));
 }
 
 test "DateConstructor - from components" {
@@ -159,11 +156,11 @@ test "DateConstructor - from components" {
     };
     const result = DateConstructor(&args, &env);
     try testing.expect(result == .value);
-    // Local-time constructor: in UTC, components at 10:30 local = 10:30 UTC when
-    // the system is at UTC+0. The exact value depends on the host timezone,
-    // so we just verify the year/month/day components round-trip via getUTC*.
-    const d = result.value.date;
-    const p = DateUtils.partsFromTimestamp(d.timestamp_ms);
+    try testing.expect(result.value == .js_object);
+    const ts_val = result.value.js_object.properties.get("timestamp_ms");
+    try testing.expect(ts_val != null);
+    const d_ts: i64 = @intFromFloat(ts_val.?.float);
+    const p = DateUtils.partsFromTimestamp(d_ts);
     try testing.expectEqual(@as(i32, 2024), p.year);
     try testing.expectEqual(@as(u8, 0), p.month);
     try testing.expectEqual(@as(u8, 15), p.day);
@@ -177,5 +174,8 @@ test "DateConstructor - from ISO string" {
     var args = [_]Types.Value{.{ .string = "2024-01-15T10:30:00Z" }};
     const result = DateConstructor(&args, &env);
     try testing.expect(result == .value);
-    try testing.expectEqual(@as(i64, 1705314600000), result.value.date.timestamp_ms);
+    try testing.expect(result.value == .js_object);
+    const ts_val = result.value.js_object.properties.get("timestamp_ms");
+    try testing.expect(ts_val != null);
+    try testing.expectEqual(@as(i64, 1705314600000), @as(i64, @intFromFloat(ts_val.?.float)));
 }

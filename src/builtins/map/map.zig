@@ -335,6 +335,112 @@ pub fn MapIterator(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
     return MapEntries(args, env);
 }
 
+/// `Map.groupBy(items, callbackFn)` — ES2024 static method.
+/// Groups elements of `items` into a new Map keyed by the callback's return
+/// value. Items for which the callback returns `undefined` or `null` are
+/// excluded. Callback is invoked as `callback(item, index, items)` and may
+/// be a function declaration name (string) or a `.function` reference.
+///
+/// Currently only array inputs are supported. Iterables (Set, Map, generator)
+/// would require extending `findEntryIndex`/lookup semantics to iterate.
+pub fn MapGroupBy(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    if (args.len < 2) return .{ .value = .{ .void = {} } };
+    const items = args[0];
+    const callback = args[1];
+
+    // Build fresh result Map with @type="Map" + entries = [].
+    const result_obj = Ast.ObjectValue.init(env.allocator) catch {
+        return .{ .value = .{ .void = {} } };
+    };
+    env.objects.append(env.allocator, result_obj) catch {
+        result_obj.deinit();
+        return .{ .value = .{ .void = {} } };
+    };
+    const entries = Ast.ArrayObject.init(env.allocator) catch {
+        return .{ .value = .{ .void = {} } };
+    };
+    env.arrays.append(env.allocator, entries) catch {
+        entries.deinit();
+        return .{ .value = .{ .void = {} } };
+    };
+    result_obj.properties.put("@@type", Ast.Value{ .string = "Map" }) catch {};
+    result_obj.properties.put("entries", Ast.Value{ .array = entries }) catch {};
+
+    if (items != .array) return .{ .value = .{ .js_object = result_obj } };
+
+    // Resolve callback to AST node (supports named-function lookup or direct .function ref).
+    const func_node: *Ast.Node = switch (callback) {
+        .string => |s| env.getFunction(s) orelse return .{ .value = .{ .js_object = result_obj } },
+        .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        else => return .{ .value = .{ .js_object = result_obj } },
+    };
+    const func_params: []const []const u8 = switch (func_node.*) {
+        .FunctionDeclaration => |f| f.parameters,
+        .ArrowFunction => |f| f.parameters,
+        else => return .{ .value = .{ .js_object = result_obj } },
+    };
+    const func_body: *Ast.Node = switch (func_node.*) {
+        .FunctionDeclaration => |f| f.body,
+        .ArrowFunction => |f| f.body,
+        else => return .{ .value = .{ .js_object = result_obj } },
+    };
+
+    var func_env = Environment.init(env.allocator, env) catch {
+        return .{ .value = .{ .js_object = result_obj } };
+    };
+    defer func_env.deinit();
+
+    for (items.array.elements.items, 0..) |element, i| {
+        if (element == .hole) continue;
+        func_env.return_hit = false;
+        if (func_params.len > 0) func_env.setVar(func_params[0], element) catch {};
+        if (func_params.len > 1) func_env.setVar(func_params[1], Ast.Value{ .integer = @intCast(i) }) catch {};
+        if (func_params.len > 2) func_env.setVar(func_params[2], items) catch {};
+
+        // Propagate callback throws: check func_env.throw_hit AFTER evaluate()
+        // (not just via the catch block — evaluate may set throw_hit without
+        // returning a Zig error, in which case we'd silently swallow).
+        const key = evaluate(func_body, &func_env) catch return .{ .value = .{ .void = {} } };
+        if (func_env.throw_hit) {
+            env.throw_hit = true;
+            env.throw_value = func_env.throw_value;
+            return .{ .value = .{ .void = {} } };
+        }
+
+        // Per ES2024: only undefined keys EXCLUDE the item; null is a valid Map key.
+        if (key == .void) continue;
+
+        if (findEntryIndex(entries, key)) |idx| {
+            const pair = entries.elements.items[idx];
+            // Entry format is [key, bucketArray]; append to the bucket at index 1.
+            if (pair == .array and pair.array.elements.items.len >= 2) {
+                const bucket = pair.array.elements.items[1];
+                if (bucket == .array) {
+                    bucket.array.elements.append(env.allocator, element) catch {};
+                }
+            }
+        } else {
+            const bucket = Ast.ArrayObject.init(env.allocator) catch continue;
+            env.arrays.append(env.allocator, bucket) catch {
+                bucket.deinit();
+                continue;
+            };
+            bucket.elements.append(env.allocator, element) catch {};
+
+            const pair = Ast.ArrayObject.init(env.allocator) catch continue;
+            env.arrays.append(env.allocator, pair) catch {
+                pair.deinit();
+                continue;
+            };
+            pair.elements.append(env.allocator, key) catch {};
+            pair.elements.append(env.allocator, Ast.Value{ .array = bucket }) catch {};
+            entries.elements.append(env.allocator, Ast.Value{ .array = pair }) catch {};
+        }
+    }
+
+    return .{ .value = .{ .js_object = result_obj } };
+}
+
 pub fn MapToString(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     const map_val = getMap(args) orelse return .{ .value = .{ .string = "[object Map]" } };
     const entries = getEntries(map_val) orelse return .{ .value = .{ .string = "[object Map]" } };
@@ -367,7 +473,6 @@ const MAP_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "get", .func = MapGet },
     .{ .name = "has", .func = MapHas },
     .{ .name = "delete", .func = MapDelete },
-    .{ .name = "size", .func = MapSize },
     .{ .name = "clear", .func = MapClear },
     .{ .name = "keys", .func = MapKeys },
     .{ .name = "values", .func = MapValuesMethod },
@@ -375,6 +480,7 @@ const MAP_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "forEach", .func = MapForEach },
     .{ .name = "@@iterator", .func = MapIterator },
     .{ .name = "toString", .func = MapToString },
+    .{ .name = "groupBy", .func = MapGroupBy },
 };
 
 pub const MAP_OBJECT = Types.BuiltinObjectImpl{

@@ -23,6 +23,8 @@ const WELL_KNOWN = [_]Types.WellKnownSymbol{
     .toPrimitive,
     .toStringTag,
     .species,
+    .dispose,
+    .asyncDispose,
 };
 
 /// Populate `env` with the `Symbol` namespace and its well-known symbols.

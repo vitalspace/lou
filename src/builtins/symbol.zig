@@ -11,6 +11,8 @@ pub const WellKnownSymbolNames = struct {
     pub const toPrimitive = "toPrimitive";
     pub const toStringTag = "toStringTag";
     pub const species = "species";
+    pub const dispose = "dispose";
+    pub const asyncDispose = "asyncDispose";
 };
 
 pub fn initSimboloObject(env: *Types.Environment) !void {
@@ -64,6 +66,17 @@ pub fn initSimboloObject(env: *Types.Environment) !void {
         try env.symbols.append(allocator, sym);
         try simbolo_obj.properties.put("species", .{ .symbol = sym });
     }
+    {
+        const sym = try Types.SymbolValue.init(allocator, @intFromEnum(Types.WellKnownSymbol.dispose), "dispose");
+        try env.symbols.append(allocator, sym);
+        try simbolo_obj.properties.put("dispose", .{ .symbol = sym });
+    }
+    {
+        const sym = try Types.SymbolValue.init(allocator, @intFromEnum(Types.WellKnownSymbol.asyncDispose), "asyncDispose");
+        try env.symbols.append(allocator, sym);
+        try simbolo_obj.properties.put("asyncDispose", .{ .symbol = sym });
+    }
 
     try env.setConstant("Simbolo", .{ .js_object = simbolo_obj });
+    try env.setConstant("Symbol", .{ .js_object = simbolo_obj });
 }

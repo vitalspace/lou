@@ -73,7 +73,13 @@ fn callReplacerFn(replacer_fn: *Ast.Node, key: []const u8, value: Types.Value, e
     defer func_env.deinit();
 
     if (func_params.len > 0) {
-        func_env.setVar(func_params[0], .{ .string = key }) catch {};
+        // Heap-allocate the key string so it outlives this call (replacer may store it in arrays/objects).
+        const key_copy = env.allocator.dupe(u8, key) catch return value;
+        env.owned_strings.append(env.allocator, key_copy) catch {
+            env.allocator.free(key_copy);
+            return value;
+        };
+        func_env.setVar(func_params[0], .{ .string = key_copy }) catch {};
     }
     if (func_params.len > 1) {
         func_env.setVar(func_params[1], value) catch {};
@@ -96,7 +102,7 @@ fn applyReplacer(replacer_fn: ?*Ast.Node, key: []const u8, value: Types.Value, e
 fn valueToJson(
     buf: *std.ArrayList(u8),
     val: Types.Value,
-    key: []const u8,
+    _: []const u8, // replacer already applied by caller (Stringify root or object/array loops)
     allocator: std.mem.Allocator,
     depth: usize,
     indent: ?[]const u8,
@@ -104,10 +110,11 @@ fn valueToJson(
     allowed_keys: ?*const std.StringHashMap(void),
     env: *Types.Environment,
 ) !void {
-    const effective_val = try applyReplacer(replacer_fn, key, val, env);
-    if (effective_val == .void) return;
+    // The replacer is applied by the caller (Stringify for root, object/array loops for children).
+    // We only skip .void here because a parent loop may have produced it.
+    if (val == .void) return;
 
-    switch (effective_val) {
+    switch (val) {
         .string => |s| {
             try escapeString(buf, s, allocator);
         },
@@ -122,6 +129,9 @@ fn valueToJson(
         },
         .null => {
             try buf.appendSlice(allocator, "null");
+        },
+        .regexp => {
+            try buf.appendSlice(allocator, "{}");
         },
         .void => {
             try buf.appendSlice(allocator, "null");
@@ -248,10 +258,10 @@ fn valueToJson(
             }
             try buf.append(allocator, '}');
         },
-        .regexp => {
-            try buf.appendSlice(allocator, "{}");
+        .big_int => {
+            try buf.appendSlice(allocator, "null");
         },
-        .function, .symbol, .iterator, .generator, .closure => {
+        .function, .symbol, .iterator, .generator, .closure, .array_iterator => {
             try buf.appendSlice(allocator, "null");
         },
         .object, .hole => {
@@ -418,3 +428,4 @@ pub fn Stringify(args: []const Types.Value, env: *Types.Environment) Types.Built
     };
     return .{ .value = .{ .string = result } };
 }
+

@@ -318,7 +318,6 @@ const SET_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "add", .func = SetAdd },
     .{ .name = "has", .func = SetHas },
     .{ .name = "delete", .func = SetDelete },
-    .{ .name = "size", .func = SetSize },
     .{ .name = "clear", .func = SetClear },
     .{ .name = "values", .func = SetValues },
     .{ .name = "keys", .func = SetKeys },

@@ -4,11 +4,18 @@ const Ast = @import("../../ast.zig");
 const RegexEngine = @import("regex.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 
+fn cachedRegexDeinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const re: *RegexEngine.Regex = @alignCast(@ptrCast(ptr));
+    re.deinit();
+    allocator.destroy(re);
+}
+
 fn getOrCompile(regexp: *Types.RegExpValue) !*RegexEngine.Regex {
-    if (regexp.cached) |*re| {
-        return re;
+    if (regexp.cached) |c| {
+        return @as(*RegexEngine.Regex, @alignCast(@ptrCast(c)));
     }
-    const compiled = try RegexEngine.Regex.compile(regexp.allocator, regexp.pattern, .{
+    const compiled = try regexp.allocator.create(RegexEngine.Regex);
+    compiled.* = try RegexEngine.Regex.compile(regexp.allocator, regexp.pattern, .{
         .global = regexp.global,
         .ignore_case = regexp.ignore_case,
         .multiline = regexp.multiline,
@@ -17,8 +24,9 @@ fn getOrCompile(regexp: *Types.RegExpValue) !*RegexEngine.Regex {
         .sticky = regexp.sticky,
         .has_indices = regexp.has_indices,
     });
-    regexp.cached = compiled;
-    return &regexp.cached.?;
+    regexp.cached = @ptrCast(compiled);
+    regexp.cached_deinit = cachedRegexDeinit;
+    return compiled;
 }
 
 pub const CaptureInfo = struct {
@@ -398,10 +406,10 @@ pub fn callTest(args: []Types.Value, env: *Environment) anyerror!Types.Value {
         if (result) |exec| {
             var mutable_exec = exec;
             defer mutable_exec.deinit(env.allocator);
-            re_val.regexp.setLastIndex(mutable_exec.idx + mutable_exec.len);
+            re_val.regexp.setLastIndex(@intCast(mutable_exec.idx + mutable_exec.len));
             return .{ .boolean = true };
         } else {
-            re_val.regexp.setLastIndex(0);
+            re_val.regexp.setLastIndex(@as(u32, 0));
             return .{ .boolean = false };
         }
     }
@@ -429,14 +437,14 @@ pub fn callExec(args: []Types.Value, env: *Environment) anyerror!Types.Value {
         defer mutable_exec.deinit(env.allocator);
         // Update lastIndex for global/sticky regexps
         if (use_lastindex) {
-            re_val.regexp.setLastIndex(mutable_exec.idx + mutable_exec.len);
+            re_val.regexp.setLastIndex(@intCast(mutable_exec.idx + mutable_exec.len));
         }
         const arr = try buildMatchArray(env.allocator, env, input, &mutable_exec);
         return .{ .array = arr };
     }
     // No match: reset lastIndex for global/sticky
     if (use_lastindex) {
-        re_val.regexp.setLastIndex(0);
+        re_val.regexp.setLastIndex(@as(u32, 0));
     }
     return .{ .null = {} };
 }

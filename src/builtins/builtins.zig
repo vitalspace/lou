@@ -4,6 +4,31 @@ const Ast = @import("../ast.zig");
 const BUILTIN_OBJECTS = @import("./builtinObjects.zig").BUILTIN_OBJECTS;
 const SetConstructor = @import("./set/set.zig").SetConstructor;
 const MapConstructor = @import("./map/map.zig").MapConstructor;
+const BooleanConstructor = @import("./boolean/boolean.zig").BooleanConstructor;
+const DateConstructor = @import("./date/constructor.zig").DateConstructor;
+const DisposableStackConstructor = @import("./disposable/constructor.zig").DisposableStackConstructor;
+const encodeUri = @import("./uri.zig").encodeUri;
+const decodeUri = @import("./uri.zig").decodeUri;
+const encodeUriComponent = @import("./uri.zig").encodeUriComponent;
+const decodeUriComponent = @import("./uri.zig").decodeUriComponent;
+const ErrorConstructor = @import("./error.zig").ErrorConstructor;
+const TypeErrorConstructor = @import("./error.zig").TypeErrorConstructor;
+const RangeErrorConstructor = @import("./error.zig").RangeErrorConstructor;
+const ReferenceErrorConstructor = @import("./error.zig").ReferenceErrorConstructor;
+const SyntaxErrorConstructor = @import("./error.zig").SyntaxErrorConstructor;
+const EvalErrorConstructor = @import("./error.zig").EvalErrorConstructor;
+const URIErrorConstructor = @import("./error.zig").URIErrorConstructor;
+const FinalizationRegistryConstructor = @import("./finalization-registry.zig").FinalizationRegistryConstructor;
+const WeakRefConstructor = @import("./weakref.zig").WeakRefConstructor;
+const NumberConstructorFn = @import("./number/number.zig").NumberConstructor;
+const StringConstructorFn = @import("./string/string.zig").StringConstructor;
+const isFiniteFn = @import("./isfinite-isnan.zig").isFinite;
+const isNaNFn = @import("./isfinite-isnan.zig").isNaN;
+const parseIntFn = @import("./parseint-parsefloat.zig").parseInt;
+const parseFloatFn = @import("./parseint-parsefloat.zig").parseFloat;
+const BigIntConstructorFn = @import("./bigint/bigint.zig").BigIntConstructor;
+const IntlConstructorFn = @import("./intl/intl.zig").IntlConstructor;
+const RegExpConstructorFn = @import("./regex/regexp_constructor.zig").RegExpConstructor;
 
 fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -45,6 +70,31 @@ const BUILTIN_FUNCTIONS = [_]struct { name: []const u8, func: Types.BuiltinFn }{
     .{ .name = "Array", .func = arrayConstructor },
     .{ .name = "Set", .func = SetConstructor },
     .{ .name = "Map", .func = MapConstructor },
+    .{ .name = "Boolean", .func = BooleanConstructor },
+    .{ .name = "Date", .func = DateConstructor },
+    .{ .name = "DisposableStack", .func = DisposableStackConstructor },
+    .{ .name = "encodeURI", .func = encodeUri },
+    .{ .name = "decodeURI", .func = decodeUri },
+    .{ .name = "encodeURIComponent", .func = encodeUriComponent },
+    .{ .name = "decodeURIComponent", .func = decodeUriComponent },
+    .{ .name = "Error", .func = ErrorConstructor },
+    .{ .name = "TypeError", .func = TypeErrorConstructor },
+    .{ .name = "RangeError", .func = RangeErrorConstructor },
+    .{ .name = "ReferenceError", .func = ReferenceErrorConstructor },
+    .{ .name = "SyntaxError", .func = SyntaxErrorConstructor },
+    .{ .name = "EvalError", .func = EvalErrorConstructor },
+    .{ .name = "URIError", .func = URIErrorConstructor },
+    .{ .name = "FinalizationRegistry", .func = FinalizationRegistryConstructor },
+    .{ .name = "WeakRef", .func = WeakRefConstructor },
+    .{ .name = "Number", .func = NumberConstructorFn },
+    .{ .name = "String", .func = StringConstructorFn },
+    .{ .name = "isFinite", .func = isFiniteFn },
+    .{ .name = "isNaN", .func = isNaNFn },
+    .{ .name = "parseInt", .func = parseIntFn },
+    .{ .name = "parseFloat", .func = parseFloatFn },
+    .{ .name = "BigInt", .func = BigIntConstructorFn },
+    .{ .name = "Intl", .func = IntlConstructorFn },
+    .{ .name = "RegExp", .func = RegExpConstructorFn },
 };
 
 pub fn initBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(Types.BuiltinFn) {

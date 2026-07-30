@@ -5,6 +5,7 @@ const Entries = @import("entries.zig").Entries;
 const Values = @import("values.zig").Values;
 const HasOwn = @import("hasOwn.zig").HasOwn;
 const Create = @import("create.zig").Create;
+const GroupBy = @import("groupBy.zig").GroupBy;
 
 const OBJECT_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "keys", .func = Keys },
@@ -13,6 +14,7 @@ const OBJECT_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "values", .func = Values },
     .{ .name = "hasOwn", .func = HasOwn },
     .{ .name = "create", .func = Create },
+    .{ .name = "groupBy", .func = GroupBy },
 };
 
 pub const OBJECT_OBJECT = Types.BuiltinObjectImpl{

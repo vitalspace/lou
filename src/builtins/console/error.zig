@@ -25,24 +25,89 @@ fn shouldFormatArrayWrapped(a: *Types.ArrayObject) bool {
 }
 
 fn printArrayInline(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8, env: *Types.Environment) void {
+    const D = if (use_ansi) ansi.Dim else "";
     out.print("{s}[ {s}", .{ Gy, R }) catch {};
-    for (a.elements.items, 0..) |elem, j| {
-        if (j > 0) out.print("{s}, {s}", .{ Gy, R }) catch {};
+    var hole_count: usize = 0;
+    var first = true;
+    for (a.elements.items) |elem| {
+        if (elem == .hole) {
+            hole_count += 1;
+            continue;
+        }
+        if (hole_count > 0) {
+            if (!first) out.print("{s}, {s}", .{ Gy, R }) catch {};
+            if (hole_count == 1) {
+                out.print("{s}<1 empty item>{s}", .{ D, R }) catch {};
+            } else {
+                out.print("{s}<{d} empty items>{s}", .{ D, hole_count, R }) catch {};
+            }
+            first = false;
+            hole_count = 0;
+        }
+        if (!first) out.print("{s}, {s}", .{ Gy, R }) catch {};
         printValueTo(out, elem, use_ansi, env);
+        first = false;
+    }
+    if (hole_count > 0) {
+        if (!first) out.print("{s}, {s}", .{ Gy, R }) catch {};
+        if (hole_count == 1) {
+            out.print("{s}<1 empty item>{s}", .{ D, R }) catch {};
+        } else {
+            out.print("{s}<{d} empty items>{s}", .{ D, hole_count, R }) catch {};
+        }
     }
     out.print("{s} ]{s}", .{ Gy, R }) catch {};
 }
 
 fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, use_ansi: bool, Gy: []const u8, R: []const u8, env: *Types.Environment) void {
+    const D = if (use_ansi) ansi.Dim else "";
     out.print("{s}[ {s}", .{ Gy, R }) catch {};
-    for (a.elements.items, 0..) |elem, j| {
-        if (j > 0) {
+    var hole_count: usize = 0;
+    var pos: usize = 0;
+    var first = true;
+    for (a.elements.items) |elem| {
+        if (elem == .hole) {
+            hole_count += 1;
+            pos += 1;
+            continue;
+        }
+        if (hole_count > 0) {
+            if (!first) {
+                out.print(", ", .{}) catch {};
+                if ((pos % 6) == 0) {
+                    out.print("\n  ", .{}) catch {};
+                }
+            }
+            if (hole_count == 1) {
+                out.print("{s}<1 empty item>{s}", .{ D, R }) catch {};
+            } else {
+                out.print("{s}<{d} empty items>{s}", .{ D, hole_count, R }) catch {};
+            }
+            first = false;
+            hole_count = 0;
+        }
+        if (!first) {
             out.print(", ", .{}) catch {};
-            if ((j % 6) == 0) {
+            if ((pos % 6) == 0) {
                 out.print("\n  ", .{}) catch {};
             }
         }
         printValueTo(out, elem, use_ansi, env);
+        first = false;
+        pos += 1;
+    }
+    if (hole_count > 0) {
+        if (!first) {
+            out.print(", ", .{}) catch {};
+            if ((pos % 6) == 0) {
+                out.print("\n  ", .{}) catch {};
+            }
+        }
+        if (hole_count == 1) {
+            out.print("{s}<1 empty item>{s}", .{ D, R }) catch {};
+        } else {
+            out.print("{s}<{d} empty items>{s}", .{ D, hole_count, R }) catch {};
+        }
     }
     out.print("\n{s}]{s}", .{ Gy, R }) catch {};
 }
@@ -88,38 +153,47 @@ fn printValueTo(out: anytype, value: Types.Value, use_ansi: bool, env: *Types.En
         .closure => out.print("{s}[closure]{s}", .{ C, Reset }) catch {},
         .function => out.print("{s}[function]{s}", .{ C, Reset }) catch {},
         .iterator => out.print("{s}[object Array Iterator]{s}", .{ Y, Reset }) catch {},
+        .array_iterator => out.print("{s}[function Array Iterator]{s}", .{ Y, Reset }) catch {},
         .generator => out.print("{s}[generator]{s}", .{ C, Reset }) catch {},
+        .regexp => |re| out.print("{s}/{s}/{s}{s}", .{ Y, re.pattern, re.flags, Reset }) catch {},
         .symbol => |sym| out.print("{s}Symbol({s}){s}", .{ Y, sym.description, Reset }) catch {},
 .js_object => |o| {
-             out.print("{s}{{ {s}", .{ Gy, Reset }) catch {};
-             var first = true;
+             var count: usize = 0;
              var it = o.properties.iterator();
-             while (it.next()) |entry| {
-                 if (!first) out.print("{s}, {s}", .{ Gy, Reset }) catch {};
-                 first = false;
-                 const key = entry.key_ptr.*;
-                 var is_numeric_key: bool = false;
-                 if (key.len > 0) {
-                     var all_valid = true;
-                     var has_digit = false;
-                     for (key) |c| {
-                         if (c >= '0' and c <= '9') {
-                             has_digit = true;
-                         } else if (c != '.') {
-                             all_valid = false;
-                             break;
+             while (it.next()) |_| { count += 1; }
+             if (count == 0) {
+                 out.print("{s}{{}}{s}", .{ Gy, Reset }) catch {};
+             } else {
+                 out.print("{s}{{ {s}", .{ Gy, Reset }) catch {};
+                 var first = true;
+                 var it2 = o.properties.iterator();
+                 while (it2.next()) |entry| {
+                     if (!first) out.print("{s}, {s}", .{ Gy, Reset }) catch {};
+                     first = false;
+                     const key = entry.key_ptr.*;
+                     var is_numeric_key: bool = false;
+                     if (key.len > 0) {
+                         var all_valid = true;
+                         var has_digit = false;
+                         for (key) |c| {
+                             if (c >= '0' and c <= '9') {
+                                 has_digit = true;
+                             } else if (c != '.') {
+                                 all_valid = false;
+                                 break;
+                             }
                          }
+                         is_numeric_key = all_valid and has_digit;
                      }
-                     is_numeric_key = all_valid and has_digit;
+                     if (is_numeric_key) {
+                         out.print("{s}'{s}':{s} ", .{ C, key, Reset }) catch {};
+                     } else {
+                         out.print("{s}{s}:{s} ", .{ C, key, Reset }) catch {};
+                     }
+                     printValueTo(out, entry.value_ptr.*, use_ansi, env);
                  }
-                 if (is_numeric_key) {
-                     out.print("{s}'{s}':{s} ", .{ C, key, Reset }) catch {};
-                 } else {
-                     out.print("{s}{s}:{s} ", .{ C, key, Reset }) catch {};
-                 }
-                 printValueTo(out, entry.value_ptr.*, use_ansi, env);
+                 out.print("{s} }}{s}", .{ Gy, Reset }) catch {};
              }
-             out.print("{s} }}{s}", .{ Gy, Reset }) catch {};
          },
     }
 }
