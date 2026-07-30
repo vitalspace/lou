@@ -1,0 +1,19 @@
+// For-in destructuring — iterates over string keys.
+// Uses object pattern (key.length) which works in both VM and evaluator.
+// Array pattern (const [k] in obj) requires string indexing which is
+// a VM limitation — use object destructuring on the key string instead.
+
+console.log("=== for-in object destructuring (key.length) ===")
+var obj1 = { hello: 10, hi: 20, hey: 30 }
+for (var { length } in obj1) {
+  if (length == 5) { console.log("five") }
+  else if (length == 2) { console.log("two") }
+  else if (length == 3) { console.log("three") }
+}
+
+console.log("=== for-in with rename ===")
+var obj2 = { abcdef: 1, gh: 2 }
+for (var { length: len } in obj2) {
+  if (len == 6) { console.log("six") }
+  else if (len == 2) { console.log("two") }
+}

@@ -5,7 +5,7 @@ console.log("--- Boolean() constructor as function ---");
 console.log(Boolean(1));
 console.log(Boolean(0));
 console.log(Boolean(-0));
-console.log(Boolean(Number("abc")));
+console.log(Boolean(0/0)); // NaN is falsy
 console.log(Boolean(""));
 console.log(Boolean("hello"));
 console.log(Boolean(null));

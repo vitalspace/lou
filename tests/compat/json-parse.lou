@@ -1,0 +1,74 @@
+function doubleNumbers(key, value) {
+    if (typeof value === 'number') return value * 2;
+    return value;
+}
+function removeB(key, value) {
+    if (key === 'b') return undefined;
+    return value;
+}
+function addOne(key, value) {
+    if (typeof value === 'number') return value + 1;
+    return value;
+}
+function multiply10(key, value) {
+    if (typeof value === 'number') return value * 10;
+    return value;
+}
+function collectKeys(k, v) {
+    keys.push(k);
+    return v;
+}
+
+// JSON.parse without reviver
+console.log(JSON.parse('"hello"'));
+console.log(JSON.parse('42'));
+console.log(JSON.parse('true'));
+console.log(JSON.parse('null'));
+console.log(JSON.parse('[1,2,3]'));
+console.log(JSON.parse('{"a":1,"b":2}'));
+
+// JSON.parse with reviver: multiply numbers
+console.log("---reviver---");
+const r1 = JSON.parse('{"x":1,"y":2,"z":"hello"}', doubleNumbers);
+console.log(r1.x, r1.y, r1.z);
+
+// JSON.parse with reviver: remove a key
+console.log("---remove---");
+const r2 = JSON.parse('{"a":1,"b":2,"c":3}', removeB);
+console.log(r2.a, r2.c);
+
+// JSON.parse with reviver on nested objects
+console.log("---nested---");
+const r3 = JSON.parse('{"outer":{"inner":42}}', addOne);
+console.log(r3.outer.inner);
+
+// JSON.parse with reviver on array
+console.log("---array---");
+const r4 = JSON.parse('[1,2,3]', multiply10);
+console.log(r4[0], r4[1], r4[2]);
+
+// JSON.parse reviver receives correct keys for arrays
+console.log("---keys---");
+const keys = [];
+const r5 = JSON.parse('[10,20]', collectKeys);
+console.log(keys.join(','));
+
+// JSON.parse throws SyntaxError on unknown escape characters
+console.log("---bad-escapes---");
+function expectSyntaxError(label, input) {
+    try {
+        JSON.parse(input);
+        console.log("FAIL(" + label + "): no throw");
+    } catch (e) {
+        console.log("ok(" + label + "):", e instanceof SyntaxError, "/", e.name);
+    }
+}
+// Note: \\\x in shell-escape -> "\x" as JS string literal -> \x as JSON escape
+// To pass "\x" to JSON.parse we need the string contents to literally be a backslash followed by x.
+expectSyntaxError("\\x", '"' + '\\' + 'x' + '"');
+expectSyntaxError("\\v", '"' + '\\' + 'v' + '"');
+expectSyntaxError("\\0", '"' + '\\' + '0' + '"');
+expectSyntaxError("\\a", '"' + '\\' + 'a' + '"');
+expectSyntaxError("\\u  ", '"' + '\\' + 'u"');
+expectSyntaxError("\\u12 (too short)", '"' + '\\' + 'u12"');
+expectSyntaxError("\\uZZZZ (non-hex)", '"' + '\\' + 'uZZZZ"');

@@ -1,0 +1,64 @@
+// Logical assignment operators (&&=, ||=, ??=)
+// Lou test - should match Node.js output
+
+// --- ||= — assigns if falsy ---
+let a = 0
+a ||= 5
+console.log(a)
+
+let b = "hello"
+b ||= "default"
+console.log(b)
+
+// --- &&= — assigns if truthy ---
+let c = 1
+c &&= 2
+console.log(c)
+
+let d = 0
+d &&= 42
+console.log(d)
+
+// --- ??= — assigns if null/undefined ---
+let e = null
+e ??= 10
+console.log(e)
+
+let f = undefined
+f ??= 20
+console.log(f)
+
+let g = false
+g ??= 30
+console.log(g)
+
+let h = 0
+h ??= 40
+console.log(h)
+
+// --- With objects ---
+let obj = { x: 0 }
+obj.x ||= 100
+console.log(obj.x)
+
+let obj2 = { y: 5 }
+obj2.y &&= 10
+console.log(obj2.y)
+
+// --- Short-circuit: RHS not evaluated if condition not met ---
+let sideEffect = 0
+let v1 = true
+v1 ||= (sideEffect++, 99)
+console.log(sideEffect)
+
+let v2 = false
+v2 ||= (sideEffect++, 99)
+console.log(sideEffect)
+console.log(v2)
+
+// --- Multiple assignments ---
+let m = 0
+let n = null
+m ||= 1
+n ??= 2
+console.log(m, n)

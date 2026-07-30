@@ -1,0 +1,31 @@
+// isFinite and isNaN global functions — Lou version
+// Both coerce their argument to number first
+
+// isFinite
+console.log("isFinite:");
+console.log(isFinite(0));
+console.log(isFinite(42));
+console.log(isFinite(-1));
+console.log(isFinite(1.5));
+console.log(isFinite(Infinity));
+console.log(isFinite(-Infinity));
+console.log(isFinite(NaN));
+console.log(isFinite("42"));
+console.log(isFinite("hello"));
+console.log(isFinite(null));
+console.log(isFinite(undefined));
+console.log(isFinite(true));
+console.log(isFinite(false));
+console.log(isFinite(""));
+
+// isNaN
+console.log("isNaN:");
+console.log(isNaN(NaN));
+console.log(isNaN(undefined));
+console.log(isNaN("hello"));
+console.log(isNaN(42));
+console.log(isNaN("42"));
+console.log(isNaN(null));
+console.log(isNaN(true));
+console.log(isNaN(""));
+console.log(isNaN(Infinity));

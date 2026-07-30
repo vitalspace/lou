@@ -1,0 +1,57 @@
+// Destructuring in assignment expressions
+
+console.log("=== object destructuring assignment ===");
+var a = 0;
+var b = 0;
+({ a, b } = { a: 1, b: 2 });
+console.log(a + b);
+
+console.log("=== array destructuring assignment ===");
+var x = 0;
+var y = 0;
+[x, y] = [10, 20];
+console.log(x + y);
+
+console.log("=== rename in object ===");
+var renamed = 0;
+({ oldName: renamed } = { oldName: 42 });
+console.log(renamed);
+
+console.log("=== rest in array ===");
+var head = 0;
+var tail = 0;
+[head, ...tail] = [1, 2, 3, 4];
+console.log(head + tail.length);
+
+console.log("=== elision in array ===");
+var first = 0;
+var third = 0;
+[first, , third] = [10, 20, 30];
+console.log(first + third);
+
+console.log("=== nested object ===");
+var inner = 0;
+({ outer: { inner } } = { outer: { inner: 77 } });
+console.log(inner);
+
+console.log("=== nested array in object ===");
+var a1 = 0;
+var a2 = 0;
+({ arr: [a1, a2] } = { arr: [5, 6] });
+console.log(a1 + a2);
+
+console.log("=== nested object in array ===");
+var n1 = 0;
+[{ name: n1 }, ] = [{ name: "Alice" }];
+console.log(n1);
+
+console.log("=== assignment returns RHS ===");
+var r = 0;
+const result = ({ r } = { r: 99 });
+console.log(result.r + r);
+
+console.log("=== array assignment returns RHS ===");
+var p = 0;
+var q = 0;
+const arrResult = [p, q] = [7, 8];
+console.log(p + q + arrResult.length);

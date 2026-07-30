@@ -1,0 +1,31 @@
+// for-in-order.lou — Lou version of for-in enumeration order test
+
+// Basic: integer keys first ascending, then insertion order
+var obj = {b: 1, 0: 3, a: 2};
+var keys = [];
+for (var k in obj) keys.push(k);
+console.log(keys.join(","));
+
+// Numeric keys sorted
+var nums = {3: "c", 1: "a", 2: "b"};
+var keys2 = [];
+for (var k in nums) keys2.push(k);
+console.log(keys2.join(","));
+
+// Mixed: "10" is string, 2 is integer
+var mixed = {z: 1, a: 2, 10: 3, 2: 4, m: 5};
+var keys3 = [];
+for (var k in mixed) keys3.push(k);
+console.log(keys3.join(","));
+
+// Only string keys: preserve insertion order
+var strs = {c: 1, a: 2, b: 3};
+var keys4 = [];
+for (var k in strs) keys4.push(k);
+console.log(keys4.join(","));
+
+// Only integer keys: sorted ascending
+var ints = {5: "e", 1: "a", 3: "c"};
+var keys5 = [];
+for (var k in ints) keys5.push(k);
+console.log(keys5.join(","));

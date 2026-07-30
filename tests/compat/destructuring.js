@@ -1,0 +1,32 @@
+// ES2015 object destructuring: shorthand, rename, per-property default,
+// whole-pattern default, object rest. Pins the runtime semantics the Lou
+// implementation must match byte-for-byte.
+
+// 1. Shorthand: `{x, y}` extracts `x`/`y` to bindings of the same name.
+function f1({ x, y }) { return x + y; }
+console.log(f1({ x: 1, y: 2 }));                 // 3
+console.log(f1({ x: 10, y: 20, z: 999 }));       // 30 — extra keys ignored
+
+// 2. Rename: `{a: x, b: y}` extracts property `a` as binding `x`.
+function f2({ a: x, b: y }) { return x * y; }
+console.log(f2({ a: 3, b: 4 }));                  // 12
+
+// 3. Per-property default: missing key uses its declared default.
+//    Present key overrides the default.
+function f3({ x = 10, y = 20 }) { return x + y; }
+console.log(f3({ x: 1, y: 2 }));                  // 3 — both provided
+console.log(f3({ x: 1 }));                       // 21 — y defaults to 20
+console.log(f3({}));                             // 30 — both default
+console.log(f3({ y: 5 }));                       // 15 — x defaults to 10
+
+// Combined: rename + per-property default.
+function f3b({ a: x = 10, b: y = 20 }) { return x + y; }
+console.log(f3b({ a: 1, b: 2 }));                // 3
+console.log(f3b({ a: 1 }));                     // 21
+console.log(f3b({}));                           // 30
+
+// 4. Whole-pattern default: when arg is missing/undefined, substitute.
+function f4({ x, y } = {}) { return x + y; }
+console.log(f4());                                // NaN
+console.log(f4({ x: 1, y: 2 }));                  // 3 — actual arg overrides
+console.log(f4(undefined));                       // NaN

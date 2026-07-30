@@ -1,0 +1,77 @@
+// WeakRef compat test — reference (Node.js)
+// Tests the WeakRef API without GC-dependent behavior.
+
+// Constructor
+const w1 = new WeakRef({x: 1});
+console.log("constructor:", typeof w1);
+
+// deref returns the target
+const obj = {name: "test"};
+const w2 = new WeakRef(obj);
+const val = w2.deref();
+console.log("deref object:", typeof val, val.name);
+
+// deref on array target
+const arr = [1, 2, 3];
+const w3 = new WeakRef(arr);
+console.log("deref array:", Array.isArray(w3.deref()), w3.deref().length);
+
+// deref on function target (use arrow to avoid function-expression VM bug)
+const fn = () => 42;
+const w4 = new WeakRef(fn);
+console.log("deref function:", typeof w4.deref(), w4.deref()());
+
+// TypeError for non-object target
+try {
+    new WeakRef(42);
+    console.log("no throw for number");
+} catch (e) {
+    console.log("TypeError for number:", e instanceof TypeError);
+}
+
+try {
+    new WeakRef("string");
+    console.log("no throw for string");
+} catch (e) {
+    console.log("TypeError for string:", e instanceof TypeError);
+}
+
+try {
+    new WeakRef(true);
+    console.log("no throw for boolean");
+} catch (e) {
+    console.log("TypeError for boolean:", e instanceof TypeError);
+}
+
+try {
+    new WeakRef(undefined);
+    console.log("no throw for undefined");
+} catch (e) {
+    console.log("TypeError for undefined:", e instanceof TypeError);
+}
+
+try {
+    new WeakRef(null);
+    console.log("no throw for null");
+} catch (e) {
+    console.log("TypeError for null:", e instanceof TypeError);
+}
+
+// Multiple WeakRefs to same object
+const shared = {shared: true};
+const w5 = new WeakRef(shared);
+const w6 = new WeakRef(shared);
+console.log("same target:", w5.deref() === w6.deref());
+
+// typeof and instanceof (typeof WeakRef is "function" in JS, "object" in Lou — pre-existing limitation)
+console.log("instanceof WeakRef:", w1 instanceof WeakRef);
+
+// toString (String() as function is a pre-existing limitation — skipped)
+
+// No-args constructor throws TypeError
+try {
+    new WeakRef();
+    console.log("no throw for no args");
+} catch (e) {
+    console.log("TypeError for no args:", e instanceof TypeError);
+}

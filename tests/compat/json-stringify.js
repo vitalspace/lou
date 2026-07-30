@@ -1,0 +1,61 @@
+function doubleNumbers(key, value) {
+    if (typeof value === 'number') return value * 2;
+    return value;
+}
+function excludeB(key, value) {
+    if (key === 'b') return undefined;
+    return value;
+}
+function nestedReplacer(key, value) {
+    if (key === 'inner') return 999;
+    return value;
+}
+
+// Basic stringify without replacer
+console.log(JSON.stringify("hello"));
+console.log(JSON.stringify(42));
+console.log(JSON.stringify(true));
+console.log(JSON.stringify(null));
+console.log(JSON.stringify([1, 2, 3]));
+console.log(JSON.stringify({a: 1, b: 2}));
+
+// Function replacer: transform numbers
+console.log("---replacer---");
+console.log(JSON.stringify({x: 1, y: 2, z: "hello"}, doubleNumbers));
+
+// Function replacer: exclude a key
+console.log("---exclude---");
+console.log(JSON.stringify({a: 1, b: 2, c: 3}, excludeB));
+
+// Function replacer on nested objects
+console.log("---nested---");
+console.log(JSON.stringify({outer: {inner: 42}}, nestedReplacer));
+
+// Function replacer on array
+console.log("---array---");
+console.log(JSON.stringify([1, 2, 3], doubleNumbers));
+
+// Array replacer (whitelist)
+console.log("---whitelist---");
+console.log(JSON.stringify({a: 1, b: 2, c: 3}, ["a", "c"]));
+
+// Array replacer with nested object
+console.log("---nested-whitelist---");
+console.log(JSON.stringify({outer: {inner: 42}}, ["outer"]));
+
+// Array replacer with numeric keys
+console.log("---numeric-keys---");
+console.log(JSON.stringify({0: "zero", 1: "one", x: "ex"}, [0, "x"]));
+
+// Replacer receives correct keys for arrays
+console.log("---keys---");
+const keys = [];
+JSON.stringify([10, 20], function(k, v) {
+    keys.push(k);
+    return v;
+});
+console.log(keys.join(','));
+
+// Space parameter
+console.log("---space---");
+console.log(JSON.stringify({a: 1}, null, 2));

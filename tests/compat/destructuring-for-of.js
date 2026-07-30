@@ -1,0 +1,49 @@
+console.log("=== for-of array destructuring ===");
+const pairs = [[1, "a"], [2, "b"], [3, "c"]];
+for (const [num, letter] of pairs) {
+  console.log(num, letter);
+}
+
+console.log("=== for-of object destructuring ===");
+const users = [{ name: "Alice", age: 30 }, { name: "Bob", age: 25 }];
+for (const { name, age } of users) {
+  console.log(name, age);
+}
+
+console.log("=== for-of nested destructuring ===");
+const items = [{ x: { y: 10 } }, { x: { y: 20 } }];
+for (const { x: { y } } of items) {
+  console.log(y);
+}
+
+console.log("=== for-of nested array in array ===");
+const arr = [[1, [2, 3]], [4, [5, 6]]];
+for (const [a, [b, c]] of arr) {
+  console.log(a, b, c);
+}
+
+console.log("=== for-of with rename and default ===");
+const objs = [{ oldName: "hello" }, {}];
+for (const { oldName: renamed = "default" } of objs) {
+  console.log(renamed);
+}
+
+console.log("=== for-of with let destructuring ===");
+const entries = [[10, 20], [30, 40]];
+for (let [x, y] of entries) {
+  console.log(x + y);
+}
+
+console.log("=== for-of with index tracking ===");
+const coords = [[0, 0], [1, 1], [2, 2]];
+var i = 0;
+for (const [a, b] of coords) {
+  console.log(i, a, b);
+  i = i + 1;
+}
+
+console.log("=== for-of object destructuring with defaults ===");
+const configs = [{ timeout: 100 }, {}];
+for (const { timeout = 500 } of configs) {
+  console.log(timeout);
+}

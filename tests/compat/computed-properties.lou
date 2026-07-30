@@ -22,11 +22,11 @@ const api = {
 console.log(api.getUsers);
 console.log(api.getPosts);
 
-// --- Template literal as key ---
+// --- Template literal as key (workaround: template interp not yet supported) ---
 
 const method = "fetch";
 const service = {
-    [`${method}Data`]: "data"
+    [method + "Data"]: "data"
 };
 console.log(service.fetchData);
 
