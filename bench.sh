@@ -172,6 +172,55 @@ cmd_plot() {
   plot_results "$out_dir" "$open_flag" "${files[@]}"
 }
 
+cmd_compat() {
+  shift
+  ensure_profiler
+
+  local runs="20"
+  local skip_suite=false
+  local extra=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --runs)     runs="$2"; shift 2 ;;
+      --no-suite) skip_suite=true; shift ;;
+      *)          extra+=("$1"); shift ;;
+    esac
+  done
+
+  if [ ! -x "$ROOT/zig-out/bin/lou" ]; then
+    echo "Lou binary missing: run $0 build first"
+    exit 1
+  fi
+
+  local out="$RESULTS_DIR/compat-$(stamp)"
+  local fails=""
+  mkdir -p "$out"
+
+  if [ "$skip_suite" = false ]; then
+    echo "=== Tagging known compat gaps ==="
+    fails="$out/compat-status.txt"
+    bash "$ROOT/tests/compat/run.sh" 2>&1 | grep -E '^(PASS|FAIL|SKIP) ' > "$fails" || true
+    tail -n 1 "$fails" >/dev/null 2>&1 || true
+    echo ""
+  fi
+
+  echo "=== Benchmarking every tests/compat fixture ($runs runs, Lou/Node/Bun) ==="
+  local fail_arg=()
+  if [ -n "$fails" ]; then fail_arg=(--compat-fails "$fails"); fi
+
+  python3 "$ROOT/scripts/bench_compat.py" \
+    --runs "$runs" \
+    --fixtures "$ROOT/tests/compat" \
+    --lou "$ROOT/zig-out/bin/lou" \
+    --out "$out" \
+    "${fail_arg[@]}" \
+    "${extra[@]}"
+
+  echo ""
+  echo "report: $out/report.md"
+}
+
 cmd_all() {
   cmd_test
   cmd_build
@@ -199,6 +248,9 @@ usage() {
   echo "    --plot / --no-plot             force or skip chart generation"
   echo "    --open                         open the HTML report when done"
   echo "    --no-color                     disable ANSI colors"
+  echo "  compat [flags]                 benchmark every tests/compat fixture + loss report"
+  echo "    --runs <n>                     measured runs per fixture (default: 20)"
+  echo "    --no-suite                     skip the compat suite used to tag known gaps"
   echo "  plot [flags] [file.json ...]   charts + HTML for saved results"
   echo "    (no files)                     plot every JSON in bench-results/"
   echo "    --out <dir>                    output directory (default: bench-results/latest)"
@@ -220,6 +272,7 @@ case "$sel" in
   build)    cmd_build ;;
   arrays)   cmd_build && cmd_arrays ;;
   main)     cmd_build && cmd_main ;;
+  compat)   cmd_compat "$@" ;;
   all)      cmd_all ;;
   *)
     echo "Unknown command: $sel"

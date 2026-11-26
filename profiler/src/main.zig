@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    const runs: u32 = if (std.mem.eql(u8, args.mode, "quick")) 1 else 50;
+    const runs: u32 = args.runs orelse if (std.mem.eql(u8, args.mode, "quick")) 1 else 50;
 
     const results = try arena.alloc(ProgramResult, runtimes.len);
     for (runtimes, 0..) |rt, i| {
@@ -105,6 +105,7 @@ const Args = struct {
     command: enum { bench, help },
     file_path: []const u8 = "",
     mode: []const u8 = "quick",
+    runs: ?u32 = null,
     runtimes: std.ArrayList(RuntimeConfig),
     no_color: bool = false,
     save: ?[]const u8 = null,
@@ -132,7 +133,13 @@ fn parseArgs(it: *std.process.Args.Iterator, arena: std.mem.Allocator) !Args {
     var i: usize = if (cmd_is_flag) 0 else 1;
     while (i < args.items.len) : (i += 1) {
         const arg = args.items[i];
-        if (std.mem.eql(u8, arg, "--mode")) {
+        if (std.mem.eql(u8, arg, "--runs")) {
+            i += 1;
+            result.runs = if (i < args.items.len)
+                std.fmt.parseInt(u32, args.items[i], 10) catch null
+            else
+                null;
+        } else if (std.mem.eql(u8, arg, "--mode")) {
             i += 1;
             result.mode = if (i < args.items.len) args.items[i] else "quick";
         } else if (std.mem.eql(u8, arg, "--run")) {
@@ -191,6 +198,7 @@ fn printUsage(io: std.Io) !void {
         \\                          --run Bun:bun
         \\                        Default: Lou (lou run) + Node (node)
         \\  --mode quick|deep     Profiling depth (default: quick)
+        \\  --runs <n>            Override the number of measured runs
         \\  --no-color            Disable ANSI colors
         \\  --save <file.json>    Save results as JSON
         \\  --perf                Run perf stat for hardware counters

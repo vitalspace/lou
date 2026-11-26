@@ -73,9 +73,17 @@ zig build run -- run script.js
 ./bench.sh main                  # Lou vs Node on js/main.js (50 runs, deep)
 ./bench.sh arrays                # Lou vs Bun on js/arrays/arrays.js
 ./bench.sh benchmark --lou --node --bun --mode deep js/main.js
+./bench.sh compat                # every tests/compat fixture: Lou vs Node vs Bun
+./bench.sh compat --runs 30      # more samples per fixture (default: 20)
 ./bench.sh plot                  # charts for every saved result
 ./bench.sh plot --open           # ... and open the HTML report
 ```
+
+`compat` is the regression sweep: it runs every fixture in `tests/compat/`
+through the profiler, compares Lou's median against the fastest rival and writes
+`bench-results/compat-<stamp>/report.md` with the summary, each fixture where
+Lou is slower, near-ties, and fixtures that crash or exit non-zero. The raw
+medians live in `report.json` and `ratios.png` plots the comparison.
 
 Every run is saved to `bench-results/<timestamp>-<script>.json` and charted into
 `bench-results/latest/`:
@@ -180,7 +188,7 @@ Current status:
 
 - **1,044** Zig tests pass.
 - **85** JavaScript compatibility fixtures.
-- **51** produce byte-identical output to Node, **33** are known gaps, and **1** is skipped.
+- **54** produce byte-identical output to Node, **30** are known gaps, and **1** is skipped.
 - `console-output` and `console-inspection` match Node exactly, including ANSI output on a TTY.
 
 The compatibility runner strips ANSI before diffing, so color behavior is also

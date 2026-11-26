@@ -15,8 +15,8 @@ zig-out/
 bench-results/
 profiler/results.json
 
-# Chart tooling is source, not generated code
-!scripts/bench_plot.py
+# Benchmark tooling is source, not generated code
+!scripts/*.py
 js/generators/bench-generators.js
 specs/todos/profiler.md
 specs/tools/profiler.md
