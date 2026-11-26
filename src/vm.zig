@@ -1270,6 +1270,29 @@ pub const VM = struct {
         }
     }
 
+    /// Builtins report JS throws by setting env.throw_hit (the evaluator
+    /// protocol), while the VM executes try/catch with its own handler stack.
+    /// Call right after a builtin invocation: routes the pending throw to the
+    /// nearest handler and returns true (the call's result must be discarded),
+    /// or returns error.Thrown when there is no handler.
+    fn deliverBuiltinThrow(self: *VM) !bool {
+        if (!self.env.throw_hit) return false;
+        const val = self.env.throw_value;
+        self.env.throw_hit = false;
+        self.env.throw_value = .{ .void = {} };
+        if (self.exception_handlers.items.len > 0) {
+            const idx = self.exception_handlers.items.len - 1;
+            const handler = self.exception_handlers.orderedRemove(idx);
+            self.sp = handler.sp;
+            self.push(val);
+            self.ip = handler.handler_ip;
+            return true;
+        }
+        self.env.throw_hit = true;
+        self.env.throw_value = val;
+        return error.Thrown;
+    }
+
     /// Walk the prototype chain (max 16 levels deep to defend against
     /// accidental cycles) looking for property `name`. Returns the
     /// Value stored at the first link that has it, or null if neither
@@ -1899,7 +1922,9 @@ pub const VM = struct {
                         args.insert(self.env.allocator, 0, self.pop()) catch {};
                     }
                     if (self.env.getBuiltin(name)) |fnPtr| {
+                        self.env.throw_hit = false;
                         const r = fnPtr(args.items, self.env);
+                        if (try self.deliverBuiltinThrow()) continue;
                         switch (r) {
                             .value => |v| self.push(v),
                             .void => self.push(.{ .void = {} }),
@@ -1937,7 +1962,9 @@ pub const VM = struct {
                                 // arr.length() etc. — property, not a method
                                 return self.throwTypeError(m);
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -1951,7 +1978,9 @@ pub const VM = struct {
                                 self.push(.{ .void = {} });
                                 break;
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -1974,7 +2003,9 @@ pub const VM = struct {
                                     self.push(.{ .void = {} });
                                     break;
                                 };
+                                self.env.throw_hit = false;
                                 const r = md(args.items, self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -1992,7 +2023,9 @@ pub const VM = struct {
                                     self.push(.{ .void = {} });
                                     break;
                                 };
+                                self.env.throw_hit = false;
                                 const r = md(args.items, self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -2010,7 +2043,9 @@ pub const VM = struct {
                                     self.push(.{ .void = {} });
                                     break;
                                 };
+                                self.env.throw_hit = false;
                                 const r = md(args.items, self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -2053,7 +2088,9 @@ pub const VM = struct {
                                             self.push(.{ .void = {} });
                                             continue;
                                         };
+                                        self.env.throw_hit = false;
                                         const r = md(args.items, self.env);
+                                        if (try self.deliverBuiltinThrow()) continue;
                                         switch (r) {
                                             .value => |v| self.push(v),
                                             .void => self.push(.{ .void = {} }),
@@ -2087,7 +2124,9 @@ pub const VM = struct {
                             const md = bObj.getMethod(m) orelse {
                                 return self.throwTypeError(m);
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2105,7 +2144,9 @@ pub const VM = struct {
                                 self.push(.{ .void = {} });
                                 break;
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2123,7 +2164,9 @@ pub const VM = struct {
                                 self.push(.{ .void = {} });
                                 break;
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2141,7 +2184,9 @@ pub const VM = struct {
                                 self.push(.{ .void = {} });
                                 break;
                             };
+                            self.env.throw_hit = false;
                             const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2173,7 +2218,9 @@ pub const VM = struct {
                                 self.push(.{ .void = {} });
                                 break;
                             };
+                            self.env.throw_hit = false;
                             const r = md(&.{}, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2189,7 +2236,9 @@ pub const VM = struct {
                                 break;
                             };
                             var tmp = [_]Value{obj};
+                            self.env.throw_hit = false;
                             const r = md(tmp[0..], self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2213,7 +2262,9 @@ pub const VM = struct {
                                     break;
                                 };
                                 var tmp = [_]Value{obj};
+                                self.env.throw_hit = false;
                                 const r = md(tmp[0..], self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -2232,7 +2283,9 @@ pub const VM = struct {
                                     break;
                                 };
                                 var tmp = [_]Value{obj};
+                                self.env.throw_hit = false;
                                 const r = md(tmp[0..], self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -2250,7 +2303,9 @@ pub const VM = struct {
                                     break;
                                 };
                                 var tmp = [_]Value{obj};
+                                self.env.throw_hit = false;
                                 const r = md(tmp[0..], self.env);
+                                if (try self.deliverBuiltinThrow()) continue;
                                 switch (r) {
                                     .value => |v| self.push(v),
                                     .void => self.push(.{ .void = {} }),
@@ -2293,7 +2348,9 @@ pub const VM = struct {
                                             self.push(.{ .void = {} });
                                             continue;
                                         };
+                                        self.env.throw_hit = false;
                                         const r = md(tmp[0..], self.env);
+                                        if (try self.deliverBuiltinThrow()) continue;
                                         switch (r) {
                                             .value => |v| self.push(v),
                                             .void => self.push(.{ .void = {} }),
@@ -2316,7 +2373,9 @@ pub const VM = struct {
                                 break;
                             };
                             var tmp = [_]Value{obj};
+                            self.env.throw_hit = false;
                             const r = md(tmp[0..], self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2334,7 +2393,9 @@ pub const VM = struct {
                                 break;
                             };
                             var tmp = [_]Value{obj};
+                            self.env.throw_hit = false;
                             const r = md(tmp[0..], self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2352,7 +2413,9 @@ pub const VM = struct {
                                 break;
                             };
                             var tmp = [_]Value{obj};
+                            self.env.throw_hit = false;
                             const r = md(tmp[0..], self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),
@@ -2370,7 +2433,9 @@ pub const VM = struct {
                                 break;
                             };
                             var tmp = [_]Value{obj};
+                            self.env.throw_hit = false;
                             const r = md(tmp[0..], self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
                             switch (r) {
                                 .value => |v| self.push(v),
                                 .void => self.push(.{ .void = {} }),

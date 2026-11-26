@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 13:52:34 |
-| Commit | `a35d787` |
+| Snapshot | 2026-11-26 14:15:04 |
+| Commit | `9950d55` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 62 |
-| FAIL | 23 |
+| PASS | 63 |
+| FAIL | 22 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,8 +19,8 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 62 |
-| **FAIL** | 23 |
+| **PASS** | 63 |
+| **FAIL** | 22 |
 | SKIP (sin .js) | 1 |
 | Specs pendientes | 44 |
 | Specs hechos | 61 |
@@ -30,9 +30,9 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 1. `bigint-prototype.lou` - FAIL
 
 - exit: Lou 0 / Node 0
-- Primera divergencia (línea 19, 48 vs 52 líneas):
-  - Lou : `--- Distinción toString vs console.log ---`
-  - Node: `caught: toString() radix argument must be between 2 and 36`
+- Primera divergencia (línea 26, 52 vs 52 líneas):
+  - Lou : `+ empty: undefined`
+  - Node: `+ empty: 42`
 
 ### 2. `boolean.lou` - FAIL
 
@@ -44,14 +44,14 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 3. `call-apply-bind.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 9 vs 16 líneas):
+- Primera divergencia (línea 1, 3 vs 16 líneas):
   - Lou : `undefined`
   - Node: `Hello Alice`
 
 ### 4. `closure-capture.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 23 vs 7 líneas):
+- Primera divergencia (línea 2, 2 vs 7 líneas):
   - Lou : `error: UndefinedVariable`
   - Node: `1`
 
@@ -65,7 +65,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 6. `default-parameters.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 15 vs 13 líneas):
+- Primera divergencia (línea 1, 1 vs 13 líneas):
   - Lou : `error: ExpectedComma`
   - Node: `0`
 
@@ -79,64 +79,64 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 8. `error-objects.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 5, 14 vs 62 líneas):
+- Primera divergencia (línea 5, 5 vs 62 líneas):
   - Lou : `error: Thrown`
   - Node: `instanceof Error: true`
 
 ### 9. `finalization-registry.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 9, 21 vs 15 líneas):
-  - Lou : `register primitive: no error`
+- Primera divergencia (línea 9, 9 vs 15 líneas):
+  - Lou : `error: Thrown`
   - Node: `register primitive: true`
 
 ### 10. `for-var-no-init.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 4, 4 vs 4 líneas):
-  - Lou : `const-no-init: false`
+  - Lou : `const-no-init: [object]`
   - Node: `const-no-init: true`
 
 ### 11. `getter-setter.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 25 vs 6 líneas):
+- Primera divergencia (línea 1, 1 vs 6 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `42`
 
 ### 12. `globalThis.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 10 vs 6 líneas):
+- Primera divergencia (línea 2, 4 vs 6 líneas):
   - Lou : `self_ref: false`
   - Node: `self_ref: true`
 
 ### 13. `in-operator.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 10 vs 8 líneas):
+- Primera divergencia (línea 1, 1 vs 8 líneas):
   - Lou : `error: Thrown`
   - Node: `true`
 
 ### 14. `instanceof-operator.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 11 vs 15 líneas):
+- Primera divergencia (línea 2, 2 vs 15 líneas):
   - Lou : `error: Thrown`
   - Node: `true`
 
 ### 15. `iterator-protocol.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 25 vs 10 líneas):
+- Primera divergencia (línea 1, 1 vs 10 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `array sum: 6`
 
 ### 16. `json-parse.lou` - FAIL
 
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 17, 23 vs 23 líneas):
-  - Lou : `FAIL(\x): no throw`
+- exit: Lou 1 / Node 0
+- Primera divergencia (línea 17, 17 vs 23 líneas):
+  - Lou : `error: Thrown`
   - Node: `ok(\x): true / SyntaxError`
 
 ### 17. `let-per-iteration.lou` - FAIL
@@ -146,45 +146,38 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
   - Lou : `3 3 3`
   - Node: `0 1 2`
 
-### 18. `map-groupby.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 19, 19 vs 20 líneas):
-  - Lou : `---Throw did not propagate---`
-  - Node: `---Throw propagated---`
-
-### 19. `prototype-chain.lou` - FAIL
+### 18. `prototype-chain.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 4, 9 vs 9 líneas):
   - Lou : `false`
   - Node: `true`
 
-### 20. `regex-literal.lou` - FAIL
+### 19. `regex-literal.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 36 vs 5 líneas):
+- Primera divergencia (línea 1, 1 vs 5 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `--- regex literal syntax ---`
 
-### 21. `regex-properties.lou` - FAIL
+### 20. `regex-properties.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 19 vs 19 líneas):
   - Lou : `undefined`
   - Node: `hello`
 
-### 22. `switch-case.lou` - FAIL
+### 21. `switch-case.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 17 vs 9 líneas):
+- Primera divergencia (línea 1, 1 vs 9 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `two`
 
-### 23. `weakref.lou` - FAIL
+### 22. `weakref.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 5, 20 vs 12 líneas):
+- Primera divergencia (línea 5, 11 vs 12 líneas):
   - Lou : `no throw for number`
   - Node: `TypeError for number: true`
 
@@ -196,6 +189,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `async-generators.md` | pendiente | `async-generators` | sin test |
 | `bigint-prototype-template.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `bigint-prototype` | FAIL (bigint-prototype) |
 | `boolean-object.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `boolean` | FAIL (boolean) |
+| `builtin-throws.md` | pendiente — detectado 2026-11-26 mientras se arreglaba `map-groupby` | — | sin test |
 | `call-apply-bind.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `call-apply-bind` | FAIL (call-apply-bind) |
 | `classes.md` | pendiente | `classes` | sin test |
 | `date-object-regression.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | FAIL (date-object) |
@@ -212,7 +206,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `json-parse.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `json-parse` | FAIL (json-parse) |
 | `let-per-iteration.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `let-per-iteration` | FAIL (let-per-iteration) |
 | `lexer-regex-literals.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-literal` | FAIL (regex-literal) |
-| `map-groupby.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `map-groupby` | FAIL (map-groupby) |
 | `object-key-order.md` | pendiente — detectado 2026-11-26 mientras se arreglaba `for-in-order` | — | sin test |
 | `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |
