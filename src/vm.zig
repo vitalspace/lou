@@ -2686,7 +2686,8 @@ pub const VM = struct {
                         .boolean => "boolean",
                         .void => "undefined",
                         .null => "object",
-                        .array, .js_object => "object",
+                        .array => "object",
+                        .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null) "function" else "object",
                         .function, .closure, .generator => "function",
                         .object => "object",
                         .symbol => "symbol",
@@ -2955,6 +2956,7 @@ fn toNumber(v: Value) f64 {
         .void, .hole => std.math.nan(f64),
         .string => |s| stringToNumber(s),
         .big_int => |b| if (b.toI64()) |i| @floatFromInt(i) else 0.0,
+        .js_object => coercion.dateTimestamp(v) orelse 0.0,
         else => 0.0,
     };
 }

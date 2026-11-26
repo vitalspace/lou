@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 16:07:19 |
-| Commit | `2616b1e` |
+| Snapshot | 2026-11-26 16:18:40 |
+| Commit | `04c80ac` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 73 |
-| FAIL | 12 |
+| PASS | 75 |
+| FAIL | 10 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,10 +19,10 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 73 |
-| **FAIL** | 12 |
+| **PASS** | 75 |
+| **FAIL** | 10 |
 | SKIP (sin .js) | 1 |
-| Specs pendientes | 40 |
+| Specs pendientes | 38 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -48,63 +48,49 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
   - Lou : `undefined`
   - Node: `Hello Alice`
 
-### 4. `date-object.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 17, 21 vs 21 líneas):
-  - Lou : `0`
-  - Node: `31536000000`
-
-### 5. `default-parameters.lou` - FAIL
+### 4. `default-parameters.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 13 líneas):
   - Lou : `error: ExpectedComma`
   - Node: `0`
 
-### 6. `getter-setter.lou` - FAIL
+### 5. `getter-setter.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 6 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `42`
 
-### 7. `iterator-protocol.lou` - FAIL
+### 6. `iterator-protocol.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 10 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `array sum: 6`
 
-### 8. `json-parse.lou` - FAIL
+### 7. `json-parse.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 21, 23 vs 23 líneas):
   - Lou : `ok(\u  ): true / SyntaxError`
   - Node: `ok(\u): true / SyntaxError`
 
-### 9. `prototype-chain.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 5, 9 vs 9 líneas):
-  - Lou : `object`
-  - Node: `function`
-
-### 10. `regex-literal.lou` - FAIL
+### 8. `regex-literal.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 5 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `--- regex literal syntax ---`
 
-### 11. `regex-properties.lou` - FAIL
+### 9. `regex-properties.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 19 vs 19 líneas):
   - Lou : `undefined`
   - Node: `hello`
 
-### 12. `weakref.lou` - FAIL
+### 10. `weakref.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 5, 12 vs 12 líneas):
@@ -122,8 +108,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `builtin-throws.md` | pendiente — detectado 2026-11-26 mientras se arreglaba `map-groupby` | — | sin test |
 | `call-apply-bind.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `call-apply-bind` | FAIL (call-apply-bind) |
 | `classes.md` | pendiente | `classes` | sin test |
-| `date-object-regression.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | FAIL (date-object) |
-| `date-object.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | FAIL (date-object) |
+| `date-object-regression.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | PASS |
 | `default-parameters-compat.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `default-parameters` | FAIL (default-parameters) |
 | `default-parameters.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `default-parameters` | FAIL (default-parameters) |
 | `error-objects.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `error-objects` | PASS |
@@ -140,7 +125,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `object-static-methods.md` | pendiente | — | sin test |
 | `optional-chaining.md` | pendiente | `optional-chaining` | sin test |
 | `promise-withresolvers.md` | pendiente | `promise-withresolvers` | sin test |
-| `prototype-chain.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `prototype-chain` | FAIL (prototype-chain) |
 | `proxy.md` | pendiente | `proxy` | sin test |
 | `reflect.md` | pendiente | `reflect` | sin test |
 | `regex-properties.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-properties` | FAIL (regex-properties) |

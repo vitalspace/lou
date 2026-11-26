@@ -35,6 +35,22 @@ pub fn stringToNumber(s: []const u8) f64 {
     return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 
+
+/// Numeric value of a `Date` object (`valueOf`), used by ToNumber coercion.
+/// Returns null for anything that is not a js_object tagged `@@type=Date`.
+pub fn dateTimestamp(value: Value) ?f64 {
+    if (value != .js_object) return null;
+    const obj = value.js_object;
+    const tag = obj.properties.get("@@type") orelse return null;
+    if (tag != .string or !std.mem.eql(u8, tag.string, "Date")) return null;
+    const ts = obj.properties.get("timestamp_ms") orelse return null;
+    return switch (ts) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => null,
+    };
+}
+
 /// Append the ECMAScript `ToString` representation of a primitive value.
 pub fn appendToString(
     allocator: std.mem.Allocator,

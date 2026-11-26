@@ -7,6 +7,7 @@ const optimizations = @import("optimizations.zig");
 const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
 const throwError = @import("./builtins/error.zig").throwError;
 const coercion = @import("coercion.zig");
+const objectPrototypeMod = @import("./builtins/object/prototype.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -1388,6 +1389,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         .void => std.math.nan(f64),
                         .boolean => |bv| if (bv) 1.0 else 0.0,
                         .string => |s| std.fmt.parseFloat(f64, s) catch std.math.nan(f64),
+                        .js_object => coercion.dateTimestamp(val) orelse std.math.nan(f64),
                         else => std.math.nan(f64),
                     };
                 }
@@ -2819,7 +2821,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .void => "undefined",
                 .null => "object",
                 .array => "object",
-                .js_object => "object",
+                .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null) "function" else "object",
                 .function => "function",
                 .closure => "function",
                 .object => "object",
@@ -3245,8 +3247,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             } else if (value == .iterator) {
                 return .{ .void = {} };
             } else if (value == .js_object) {
-                if (value.js_object.properties.get(m.property)) |v| {
-                    return v;
+                var cur: ?*ast.ObjectValue = value.js_object;
+                while (cur) |o| {
+                    if (o.properties.get(m.property)) |v| return v;
+                    cur = o.prototype;
                 }
                 return .{ .void = {} };
             } else {
@@ -5326,4 +5330,25 @@ test "instanceof operator - builtins and primitives" {
     try std.testing.expect(!(try parseAndEvaluate("'hi' instanceof String", &env_)).boolean);
     try std.testing.expect(!(try parseAndEvaluate("null instanceof Object", &env_)).boolean);
     try std.testing.expect(!(try parseAndEvaluate("undefined instanceof Object", &env_)).boolean);
+}
+
+test "typeof Object.prototype method is function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+    env_.object_prototype = try objectPrototypeMod.createObjectPrototype(allocator, &env_.objects);
+
+    const result = try parseAndEvaluate("typeof ({}).toString", &env_);
+    try std.testing.expect(result == .string);
+    try std.testing.expectEqualStrings("function", result.string);
+}
+
+test "Date objects coerce to timestamps in arithmetic" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluate("new Date(1000) - new Date(500)", &env_);
+    try std.testing.expect(result == .float);
+    try std.testing.expectEqual(@as(f64, 500), result.float);
 }
