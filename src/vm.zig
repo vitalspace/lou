@@ -131,6 +131,12 @@ pub const Chunk = struct {
         self.w8(0);
         return self.code.items.len - 2;
     }
+    fn ptchTo(self: *Chunk, pos: usize, target: usize) void {
+        const d = target - pos - 2;
+        self.code.items[pos] = @truncate(d >> 8);
+        self.code.items[pos + 1] = @truncate(d & 0xff);
+    }
+
     fn ptch(self: *Chunk, pos: usize) void {
         const d = self.code.items.len - pos - 2;
         self.code.items[pos] = @truncate(d >> 8);
@@ -169,6 +175,7 @@ pub const Compiler = struct {
         use_forward_continue: bool,
         label: ?[]const u8 = null,
         is_block: bool = false,
+        is_switch: bool = false,
     };
 
     pub fn init(env: *Environment) Compiler {
@@ -302,7 +309,8 @@ pub const Compiler = struct {
                         var i: usize = self.loop_stack.items.len;
                         while (i > 0) {
                             i -= 1;
-                            if (!self.loop_stack.items[i].is_block) {
+                            const e = self.loop_stack.items[i];
+                            if (!e.is_block or e.is_switch) {
                                 idx = i;
                                 break;
                             }
@@ -423,6 +431,7 @@ pub const Compiler = struct {
                     self.popLoop();
                 }
             },
+            .SwitchStatement => self.switchStmt(n),
             .FunctionDeclaration => self.fnDecl(n),
             .GeneratorDeclaration => self.genDecl(n),
             .ImportStatement => {
@@ -444,6 +453,71 @@ pub const Compiler = struct {
                 self.c.op(.pop);
             },
         }
+    }
+
+
+    fn switchStmt(self: *Compiler, n: *ast.Node) void {
+        const s = n.SwitchStatement;
+        self.expr(s.discriminant);
+
+        // Hidden binding for the discriminant; unique per switch site.
+        const hidden = std.fmt.allocPrint(self.env.allocator, "__switch_disc_{d}", .{self.c.code.items.len}) catch return;
+        self.env.owned_strings.append(self.env.allocator, hidden) catch {};
+        self.c.op2w(.def_global, self.c.emitS(hidden));
+
+        self.loop_stack.append(self.env.allocator, .{
+            .start = self.c.code.items.len,
+            .break_patches = std.ArrayList(usize).initCapacity(self.env.allocator, 4) catch return,
+            .continue_patches = std.ArrayList(usize).initCapacity(self.env.allocator, 4) catch return,
+            .has_iterator = false,
+            .use_forward_continue = false,
+            .is_block = true,
+            .is_switch = true,
+        }) catch return;
+
+        var body_jumps = std.ArrayList(?usize).initCapacity(self.env.allocator, s.cases.len) catch return;
+        defer body_jumps.deinit(self.env.allocator);
+
+        // Test every non-default case in source order; the first match jumps
+        // to its body. Subsequent case expressions are not evaluated.
+        for (s.cases) |case_node| {
+            const sc = switch (case_node.*) {
+                .SwitchCase => |sc| sc,
+                else => {
+                    body_jumps.append(self.env.allocator, null) catch {};
+                    continue;
+                },
+            };
+            if (sc.test_expr) |te| {
+                self.c.op2w(.get_global, self.c.emitS(hidden));
+                self.expr(te);
+                self.c.op(.strict_eq);
+                const skip = self.c.jmp(.jump_if_false);
+                const jump_pos = self.c.jmp(.jump);
+                body_jumps.append(self.env.allocator, jump_pos) catch {};
+                self.c.ptch(skip);
+            } else {
+                body_jumps.append(self.env.allocator, null) catch {};
+            }
+        }
+
+        // No case matched: enter at `default` if present, otherwise skip all bodies.
+        const after_tests = self.c.jmp(.jump);
+        var has_default = false;
+
+        for (s.cases, 0..) |case_node, i| {
+            const body_pos = self.c.code.items.len;
+            if (body_jumps.items[i]) |jump_pos| {
+                self.c.ptchTo(jump_pos, body_pos);
+            } else {
+                self.c.ptchTo(after_tests, body_pos);
+                has_default = true;
+            }
+            self.stmt(case_node.SwitchCase.consequent);
+        }
+
+        if (!has_default) self.c.ptch(after_tests);
+        self.popLoop();
     }
 
     fn decl(self: *Compiler, n: *ast.Node) void {
@@ -3007,6 +3081,7 @@ fn valStrictEq(l: Value, r: Value) bool {
     return switch (l) {
         .integer => |li| switch (r) {
             .integer => |ri| li == ri,
+            .float => |rf| @as(f64, @floatFromInt(li)) == rf,
             else => false,
         },
         .float => |lf| switch (r) {

@@ -163,6 +163,7 @@ pub const Parser = struct {
                 .For => break :stmt try this.parseForLoop(),
                 .While => break :stmt try this.parseWhileLoop(),
                 .Do => break :stmt try this.parseDoWhileLoop(),
+                .Switch => break :stmt try this.parseSwitchStatement(),
                 .If => break :stmt try this.parseIfStatement(),
                 .Return => break :stmt try this.parseReturnStatement(),
                 .Break => break :stmt try this.parseBreakStatement(),
@@ -1824,6 +1825,82 @@ pub const Parser = struct {
             .condition = condition,
             .consequence = consequence,
             .alternative = alternative,
+        } };
+        return node;
+    }
+
+
+    fn parseSwitchStatement(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'switch'
+        if (this.current_token.type != .LParen) {
+            return error.ExpectedLParen;
+        }
+        this.nextToken(); // consume '('
+
+        const discriminant = try this.parseCommaExpression();
+
+        if (this.current_token.type != .RParen) {
+            ast.freeAst(this.allocator, discriminant);
+            return error.ExpectedRParen;
+        }
+        this.nextToken(); // consume ')'
+
+        if (this.current_token.type != .LBrace) {
+            ast.freeAst(this.allocator, discriminant);
+            return error.ExpectedLBrace;
+        }
+        this.nextToken(); // consume '{'
+
+        var cases = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+        defer cases.deinit(this.allocator);
+
+        while (this.current_token.type != .RBrace and this.current_token.type != .EOF) {
+            var test_expr: ?*ast.Node = null;
+            if (this.current_token.type == .Case) {
+                this.nextToken(); // consume 'case'
+                test_expr = try this.parseCommaExpression();
+            } else if (this.current_token.type == .Default) {
+                this.nextToken(); // consume 'default'
+            } else {
+                ast.freeAst(this.allocator, discriminant);
+                return error.UnexpectedToken;
+            }
+
+            if (this.current_token.type != .Colon) {
+                if (test_expr) |te| ast.freeAst(this.allocator, te);
+                ast.freeAst(this.allocator, discriminant);
+                return error.ExpectedColon;
+            }
+            this.nextToken(); // consume ':'
+
+            var statements = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 4);
+            defer statements.deinit(this.allocator);
+            while (this.current_token.type != .Case and
+                this.current_token.type != .Default and
+                this.current_token.type != .RBrace and
+                this.current_token.type != .EOF)
+            {
+                try statements.append(this.allocator, try this.parseStatement());
+            }
+
+            const consequent = try this.allocator.create(ast.Node);
+            consequent.* = .{ .BlockStatement = .{ .statements = try statements.toOwnedSlice(this.allocator) } };
+
+            const case_node = try this.allocator.create(ast.Node);
+            case_node.* = .{ .SwitchCase = .{ .test_expr = test_expr, .consequent = consequent } };
+            try cases.append(this.allocator, case_node);
+        }
+
+        if (this.current_token.type != .RBrace) {
+            ast.freeAst(this.allocator, discriminant);
+            return error.ExpectedRBrace;
+        }
+        this.nextToken(); // consume '}'
+
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .SwitchStatement = .{
+            .discriminant = discriminant,
+            .cases = try cases.toOwnedSlice(this.allocator),
         } };
         return node;
     }

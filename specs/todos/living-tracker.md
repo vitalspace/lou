@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 15:16:47 |
-| Commit | `0841998` |
+| Snapshot | 2026-11-26 15:42:36 |
+| Commit | `a9fe04d` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 66 |
-| FAIL | 19 |
+| PASS | 67 |
+| FAIL | 18 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,10 +19,10 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 66 |
-| **FAIL** | 19 |
+| **PASS** | 67 |
+| **FAIL** | 18 |
 | SKIP (sin .js) | 1 |
-| Specs pendientes | 42 |
+| Specs pendientes | 41 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -146,14 +146,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
   - Lou : `undefined`
   - Node: `hello`
 
-### 18. `switch-case.lou` - FAIL
-
-- exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 17 vs 9 líneas):
-  - Lou : `error: UnexpectedToken`
-  - Node: `two`
-
-### 19. `weakref.lou` - FAIL
+### 18. `weakref.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 5, 20 vs 12 líneas):
@@ -199,7 +192,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `string-unicode-case.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |
-| `switch-case.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `switch-case` | FAIL (switch-case) |
 | `template-literal-interpolation.md` | NOT IMPLEMENTED | `template-literal-interpolation` | sin test |
 | `temporal-dead-zone.md` | NOT IMPLEMENTED | `temporal-dead-zone` | sin test |
 | `temporal.md` | pendiente | `temporal` | sin test |

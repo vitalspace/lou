@@ -3065,12 +3065,49 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         },
         .EmptyStatement => return .{ .void = {} },
         .SwitchStatement => |s| {
-            _ = try evaluate(s.discriminant, env);
-            for (s.cases) |_| {
-                // Fallback: just return after first case
-                return .{ .void = {} };
+            const disc = try evaluate(s.discriminant, env);
+
+            // First pass: evaluate case tests in source order until one matches
+            // (tests after the matching case are not evaluated). `default` only
+            // records its position; later cases are still tested.
+            var start: ?usize = null;
+            var default_idx: ?usize = null;
+            for (s.cases, 0..) |case_node, i| {
+                if (start != null) break;
+                if (case_node.* != .SwitchCase) continue;
+                const sc = case_node.SwitchCase;
+                if (sc.test_expr) |te| {
+                    const test_val = try evaluate(te, env);
+                    if (valuesEqual(disc, test_val)) start = i;
+                } else {
+                    default_idx = i;
+                }
             }
-            return .{ .void = {} };
+
+            const begin = start orelse default_idx orelse return .{ .void = {} };
+            const my_label = env.pending_loop_label;
+            env.pending_loop_label = null;
+
+            var result: ast.Value = .{ .void = {} };
+            var i = begin;
+            while (i < s.cases.len) : (i += 1) {
+                const case_node = s.cases[i];
+                if (case_node.* != .SwitchCase) continue;
+                result = try evaluate(case_node.SwitchCase.consequent, env);
+                if (env.yield_hit) break;
+                if (env.return_hit) break;
+                if (env.break_hit) {
+                    const matches = (env.break_label == null) or
+                        (my_label != null and std.mem.eql(u8, env.break_label.?, my_label.?));
+                    if (matches) {
+                        env.break_hit = false;
+                        env.break_label = null;
+                    }
+                    break;
+                }
+                if (env.continue_hit) break;
+            }
+            return result;
         },
         .SwitchCase => return .{ .void = {} },
         .ImportMetaExpression => {
