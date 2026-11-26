@@ -165,6 +165,9 @@ pub fn main(init: std.process.Init) !void {
     try env_.objects.append(allocator, global_this_obj);
     env_.global_this = global_this_obj;
     try global_this_obj.properties.put("globalThis", .{ .js_object = global_this_obj });
+    try global_this_obj.properties.put("NaN", .{ .float = std.math.nan(f64) });
+    try global_this_obj.properties.put("Infinity", .{ .float = std.math.inf(f64) });
+    try global_this_obj.properties.put("undefined", .{ .void = {} });
     try env_.setConstant("globalThis", .{ .js_object = global_this_obj });
 
     if (use_vm) {

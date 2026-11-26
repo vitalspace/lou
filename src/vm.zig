@@ -1854,6 +1854,12 @@ pub const VM = struct {
                         self.push(.{ .object = @ptrCast(obj) });
                     } else if (self.env.getBuiltin(n)) |_| {
                         self.push(.{ .void = {} });
+                    } else if (self.env.globalObject()) |g| {
+                        if (g.properties.get(n)) |v| {
+                            self.push(v);
+                        } else {
+                            return error.UndefinedVariable;
+                        }
                     } else {
                         return error.UndefinedVariable;
                     }
@@ -2080,6 +2086,9 @@ pub const VM = struct {
                     const obj = self.pop();
                     if (obj == .js_object) {
                         obj.js_object.properties.put(p, val) catch {};
+                        if (self.env.globalObject()) |g| {
+                            if (g == obj.js_object) self.env.setGlobalProperty(p, val);
+                        }
                         self.push(val);
                     } else {
                         self.push(.{ .void = {} });

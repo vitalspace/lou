@@ -687,6 +687,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
             const val = try evaluate(p.value, env);
             try object_val.js_object.properties.put(p.key, val);
+            if (env.globalObject()) |g| {
+                if (g == object_val.js_object) env.setGlobalProperty(p.key, val);
+            }
             return val;
         },
         .Identifier => |i| {
@@ -696,6 +699,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return value;
             } else if (env.getBuiltinObject(i.name)) |obj| {
                 return .{ .object = @ptrCast(obj) };
+            } else if (env.globalObject()) |g| {
+                if (g.properties.get(i.name)) |v| return v;
+                return error.UndefinedVariable;
             } else {
                 return error.UndefinedVariable;
             }
@@ -707,6 +713,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     if (obj_val != .js_object) return error.InvalidAssignment;
                     const val = try evaluate(b.right, env);
                     try obj_val.js_object.properties.put(b.left.MemberAccess.property, val);
+                    if (env.globalObject()) |g| {
+                        if (g == obj_val.js_object) env.setGlobalProperty(b.left.MemberAccess.property, val);
+                    }
                     return val;
                 }
                 if (b.left.* == .ArrayIndex) {
@@ -734,6 +743,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             else => return error.InvalidIndex,
                         };
                         try obj_val.js_object.properties.put(key, val);
+                        if (env.globalObject()) |g| {
+                            if (g == obj_val.js_object) env.setGlobalProperty(key, val);
+                        }
                         return val;
                     }
                     if (obj_val == .array) {
@@ -2722,6 +2734,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     const obj_val = try evaluate(m.object, env);
                     if (obj_val == .js_object) {
                         _ = obj_val.js_object.properties.remove(m.property);
+                        if (env.globalObject()) |g| {
+                            if (g == obj_val.js_object) env.removeGlobalProperty(m.property);
+                        }
                     }
                     return .{ .boolean = true };
                 },
@@ -2748,6 +2763,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             else => return error.InvalidIndex,
                         };
                         _ = obj_val.js_object.properties.remove(key);
+                        if (env.globalObject()) |g| {
+                            if (g == obj_val.js_object) env.removeGlobalProperty(key);
+                        }
                     } else if (obj_val == .array) {
                         const index: i64 = switch (idx_val) {
                             .integer => |i| i,

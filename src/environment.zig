@@ -435,6 +435,7 @@ pub const Environment = struct {
             return error.ConstantReassignment;
         }
         try env.values.put(name, value);
+        if (env.outer == null) env.syncExistingGlobalProperty(name, value);
     }
 
     pub fn setLet(self: *Environment, name: []const u8, value: ast.Value) !void {
@@ -663,6 +664,7 @@ pub const Environment = struct {
                 return error.ConstantReassignment;
             }
             try target.values.put(name, value);
+            if (target.outer == null) target.syncExistingGlobalProperty(name, value);
         } else {
             return error.UndefinedVariable;
         }
@@ -692,4 +694,62 @@ pub const Environment = struct {
         }
         return false;
     }
+
+    /// The `globalThis` object when the CLI initialized this chain.
+    pub fn globalObject(self: *Environment) ?*ast.ObjectValue {
+        return self.root().global_this;
+    }
+
+    /// Mirror a root binding into the `globalThis` object.
+    fn syncGlobalProperty(self: *Environment, name: []const u8, value: ast.Value) void {
+        const g = self.global_this orelse return;
+        g.properties.put(name, value) catch {};
+    }
+
+    /// Keep an existing `globalThis` property in sync with its binding.
+    /// Declarations do not create new global-object properties (Node module
+    /// semantics), but assignments to names created via `globalThis.x` must
+    /// update both views.
+    fn syncExistingGlobalProperty(self: *Environment, name: []const u8, value: ast.Value) void {
+        const g = self.global_this orelse return;
+        if (g.properties.contains(name)) g.properties.put(name, value) catch {};
+    }
+
+    /// Remove a `globalThis` property and its binding (e.g. `delete globalThis.x`).
+    pub fn removeGlobalProperty(self: *Environment, name: []const u8) void {
+        const rt = self.root();
+        if (rt.global_this) |g| _ = g.properties.remove(name);
+        if (!rt.constants.contains(name)) _ = rt.values.remove(name);
+    }
+
+    /// Write a property on the global object and expose it as a binding.
+    pub fn setGlobalProperty(self: *Environment, name: []const u8, value: ast.Value) void {
+        const rt = self.root();
+        if (!rt.constants.contains(name)) {
+            rt.values.put(name, value) catch {};
+        }
+        if (rt.global_this) |g| g.properties.put(name, value) catch {};
+    }
 };
+
+test "globalThis writes are visible as bindings" {
+    const allocator = std.testing.allocator;
+    var env = try Environment.init(allocator, null);
+    defer env.deinit();
+
+    const obj = try ast.ObjectValue.init(allocator);
+    try env.objects.append(allocator, obj);
+    env.global_this = obj;
+
+    env.setGlobalProperty("g", .{ .integer = 7 });
+    try std.testing.expectEqual(@as(?ast.Value, .{ .integer = 7 }), env.get("g"));
+    try std.testing.expect(obj.properties.get("g") != null);
+
+    env.setGlobalProperty("g", .{ .integer = 9 });
+    try std.testing.expectEqual(@as(?ast.Value, .{ .integer = 9 }), env.get("g"));
+    try std.testing.expectEqual(@as(?ast.Value, .{ .integer = 9 }), obj.properties.get("g"));
+
+    env.removeGlobalProperty("g");
+    try std.testing.expect(env.get("g") == null);
+    try std.testing.expect(obj.properties.get("g") == null);
+}
