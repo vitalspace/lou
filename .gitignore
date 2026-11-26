@@ -2,8 +2,6 @@ zig-out/**
 .zig-cache/
 http/
 optimizations/
-bench.sh
-profiler/
 js/*.bak
 *.bak2
 *.original
@@ -12,3 +10,13 @@ out*.txt
 minimal-error.lou
 .zig-cache/
 zig-out/
+
+# Benchmark output (generated JSON + charts)
+bench-results/
+profiler/results.json
+
+# Chart tooling is source, not generated code
+!scripts/bench_plot.py
+js/generators/bench-generators.js
+specs/todos/profiler.md
+specs/tools/profiler.md

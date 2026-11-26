@@ -1,0 +1,11 @@
+.{
+    .name = .profiler,
+    .version = "0.1.0",
+    .fingerprint = 0xfc37b5a6e6f59f33,
+    .minimum_zig_version = "0.16.0-dev.2821+3edaef9e0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
