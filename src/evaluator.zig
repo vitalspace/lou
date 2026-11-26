@@ -1739,13 +1739,6 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                 }
             }
-            debugPrint("[OPTIMIZATION] Trying optimizeSimpleForLoop, pre_limit={?}\n", .{pre_limit});
-            if (try optimizations.optimizeSimpleForLoop(f, env, pre_limit)) |result| {
-                debugPrint("[OPTIMIZATION] SUCCESS!\n", .{});
-                return result;
-            }
-            debugPrint("[OPTIMIZATION] FAILED - falling through\n", .{});
-
             const is_let_init = if (f.init) |init| blk: {
                 if (init.* == .LetDeclaration) break :blk true;
                 if (init.* == .BlockStatement) {
@@ -1755,13 +1748,56 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 break :blk false;
             } else false;
+            // A for-let loop whose body creates a closure needs a fresh
+            // binding per iteration so each closure sees its own copy.
+            const per_iter = is_let_init and ast.containsClosure(f.body);
+            if (!per_iter) {
+                debugPrint("[OPTIMIZATION] Trying optimizeSimpleForLoop, pre_limit={?}\n", .{pre_limit});
+                if (try optimizations.optimizeSimpleForLoop(f, env, pre_limit)) |result| {
+                    debugPrint("[OPTIMIZATION] SUCCESS!\n", .{});
+                    return result;
+                }
+                debugPrint("[OPTIMIZATION] FAILED - falling through\n", .{});
+            }
+
+            var scope_names = std.ArrayList([]const u8).initCapacity(env.allocator, 0) catch {
+                return error.OutOfMemory;
+            };
+            defer scope_names.deinit(env.allocator);
+            if (per_iter) {
+                if (f.init) |init| {
+                    switch (init.*) {
+                        .LetDeclaration => |v| try scope_names.append(env.allocator, v.name),
+                        .ConstantDeclaration => |v| try scope_names.append(env.allocator, v.name),
+                        .BlockStatement => |b| {
+                            for (b.statements) |st| {
+                                switch (st.*) {
+                                    .LetDeclaration => |v| try scope_names.append(env.allocator, v.name),
+                                    .ConstantDeclaration => |v| try scope_names.append(env.allocator, v.name),
+                                    else => {},
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
 
             var loop_env_buf: Environment = undefined;
-            const eval_env: *Environment = if (is_let_init) blk: {
+            var eval_env: *Environment = undefined;
+            if (per_iter) {
+                if (env.for_yield_iter_env) |saved| {
+                    eval_env = @alignCast(@ptrCast(saved));
+                } else {
+                    eval_env = try Environment.initIterHeap(env.allocator, env);
+                }
+            } else if (is_let_init) {
                 loop_env_buf = try Environment.initBlock(env.allocator, env);
-                break :blk &loop_env_buf;
-            } else env;
-            defer if (is_let_init) loop_env_buf.deinit();
+                eval_env = &loop_env_buf;
+            } else {
+                eval_env = env;
+            }
+            defer if (is_let_init and !per_iter) loop_env_buf.deinit();
 
             var result: ast.Value = .{ .float = 0.0 };
 
@@ -1820,7 +1856,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     // If yield came from an active yield*, don't advance the loop variable.
                     // yield* spans multiple generator.next() calls — the loop should not
                     // advance until yield* completes and the body finishes normally.
+                    env.for_yield_iter_env = @ptrCast(eval_env);
                     if (eval_env.yield_star_gen == null and eval_env.yield_star_array == null) {
+                        if (per_iter) {
+                            const next_scope = try Environment.initIterHeap(env.allocator, env);
+                            for (scope_names.items) |n| {
+                                if (eval_env.get(n)) |v| next_scope.setVar(n, v) catch {};
+                            }
+                            eval_env = next_scope;
+                        }
                         if (f.increment) |inc| {
                             _ = try evaluate(inc, eval_env);
                         }
@@ -1846,12 +1890,26 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     if (matches) {
                         eval_env.continue_hit = false;
                         eval_env.continue_label = null;
+                        if (per_iter) {
+                            const next_scope = try Environment.initIterHeap(env.allocator, env);
+                            for (scope_names.items) |n| {
+                                if (eval_env.get(n)) |v| next_scope.setVar(n, v) catch {};
+                            }
+                            eval_env = next_scope;
+                        }
                         if (f.increment) |inc| {
                             _ = try evaluate(inc, eval_env);
                         }
                         continue;
                     }
                     break;
+                }
+                if (per_iter) {
+                    const next_scope = try Environment.initIterHeap(env.allocator, env);
+                    for (scope_names.items) |n| {
+                        if (eval_env.get(n)) |v| next_scope.setVar(n, v) catch {};
+                    }
+                    eval_env = next_scope;
                 }
                 if (f.increment) |inc| {
                     _ = try evaluate(inc, eval_env);
@@ -1861,6 +1919,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             // For-loop completed without yielding — clear for_yield_node
             if (env.for_yield_node == @as(?*const anyopaque, @ptrCast(node))) {
                 env.for_yield_node = null;
+                env.for_yield_iter_env = null;
             }
             return result;
         },
@@ -2758,8 +2817,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return .{ .function = @ptrCast(node) };
         },
         .FunctionDeclaration => |f| {
-            try env.setFunction(f.name, node);
-            return .{ .function = @ptrCast(node) };
+            if (f.name.len > 0) try env.setFunction(f.name, node);
+            // Capture the defining scope so calls keep reading/writing the
+            // same bindings after the enclosing call returns.
+            const scope = try env.captureEnv();
+            return .{ .closure = try ast.ClosureValue.init(env.allocator, @ptrCast(@as(*anyopaque, node)), @ptrCast(scope)) };
         },
         .FunctionCall => |f| {
             const has_spread_args = blk: {
@@ -2809,6 +2871,16 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
             }
 
+            if (env.getFunctionWithModuleFallback(f.name) == null) {
+                if (env.get(f.name)) |val| {
+                    if (val == .closure) {
+                        var closed_args = try evaluateArgs(f.arguments, env);
+                        defer closed_args.deinit(env.allocator);
+                        return try callFunctionValue(val, closed_args.items, env, ast.Value{ .void = {} });
+                    }
+                }
+            }
+
             const func_node = env.getFunctionWithModuleFallback(f.name) orelse blk: {
                 // Not a named function — try variable value (e.g. anonymous function passed as arg)
                 const val = env.get(f.name) orelse return error.UndefinedFunction;
@@ -2850,7 +2922,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .ArrowFunction => {
-            return .{ .function = @ptrCast(node) };
+            const scope = try env.captureEnv();
+            return .{ .closure = try ast.ClosureValue.init(env.allocator, @ptrCast(@as(*anyopaque, node)), @ptrCast(scope)) };
         },
         .NewExpression => |ne| {
             const func_name = switch (ne.callee.*) {
@@ -2999,6 +3072,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     _ = try evaluate(arg, env);
                 }
                 return callee_val;
+            }
+            if (callee_val == .closure) {
+                var expanded = try evaluateArgs(dc.arguments, env);
+                defer expanded.deinit(env.allocator);
+                return try callFunctionValue(callee_val, expanded.items, env, ast.Value{ .void = {} });
             }
             if (callee_val != .function) {
                 return error.NotAFunction;
@@ -3882,27 +3960,35 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
         defer if (traced) env.popTraceFrame();
         if (func_node.* == .FunctionDeclaration) {
             const func = func_node.FunctionDeclaration;
-            var func_env = try Environment.init(env.allocator, env);
-            defer func_env.deinit();
+            // Heap-owned so closures created in the body can adopt it; freed
+            // right away unless one of them actually captured it.
+            const func_env = try Environment.initHeap(env.allocator, env);
+            defer if (!func_env.captured) {
+                func_env.deinit();
+                env.allocator.destroy(func_env);
+            };
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
             }
             if (this_val) |tv| {
                 try func_env.set("this", tv);
             }
-            return try evaluate(func.body, &func_env);
+            return try evaluate(func.body, func_env);
         }
         if (func_node.* == .ArrowFunction) {
             const func = func_node.ArrowFunction;
-            var func_env = try Environment.init(env.allocator, env);
-            defer func_env.deinit();
+            const func_env = try Environment.initHeap(env.allocator, env);
+            defer if (!func_env.captured) {
+                func_env.deinit();
+                env.allocator.destroy(func_env);
+            };
             // Inherit this from outer lexical environment
             const lexical_this = env.get("this") orelse (ast.Value){ .void = {} };
             try func_env.set("this", lexical_this);
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
             }
-            return try evaluate(func.body, &func_env);
+            return try evaluate(func.body, func_env);
         }
     return error.NotAFunction;
 }
@@ -3912,6 +3998,11 @@ pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, t
         .function => |fn_ptr| {
             const func_node: *ast.Node = @alignCast(@ptrCast(fn_ptr));
             return try invokeFunctionNode(func_node, args, env, this_val);
+        },
+        .closure => |cl| {
+            const scope: *Environment = @alignCast(@ptrCast(cl.env));
+            const func_node: *ast.Node = @alignCast(@ptrCast(cl.func_node));
+            return try invokeFunctionNode(func_node, args, scope, this_val);
         },
         .generator => |gen| {
             return .{ .generator = gen };

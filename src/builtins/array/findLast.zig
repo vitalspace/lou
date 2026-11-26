@@ -8,6 +8,7 @@ fn getFuncNode(arg: Types.Value, env: *Types.Environment) ?*Ast.Node {
     return switch (arg) {
         .string => |s| env.getFunction(s),
         .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        .closure => |cl| @as(*Ast.Node, @ptrCast(@alignCast(cl.func_node))),
         else => null,
     };
 }
@@ -33,7 +34,7 @@ pub fn FindLast(args: []Types.Value, env: *Types.Environment) Types.BuiltinResul
         else => return .{ .value = .{ .void = {} } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, args[1]) catch {
         return .{ .value = .{ .void = {} } };
     };
     defer func_env.deinit();

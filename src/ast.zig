@@ -854,6 +854,99 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
     }
 }
 
+/// True when `node` or any descendant is a function/generator literal.
+/// Evaluating such a node creates a closure that captures the current
+/// scope, so loops whose body contains one need fresh per-iteration
+/// bindings and the enclosing call scope must stay alive.
+pub fn containsClosure(node: *const Node) bool {
+    return switch (node.*) {
+        .ArrowFunction, .FunctionDeclaration, .GeneratorDeclaration => true,
+        .ArrayLiteral => |a| nodesContainClosure(a.elements),
+        .ArrayIndex => |a| containsClosure(a.array) or containsClosure(a.index),
+        .ObjectLiteral => |o| blk: {
+            for (o.properties) |prop| {
+                if (containsClosure(prop.value)) break :blk true;
+                if (prop.key_expr) |ke| {
+                    if (containsClosure(ke)) break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        .PropertySet => |p| containsClosure(p.object) or containsClosure(p.value),
+        .BinaryExpression => |b| containsClosure(b.left) or containsClosure(b.right),
+        .Assignment => |a| containsClosure(a.value),
+        .UpdateExpression => |u| containsClosure(u.operand),
+        .ConstantDeclaration => |c| if (c.value) |v| containsClosure(v) else false,
+        .VariableDeclaration => |v| if (v.value) |v2| containsClosure(v2) else false,
+        .LetDeclaration => |v| if (v.value) |v2| containsClosure(v2) else false,
+        .UsingDeclaration => |v| if (v.value) |v2| containsClosure(v2) else false,
+        .BlockStatement => |b| nodesContainClosure(b.statements),
+        .ForLoop => |f| blk: {
+            if (f.init) |init| {
+                if (containsClosure(init)) break :blk true;
+            }
+            if (f.condition) |cond| {
+                if (containsClosure(cond)) break :blk true;
+            }
+            if (f.increment) |inc| {
+                if (containsClosure(inc)) break :blk true;
+            }
+            break :blk containsClosure(f.body);
+        },
+        .ForOfLoop => |f| containsClosure(f.iterable) or containsClosure(f.body),
+        .ForInLoop => |f| containsClosure(f.object) or containsClosure(f.body),
+        .WhileLoop => |w| containsClosure(w.condition) or containsClosure(w.body),
+        .DoWhileLoop => |d| containsClosure(d.body) or containsClosure(d.condition),
+        .IfStatement => |i| containsClosure(i.condition) or containsClosure(i.consequence) or
+            (if (i.alternative) |alt| containsClosure(alt) else false),
+        .ReturnStatement => |r| if (r.value) |v| containsClosure(v) else false,
+        .FunctionCall => |f| nodesContainClosure(f.arguments),
+        .MethodCall => |m| containsClosure(m.object) or nodesContainClosure(m.arguments),
+        .MemberAccess => |m| containsClosure(m.object),
+        .ExportStatement => |e| containsClosure(e.declaration),
+        .YieldExpression => |y| if (y.value) |v| containsClosure(v) else false,
+        .SpreadExpression => |s| containsClosure(s.value),
+        .NewExpression => |ne| containsClosure(ne.callee) or nodesContainClosure(ne.arguments),
+        .DirectCall => |dc| containsClosure(dc.callee) or nodesContainClosure(dc.arguments),
+        .LabeledStatement => |ls| containsClosure(ls.body),
+        .CommaExpression => |c| nodesContainClosure(c.expressions),
+        .ConditionalExpression => |c| containsClosure(c.condition) or
+            containsClosure(c.consequent) or containsClosure(c.alternate),
+        .TryCatchFinally => |t| blk: {
+            if (containsClosure(t.body)) break :blk true;
+            if (t.catch_body) |cb| {
+                if (containsClosure(cb)) break :blk true;
+            }
+            if (t.finally_body) |fb| {
+                if (containsClosure(fb)) break :blk true;
+            }
+            break :blk false;
+        },
+        .ThrowStatement => |t| containsClosure(t.value),
+        .TypeOfExpression => |t| containsClosure(t.operand),
+        .DeleteExpression => |d| containsClosure(d.operand),
+        .VoidExpression => |v| containsClosure(v.operand),
+        .SwitchStatement => |s| blk: {
+            if (containsClosure(s.discriminant)) break :blk true;
+            break :blk nodesContainClosure(s.cases);
+        },
+        .SwitchCase => |sc| blk: {
+            if (sc.test_expr) |te| {
+                if (containsClosure(te)) break :blk true;
+            }
+            break :blk containsClosure(sc.consequent);
+        },
+        else => false,
+    };
+}
+
+fn nodesContainClosure(nodes: []*Node) bool {
+    for (nodes) |n| {
+        if (containsClosure(n)) return true;
+    }
+    return false;
+}
+
 pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
     switch (node.*) {
         .IntegerLiteral => {},
@@ -1612,4 +1705,38 @@ test "printAst - BlockStatement" {
     var writer = std.Io.Writer.fixed(&buffer);
     try printAst(node, 0, &writer);
     try std.testing.expectEqualStrings("BlockStatement:\n", writer.buffered());
+}
+
+test "containsClosure - plain nodes report false" {
+    const allocator = std.testing.allocator;
+
+    const body = try allocator.create(Node);
+    body.* = Node{ .IntegerLiteral = .{ .value = 1 } };
+
+    const stmts = try allocator.alloc(*Node, 1);
+    stmts[0] = body;
+    const block = try allocator.create(Node);
+    block.* = Node{ .BlockStatement = .{ .statements = stmts } };
+    defer freeAst(allocator, block);
+
+    try std.testing.expect(!containsClosure(body));
+    try std.testing.expect(!containsClosure(block));
+}
+
+test "containsClosure - arrow nested in a block reports true" {
+    const allocator = std.testing.allocator;
+
+    const inner = try allocator.create(Node);
+    inner.* = Node{ .IntegerLiteral = .{ .value = 2 } };
+
+    const arrow = try allocator.create(Node);
+    arrow.* = Node{ .ArrowFunction = .{ .parameters = &.{}, .body = inner } };
+
+    const stmts = try allocator.alloc(*Node, 1);
+    stmts[0] = arrow;
+    const block = try allocator.create(Node);
+    block.* = Node{ .BlockStatement = .{ .statements = stmts } };
+    defer freeAst(allocator, block);
+
+    try std.testing.expect(containsClosure(block));
 }

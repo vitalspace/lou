@@ -294,9 +294,12 @@ pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
     const map_val = getMap(args) orelse return .{ .value = .{ .void = {} } };
     const entries = getEntries(map_val) orelse return .{ .value = .{ .void = {} } };
     const callback = args[1];
-    if (callback != .function) return .{ .value = .{ .void = {} } };
+    if (callback != .function and callback != .closure) return .{ .value = .{ .void = {} } };
 
-    const func_node: *Ast.Node = @ptrCast(@alignCast(callback.function));
+    const func_node: *Ast.Node = if (callback == .closure)
+        @ptrCast(@alignCast(callback.closure.func_node))
+    else
+        @ptrCast(@alignCast(callback.function));
     const func_params: []const []const u8 = switch (func_node.*) {
         .FunctionDeclaration => |f| f.parameters,
         .ArrowFunction => |f| f.parameters,
@@ -308,7 +311,7 @@ pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         else => return .{ .value = .{ .void = {} } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .void = {} } };
     };
     defer func_env.deinit();
@@ -372,6 +375,7 @@ pub fn MapGroupBy(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
     const func_node: *Ast.Node = switch (callback) {
         .string => |s| env.getFunction(s) orelse return .{ .value = .{ .js_object = result_obj } },
         .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        .closure => |cl| @as(*Ast.Node, @ptrCast(@alignCast(cl.func_node))),
         else => return .{ .value = .{ .js_object = result_obj } },
     };
     const func_params: []const []const u8 = switch (func_node.*) {
@@ -385,7 +389,7 @@ pub fn MapGroupBy(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         else => return .{ .value = .{ .js_object = result_obj } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .js_object = result_obj } };
     };
     defer func_env.deinit();

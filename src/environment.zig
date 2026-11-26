@@ -119,6 +119,8 @@ pub const Environment = struct {
     yield_star_string: ?[]const u8 = null,
     yield_star_js_iterator: ?*ast.ObjectValue = null,
     for_yield_node: ?*const anyopaque = null,
+    /// Current per-iteration scope of the for-let loop that yielded.
+    for_yield_iter_env: ?*anyopaque = null,
     for_of_gen: ?*ast.GeneratorObject = null,
     for_of_array: ?*ast.ArrayObject = null,
     for_of_array_index: usize = 0,
@@ -140,6 +142,16 @@ pub const Environment = struct {
     /// — only heap-allocated iter envs are guaranteed to outlive their
     /// natural scope.
     is_iter_env: bool = false,
+    /// Heap-owned scope (created by initHeap/initIterHeap/initClosureHeap).
+    /// Only heap-owned scopes may be adopted by a closure; stack scopes get
+    /// snapshotted by captureEnv().
+    owned: bool = false,
+    /// Set once a closure adopted this scope, so the call-site cleanup knows
+    /// it must not free it anymore.
+    captured: bool = false,
+    /// This environment exists only as a captured lexical scope (it is not a
+    /// call frame and is freed at program exit together with closure_envs).
+    is_closure_env: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, outer: ?*Environment) !Environment {
         return initWithIo(allocator, outer, if (outer) |o| o.io else null);
@@ -204,15 +216,82 @@ pub const Environment = struct {
     pub fn initHeap(allocator: std.mem.Allocator, outer: ?*Environment) !*Environment {
         const env_ptr = try allocator.create(Environment);
         env_ptr.* = try init(allocator, outer);
+        env_ptr.owned = true;
         return env_ptr;
+    }
+
+    /// Scope a callback should see: closures keep their captured scope, any
+    /// other callable falls back to the caller environment.
+    pub fn callableScope(fn_val: ast.Value, fallback: *Environment) *Environment {
+        return switch (fn_val) {
+            .closure => |cl| @alignCast(@ptrCast(cl.env)),
+            else => fallback,
+        };
+    }
+
+    /// Like init(), but parented to a closure captured scope when the callee
+    /// is a closure value. Returned by value so call sites keep their `defer
+    /// deinit()` ownership.
+    pub fn initCallable(allocator: std.mem.Allocator, fallback: *Environment, fn_val: ast.Value) !Environment {
+        return init(allocator, callableScope(fn_val, fallback));
     }
 
     pub fn initIterHeap(allocator: std.mem.Allocator, outer: *Environment) !*Environment {
         const env_ptr = try allocator.create(Environment);
         env_ptr.* = try initBlock(allocator, outer);
+        // Iteration scopes hold the loop's own let/const bindings; treat them
+        // as a binding target so setVar() does not hoist them to the root.
+        env_ptr.scope_kind = .function;
+        env_ptr.owned = true;
         env_ptr.is_iter_env = true;
-        try outer.iter_envs.append(allocator, env_ptr);
+        // Register on the root so per-iteration scopes survive for the whole
+        // program: a closure created in the loop body may be called long
+        // after the enclosing function returned.
+        try outer.root().iter_envs.append(allocator, env_ptr);
         return env_ptr;
+    }
+
+    /// Heap-allocate a lexical scope that lives until program exit. Used as
+    /// the call frame of functions whose body creates closures, so those
+    /// closures can adopt it safely.
+    pub fn initClosureHeap(allocator: std.mem.Allocator, outer: *Environment) !*Environment {
+        const env_ptr = try allocator.create(Environment);
+        env_ptr.* = try init(allocator, outer);
+        env_ptr.owned = true;
+        env_ptr.is_closure_env = true;
+        try outer.root().closure_envs.append(allocator, env_ptr);
+        return env_ptr;
+    }
+
+    /// Return a heap-lifetime scope to store in a closure. Root, per-iteration
+    /// and captured scopes already qualify; other heap scopes are registered
+    /// for teardown at program exit; stack scopes are snapshotted (their
+    /// bindings are copied so the closure never dangles).
+    pub fn captureEnv(self: *Environment) !*Environment {
+        if (self.outer == null) return self; // program-lifetime root
+        if (self.is_iter_env or self.is_closure_env) return self;
+        if (self.owned) {
+            if (!self.captured) {
+                self.captured = true;
+                try self.root().closure_envs.append(self.allocator, self);
+            }
+            return self;
+        }
+        const outer = self.outer.?;
+        const heap = try initClosureHeap(self.allocator, outer);
+        var it = self.values.iterator();
+        while (it.next()) |entry| {
+            heap.values.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+        var fit = self.functions.iterator();
+        while (fit.next()) |entry| {
+            heap.functions.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+        var cit = self.constants.iterator();
+        while (cit.next()) |entry| {
+            heap.constants.put(entry.key_ptr.*, {}) catch {};
+        }
+        return heap;
     }
 
     pub fn retain(self: *Environment) void {
@@ -465,13 +544,21 @@ pub const Environment = struct {
         // their natural scope so closures could safely reference them.
         // We deinit each one (their own lists are drained recursively)
         // and free the backing memory.
-        for (self.iter_envs.items) |iter_env| {
+        // Reverse creation order: a nested scope's parent was always created
+        // before it, so children are torn down before their parents.
+        var re_i: usize = self.iter_envs.items.len;
+        while (re_i > 0) {
+            re_i -= 1;
+            const iter_env = self.iter_envs.items[re_i];
             iter_env.deinit();
             self.allocator.destroy(iter_env);
         }
         self.iter_envs.deinit(self.allocator);
 
-        for (self.closure_envs.items) |closure_env| {
+        var ce_i: usize = self.closure_envs.items.len;
+        while (ce_i > 0) {
+            ce_i -= 1;
+            const closure_env = self.closure_envs.items[ce_i];
             closure_env.deinit();
             self.allocator.destroy(closure_env);
         }

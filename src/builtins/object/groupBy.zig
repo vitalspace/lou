@@ -66,6 +66,7 @@ pub fn GroupBy(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult
     const func_node: *Ast.Node = switch (callback) {
         .string => |s| env.getFunction(s) orelse return .{ .value = .{ .js_object = result_obj } },
         .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        .closure => |cl| @as(*Ast.Node, @ptrCast(@alignCast(cl.func_node))),
         else => return .{ .value = .{ .js_object = result_obj } },
     };
     const func_params: []const []const u8 = switch (func_node.*) {
@@ -79,7 +80,7 @@ pub fn GroupBy(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult
         else => return .{ .value = .{ .js_object = result_obj } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .js_object = result_obj } };
     };
     defer func_env.deinit();

@@ -67,6 +67,10 @@ pub const Op = enum(u8) {
     builtin,
     method_call,
     call,
+    make_closure,
+    enter_loop_scope,
+    next_loop_scope,
+    exit_loop_scope,
     ret,
     get_iterator,
     iterator_next,
@@ -551,9 +555,56 @@ pub const Compiler = struct {
         self.popLoop();
     }
 
+    /// Collect the let/const bindings introduced by a for-loop header.
+    /// Returns true when at least one lexical binding was found.
+    fn collectLoopLetNames(allocator: std.mem.Allocator, init_node: ?*const ast.Node, out: *std.ArrayList([]const u8)) bool {
+        const node = init_node orelse return false;
+        switch (node.*) {
+            .LetDeclaration => |v| {
+                out.append(allocator, v.name) catch return false;
+                return true;
+            },
+            .ConstantDeclaration => |v| {
+                out.append(allocator, v.name) catch return false;
+                return true;
+            },
+            .BlockStatement => |b| {
+                var any = false;
+                for (b.statements) |st| {
+                    switch (st.*) {
+                        .LetDeclaration => |v| {
+                            out.append(allocator, v.name) catch return false;
+                            any = true;
+                        },
+                        .ConstantDeclaration => |v| {
+                            out.append(allocator, v.name) catch return false;
+                            any = true;
+                        },
+                        else => {},
+                    }
+                }
+                return any;
+            },
+            else => return false,
+        }
+    }
+
+    fn emitScopeOp(self: *Compiler, op: Op, names: []const []const u8) void {
+        self.c.op(op);
+        self.c.w16(@intCast(names.len));
+        for (names) |name| self.c.w16(self.c.emitS(name));
+    }
+
     fn forStmt(self: *Compiler, n: *ast.Node) void {
         const f = n.ForLoop;
-        if (self.tryOptimizeSimpleLoop(n)) return;
+        var scope_names = std.ArrayList([]const u8).initCapacity(self.env.allocator, 0) catch return;
+        defer scope_names.deinit(self.env.allocator);
+        const has_lexical_init = collectLoopLetNames(self.env.allocator, f.init, &scope_names);
+        // Only for-let loops whose body may create a closure need a fresh
+        // binding per iteration; plain loops keep the fast path.
+        const per_iter = has_lexical_init and ast.containsClosure(f.body);
+        if (!per_iter and self.tryOptimizeSimpleLoop(n)) return;
+        if (per_iter) self.emitScopeOp(.enter_loop_scope, scope_names.items);
         if (f.init) |initNode| {
             if (initNode.* == .BlockStatement) {
                 // Unroll BlockStatement init: compile each statement directly into the
@@ -569,7 +620,7 @@ pub const Compiler = struct {
         self.pushLoop(start, false) catch return;
         // For for-loops with increment, continue should jump to the increment (after body),
         // so use forward-jump patching (same technique as do-while)
-        if (f.increment != null) {
+        if (f.increment != null or per_iter) {
             self.loop_stack.items[self.loop_stack.items.len - 1].use_forward_continue = true;
         }
         if (f.condition) |c| self.expr(c) else self.c.op(.true_);
@@ -577,7 +628,8 @@ pub const Compiler = struct {
         self.c.op(.pop);
         self.stmt(f.body);
         // Patch any continues to point here (the increment position)
-        if (f.increment != null) {
+        if (per_iter) self.emitScopeOp(.next_loop_scope, scope_names.items);
+        {
             const info = &self.loop_stack.items[self.loop_stack.items.len - 1];
             for (info.continue_patches.items) |patch_pos| {
                 self.c.ptch(patch_pos);
@@ -588,6 +640,7 @@ pub const Compiler = struct {
         self.c.lloop(start);
         self.c.ptch(j);
         self.c.op(.pop);
+        if (per_iter) self.c.op(.exit_loop_scope);
         self.popLoop();
     }
 
@@ -1158,7 +1211,7 @@ pub const Compiler = struct {
                 self.c.op2w(.get_prop, self.c.emitS(m.property));
             },
             .ArrowFunction => {
-                self.c.emitC(.{ .function = @ptrCast(n) });
+                self.c.op2w(.make_closure, self.c.addC(.{ .function = @ptrCast(n) }));
             },
             .FunctionDeclaration => {
                 const f = n.FunctionDeclaration;
@@ -1166,7 +1219,7 @@ pub const Compiler = struct {
                     self.env.setFunction(f.name, n) catch {};
                     self.compileFnBody(n);
                 }
-                self.c.emitC(.{ .function = @ptrCast(n) });
+                self.c.op2w(.make_closure, self.c.addC(.{ .function = @ptrCast(n) }));
             },
             .Elision => {
                 self.c.emitC(.{ .hole = {} });
@@ -1268,6 +1321,53 @@ pub const VM = struct {
         } else {
             return error.Thrown;
         }
+    }
+
+
+    /// Create a closure value that captures the current lexical scope.
+    fn makeClosure(self: *VM) !void {
+        const ci = self.readU16();
+        const node: *ast.Node = @alignCast(@ptrCast(self.c.consts.items[ci].function));
+        const scope = try self.env.captureEnv();
+        const cl = try ast.ClosureValue.init(self.env.allocator, @ptrCast(@as(*anyopaque, node)), @ptrCast(scope));
+        self.push(.{ .closure = cl });
+    }
+
+    /// Enter a fresh per-iteration scope for for-let loops. The loop
+    /// variables are declared afterwards by the init bytecode, so the new
+    /// scope starts empty.
+    fn enterLoopScope(self: *VM) !void {
+        const count = self.readU16();
+        self.ip += @as(usize, count) * 2;
+        self.env = try Environment.initIterHeap(self.env.allocator, self.env);
+    }
+
+    /// Replace the current per-iteration scope with a fresh one that copies
+    /// the loop variables. Closures from the previous iteration keep the old
+    /// (still alive) scope, matching JS for-let semantics.
+    fn nextLoopScope(self: *VM) !void {
+        const count = self.readU16();
+        const outer = self.env.outer orelse return;
+        const next = try Environment.initIterHeap(self.env.allocator, outer);
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const ci = self.readU16();
+            const name = self.c.consts.items[ci].string;
+            if (self.env.get(name)) |v| next.setVar(name, v) catch {};
+        }
+        self.env = next;
+    }
+
+    fn callClosureValue(self: *VM, val: Value, args: std.ArrayList(Value)) !void {
+        const r = callFunctionValue(val, args.items, self.env, null) catch |err| {
+            if (self.env.throw_hit) {
+                if (try self.deliverBuiltinThrow()) return;
+                return error.Thrown;
+            }
+            return err;
+        };
+        if (try self.deliverBuiltinThrow()) return;
+        self.push(r);
     }
 
     /// Builtins report JS throws by setting env.throw_hit (the evaluator
@@ -1935,6 +2035,8 @@ pub const VM = struct {
                         // Support first-class functions: var f = add; f(1, 2)
                         if (val == .function) {
                             try self.callFuncNode(@as(*ast.Node, @ptrCast(@alignCast(val.function))), args);
+                        } else if (val == .closure) {
+                            try self.callClosureValue(val, args);
                         } else {
                             return error.UndefinedFunction;
                         }
@@ -2526,6 +2628,12 @@ pub const VM = struct {
                     self.ip += 1;
                     _ = ac;
                     _ = self.pop(); // placeholder2 — function calls handled via builtin fallback
+                },
+                .make_closure => try self.makeClosure(),
+                .enter_loop_scope => try self.enterLoopScope(),
+                .next_loop_scope => try self.nextLoopScope(),
+                .exit_loop_scope => {
+                    if (self.env.outer) |outer| self.env = outer;
                 },
                 .get_iterator => {
                     const val = self.pop();

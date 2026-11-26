@@ -251,9 +251,12 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
     const set_val = getSet(args) orelse return .{ .value = .{ .void = {} } };
     const values = getValues(set_val) orelse return .{ .value = .{ .void = {} } };
     const callback = args[1];
-    if (callback != .function) return .{ .value = .{ .void = {} } };
+    if (callback != .function and callback != .closure) return .{ .value = .{ .void = {} } };
 
-    const func_node: *Ast.Node = @ptrCast(@alignCast(callback.function));
+    const func_node: *Ast.Node = if (callback == .closure)
+        @ptrCast(@alignCast(callback.closure.func_node))
+    else
+        @ptrCast(@alignCast(callback.function));
     const func_params: []const []const u8 = switch (func_node.*) {
         .FunctionDeclaration => |f| f.parameters,
         .ArrowFunction => |f| f.parameters,
@@ -265,7 +268,7 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         else => return .{ .value = .{ .void = {} } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .void = {} } };
     };
     defer func_env.deinit();

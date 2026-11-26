@@ -46,8 +46,14 @@ pub fn executeDispose(stack: *Types.ObjectValue, env: *Types.Environment) void {
 
 /// Try to call a function value with one argument.
 fn tryCallFunction(env: *Types.Environment, func_val: Types.Value, arg: Types.Value) void {
-    _ = arg;
     const evaluate = @import("../../evaluator.zig").evaluate;
+
+    if (func_val == .closure) {
+        var arg_arr = [1]Types.Value{arg};
+        const call_fn = @import("../../evaluator.zig").callFunctionValue;
+        _ = call_fn(func_val, arg_arr[0..], env, .{ .void = {} }) catch return;
+        return;
+    }
 
     switch (func_val) {
         .function => |fn_ptr| {
