@@ -2898,61 +2898,53 @@ fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntV
     // null/undefined vs anything else → false.
     if (l == .null or l == .void or r == .null or r == .void) return false;
 
-    // Step 4/5: Number (integer/float) ↔ String → coerce string to number.
+    // Step 4/5: Boolean ↔ anything → coerce boolean to number and recurse.
+    // Runs before the BigInt cases: coerceNumberToBigInt rejects booleans,
+    // but == coerces them to 0/1 first.
     {
+        const bool_side: ?Value = if (l == .boolean) l else if (r == .boolean) r else null;
+        if (bool_side != null) {
+            const other = if (l == .boolean) r else l;
+            const as_num: Value = .{ .integer = if (bool_side.?.boolean) @as(i64, 1) else @as(i64, 0) };
+            return valEq(allocator, bigints_list, as_num, other);
+        }
+    }
+
+    // Step 6: BigInt ↔ String → StringToBigInt (integer literal syntax only;
+    // "1.0", "1e2" or "1n" parse to no value and compare false).
+    {
+        const big_side: ?Value = if (l == .big_int) l else if (r == .big_int) r else null;
         const str_side: ?Value = if (l == .string) l else if (r == .string) r else null;
-        if (str_side != null) {
-            const num_side = if (l == .string) r else l;
-            const s = str_side.?.string;
-            const parsed = std.fmt.parseFloat(f64, s) catch std.math.nan(f64);
-            return switch (num_side) {
-                .integer => |i| parsed == @as(f64, @floatFromInt(i)),
-                .float => |f| parsed == f,
-                .big_int => blk: {
-                    if (std.math.isNan(parsed)) break :blk false;
-                    if (parsed < @as(f64, @floatFromInt(std.math.minInt(i64))) or parsed > @as(f64, @floatFromInt(std.math.maxInt(i64)))) break :blk false;
-                    const i: i64 = @intFromFloat(parsed);
-                    if (@as(f64, @floatFromInt(i)) != parsed) break :blk false;
-                    const tmp = ast.BigIntValue.fromString(allocator, "0") catch break :blk false;
-                    bigints_list.append(allocator, tmp) catch {};
-                    tmp.value.set(i) catch break :blk false;
-                    break :blk num_side.big_int.compare(tmp) == .eq;
-                },
-                else => false,
-            };
-        }
-    }
-
-    // Step 6/7: BigInt ↔ Number → coerce number to BigInt if integer-exact.
-    {
-        const big_side = if (l == .big_int) l else if (r == .big_int) r else null;
-        if (big_side != null) {
-            const num_side = if (l == .big_int) r else l;
-            const coerced = vmCoerceNumberToBigInt(allocator, bigints_list, num_side) catch return false;
-            const other = coerced orelse return false;
-            return big_side.?.big_int.compare(other) == .eq;
-        }
-    }
-
-    // Step 8: BigInt ↔ String (no Number on the other side).
-    {
-        const big_side = if (l == .big_int) l else if (r == .big_int) r else null;
-        const str_side = if (l == .string) l else if (r == .string) r else null;
         if (big_side != null and str_side != null) {
-            const s = str_side.?.string;
-            const parsed = ast.BigIntValue.fromString(allocator, s) catch return false;
+            const parsed = ast.BigIntValue.fromString(allocator, str_side.?.string) catch return false;
             bigints_list.append(allocator, parsed) catch {};
             return big_side.?.big_int.compare(parsed) == .eq;
         }
     }
 
-    // Step 9/10: Boolean ↔ anything → coerce boolean to number.
+    // Step 7: Number (integer/float) ↔ String → coerce string to number.
     {
-        const bool_side: ?Value = if (l == .boolean) l else if (r == .boolean) r else null;
-        if (bool_side != null) {
-            const other = if (l == .boolean) r else l;
-            const as_num: Value = .{ .integer = if (bool_side.? == .boolean and bool_side.?.boolean) @as(i64, 1) else @as(i64, 0) };
-            return valEq(allocator, bigints_list, as_num, other);
+        const str_side: ?Value = if (l == .string) l else if (r == .string) r else null;
+        if (str_side != null) {
+            const num_side = if (l == .string) r else l;
+            const parsed = std.fmt.parseFloat(f64, str_side.?.string) catch std.math.nan(f64);
+            return switch (num_side) {
+                .integer => |i| parsed == @as(f64, @floatFromInt(i)),
+                .float => |f| parsed == f,
+                else => false,
+            };
+        }
+    }
+
+    // Step 8: BigInt ↔ Number → coerce number to BigInt if integer-exact.
+    {
+        const big_side: ?Value = if (l == .big_int) l else if (r == .big_int) r else null;
+        if (big_side != null) {
+            const num_side = if (l == .big_int) r else l;
+            if (num_side != .integer and num_side != .float) return false;
+            const coerced = vmCoerceNumberToBigInt(allocator, bigints_list, num_side) catch return false;
+            const other = coerced orelse return false;
+            return big_side.?.big_int.compare(other) == .eq;
         }
     }
 

@@ -377,10 +377,35 @@ pub const BigIntValue = struct {
             .allocator = allocator_,
             .value = try std.math.big.int.Managed.init(allocator_),
         };
-        obj.value.setString(10, str) catch {
-            obj.deinit();
-            return error.InvalidBigInt;
-        };
+        errdefer obj.deinit();
+
+        // StringToBigInt / BigInt(string) semantics: trim whitespace, accept
+        // 0x/0o/0b radix prefixes, empty string is 0n, and a sign is only
+        // valid for decimal literals (BigInt("-0x10") throws).
+        const trimmed = std.mem.trim(u8, str, " \t\n\r\x0b\x0c");
+        if (trimmed.len == 0) {
+            obj.value.setString(10, "0") catch return error.InvalidBigInt;
+            return obj;
+        }
+        var body = trimmed;
+        const has_sign = body[0] == '+' or body[0] == '-';
+        const negative = body[0] == '-';
+        if (has_sign) body = body[1..];
+        var radix: u8 = 10;
+        if (body.len >= 2 and body[0] == '0') {
+            radix = switch (body[1]) {
+                'x', 'X' => 16,
+                'o', 'O' => 8,
+                'b', 'B' => 2,
+                else => 10,
+            };
+            if (radix != 10) {
+                if (has_sign) return error.InvalidBigInt;
+                body = body[2..];
+            }
+        }
+        obj.value.setString(radix, body) catch return error.InvalidBigInt;
+        if (negative) obj.value.negate();
         return obj;
     }
 
