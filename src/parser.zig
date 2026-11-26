@@ -5,6 +5,17 @@ const Lexer = @import("lexer.zig").Lexer;
 const Token = @import("lexer.zig").Token;
 const TokenType = @import("lexer.zig").TokenType;
 
+/// `=`, every `op=` and `**` group to the right:
+/// `a = b = 1` means `a = (b = 1)`, not `(a = b) = 1`.
+fn isRightAssociative(token: TokenType) bool {
+    return switch (token) {
+        .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign,
+        .ModuloAssign, .PowerAssign, .AndAssign, .OrAssign, .NullishAssign,
+        .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign, .Exponent => true,
+        else => false,
+    };
+}
+
 pub const Parser = struct {
     lexer: *Lexer,
     current_token: Token,
@@ -776,7 +787,12 @@ pub const Parser = struct {
         while (@intFromEnum(precedence) < @intFromEnum(ast.getTokenPrecedence(this.current_token.type))) {
             const op = this.current_token.type;
             this.nextToken();
-            const next_precedence = ast.getTokenPrecedence(op);
+            var next_precedence = ast.getTokenPrecedence(op);
+            // Right-associative operators take their right-hand side one
+            // precedence level lower, so the recursion binds to the right.
+            if (isRightAssociative(op) and @intFromEnum(next_precedence) > 0) {
+                next_precedence = @enumFromInt(@intFromEnum(next_precedence) - 1);
+            }
             const right = try this.parsePrecedece(next_precedence);
 
             const node = try this.allocator.create(ast.Node);
