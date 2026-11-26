@@ -59,6 +59,7 @@ pub const Op = enum(u8) {
     bit_not,
     left_shift,
     right_shift,
+    unsigned_right_shift,
     pow,
     eval_node,
     builtin,
@@ -902,22 +903,43 @@ pub const Compiler = struct {
                         }
                     }
                 },
-                .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign => {
-                    if (b.left.* == .Identifier) {
-                        const name = b.left.Identifier.name;
-                        const op2: Op = switch (b.operator) {
-                            .PlusAssign => .add,
-                            .MinusAssign => .sub,
-                            .MultiplyAssign => .mul,
-                            .DivideAssign => .div,
-                            .ModuloAssign => .mod_,
-                            else => .add,
-                        };
-                        self.c.op2w(.get_global, self.c.emitS(name));
-                        self.expr(b.right);
-                        self.c.op(op2);
-                        self.c.op(.dup);
-                        self.c.op2w(.set_global, self.c.emitS(name));
+                .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign,
+                .PowerAssign, .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign => {
+                    const op2: Op = switch (b.operator) {
+                        .PlusAssign => .add,
+                        .MinusAssign => .sub,
+                        .MultiplyAssign => .mul,
+                        .DivideAssign => .div,
+                        .ModuloAssign => .mod_,
+                        .PowerAssign => .pow,
+                        .LeftShiftAssign => .left_shift,
+                        .RightShiftAssign => .right_shift,
+                        .UnsignedRightShiftAssign => .unsigned_right_shift,
+                        else => .add,
+                    };
+                    switch (b.left.*) {
+                        .Identifier => |id| {
+                            self.c.op2w(.get_global, self.c.emitS(id.name));
+                            self.expr(b.right);
+                            self.c.op(op2);
+                            self.c.op(.dup);
+                            self.c.op2w(.set_global, self.c.emitS(id.name));
+                        },
+                        .MemberAccess => |m| {
+                            // obj; dup; obj.prop; rhs; <op>; obj.prop = result
+                            // set_prop pops both and pushes the new value back.
+                            self.expr(m.object);
+                            self.c.op(.dup);
+                            self.c.op2w(.get_prop, self.c.emitS(m.property));
+                            self.expr(b.right);
+                            self.c.op(op2);
+                            self.c.op2w(.set_prop, self.c.emitS(m.property));
+                        },
+                        else => {
+                            // Computed targets (arr[i] += v, obj[k] -= v) need a
+                            // read-modify-write; the evaluator implements it.
+                            self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                        },
                     }
                 },
                 .AndAssign, .OrAssign, .NullishAssign => {
@@ -997,6 +1019,7 @@ pub const Compiler = struct {
                                 .BitXor => self.c.op(.bit_xor),
                                 .LeftShift => self.c.op(.left_shift),
                                 .RightShift => self.c.op(.right_shift),
+                                .UnsignedRightShift => self.c.op(.unsigned_right_shift),
                                 .Exponent => self.c.op(.pow),
                                 else => {},
                             }
@@ -1010,6 +1033,11 @@ pub const Compiler = struct {
                 self.c.op2w(.set_global, self.c.emitS(a.name));
             },
             .UpdateExpression => |u| {
+                if (u.operand.* != .Identifier) {
+                    // obj.x++ / arr[i]-- — computed target, resolved by the evaluator.
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                    return;
+                }
                 // For ++x / --x (prefix) leave the new value on the stack;
                 // for x++ / x-- (postfix) leave the original (pre-update) value.
                 //
@@ -1552,6 +1580,11 @@ pub const VM = struct {
                     const b = toInt(self.pop());
                     const a = toInt(self.pop());
                     self.push(.{ .integer = a >> @intCast(b) });
+                },
+                .unsigned_right_shift => {
+                    const b = toInt(self.pop());
+                    const a = toInt(self.pop());
+                    self.push(.{ .integer = @as(i64, @as(u32, @bitCast(@as(i32, @truncate(a)))) >> @as(u5, @intCast(b & 0x1f))) });
                 },
                 .pop => _ = self.pop(),
                 .dup => {

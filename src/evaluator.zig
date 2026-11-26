@@ -307,6 +307,105 @@ fn consumeContinue(env: *Environment, my_label: ?[]const u8) bool {
     return false;
 }
 
+fn valueToF64(v: ast.Value) !f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        .boolean => |b| if (b) 1.0 else 0.0,
+        .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
+        .void => 0.0,
+        else => error.TypeMismatch,
+    };
+}
+
+/// Append one value using JS string coercion (used by `+=`).
+fn appendValueString(env: *Environment, buf: *std.ArrayList(u8), v: ast.Value) !void {
+    switch (v) {
+        .string => |s| try buf.appendSlice(env.allocator, s),
+        .big_int => |bi| {
+            const digits = try bi.toString(env.allocator);
+            defer env.allocator.free(digits);
+            try buf.appendSlice(env.allocator, digits);
+        },
+        .integer => |i| {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return error.OutOfMemory;
+            try buf.appendSlice(env.allocator, s);
+        },
+        .float => |f| {
+            var tmp: [64]u8 = undefined;
+            const s = if (std.math.isNan(f)) "NaN" else std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+            try buf.appendSlice(env.allocator, s);
+        },
+        .boolean => |bl| try buf.appendSlice(env.allocator, if (bl) "true" else "false"),
+        .void => try buf.appendSlice(env.allocator, "undefined"),
+        else => try buf.appendSlice(env.allocator, "[object]"),
+    }
+}
+
+/// Property key coercion for computed member access (`obj[expr]`).
+fn valueToKeyString(env: *Environment, key: ast.Value) ![]const u8 {
+    switch (key) {
+        .string => |s| return s,
+        .integer => |i| {
+            var tmp: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return error.OutOfMemory;
+            const owned = try env.allocator.dupe(u8, s);
+            env.owned_strings.append(env.allocator, owned) catch {};
+            return owned;
+        },
+        .float => |f| {
+            var tmp: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return error.OutOfMemory;
+            const owned = try env.allocator.dupe(u8, s);
+            env.owned_strings.append(env.allocator, owned) catch {};
+            return owned;
+        },
+        .boolean => |bl| return if (bl) "true" else "false",
+        else => return error.InvalidIndex,
+    }
+}
+
+fn keyToArrayIndex(key: ast.Value) ?usize {
+    return switch (key) {
+        .integer => |i| if (i < 0) null else @intCast(i),
+        .float => |f| if (std.math.isNan(f) or f < 0.0) null else @intFromFloat(f),
+        .big_int => |b| blk: {
+            const i = b.toI64() orelse break :blk null;
+            if (i < 0) break :blk null;
+            break :blk @intCast(i);
+        },
+        else => null,
+    };
+}
+
+fn readIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value) !ast.Value {
+    if (obj_val == .js_object) {
+        const key = try valueToKeyString(env, key_val);
+        return obj_val.js_object.properties.get(key) orelse .{ .void = {} };
+    }
+    if (obj_val == .array) {
+        const index = keyToArrayIndex(key_val) orelse return .{ .void = {} };
+        const value = obj_val.array.get(index) orelse return .{ .void = {} };
+        return if (value == .hole) .{ .void = {} } else value;
+    }
+    return error.InvalidAssignment;
+}
+
+fn writeIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value, val: ast.Value) !void {
+    if (obj_val == .js_object) {
+        const key = try valueToKeyString(env, key_val);
+        try obj_val.js_object.properties.put(key, val);
+        return;
+    }
+    if (obj_val == .array) {
+        const index = keyToArrayIndex(key_val) orelse return;
+        try obj_val.array.set(index, val);
+        return;
+    }
+    return error.InvalidAssignment;
+}
+
 pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     const setLoopVar = struct {
         fn set(scope: *Environment, kind: ast.ForOfKind, name: []const u8, val: ast.Value) !void {
@@ -648,13 +747,35 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 b.operator == .ModuloAssign or b.operator == .UnsignedRightShiftAssign or
                 b.operator == .LeftShiftAssign or b.operator == .RightShiftAssign)
             {
-                if (b.left.* != .Identifier) {
-                    return error.InvalidAssignment;
-                }
-                const name = b.left.Identifier.name;
-                const current_val = env.get(name) orelse return error.UndefinedVariable;
+                const target = b.left.*;
+                const name = if (target == .Identifier) target.Identifier.name else "";
+                var obj_val: ast.Value = .{ .void = {} };
+                var key_val: ast.Value = .{ .void = {} };
+                const current_val: ast.Value = switch (target) {
+                    .Identifier => env.get(name) orelse return error.UndefinedVariable,
+                    .MemberAccess => |m| blk: {
+                        obj_val = try evaluate(m.object, env);
+                        if (obj_val != .js_object) return error.InvalidAssignment;
+                        break :blk obj_val.js_object.properties.get(m.property) orelse ast.Value{ .void = {} };
+                    },
+                    .ArrayIndex => |ai| blk: {
+                        obj_val = try evaluate(ai.array, env);
+                        key_val = try evaluate(ai.index, env);
+                        break :blk try readIndexed(env, obj_val, key_val);
+                    },
+                    else => return error.InvalidAssignment,
+                };
                 const right_val = try evaluate(b.right, env);
-                const result = switch (b.operator) {
+                const result: ast.Value = if (b.operator == .PlusAssign and
+                    (current_val == .string or right_val == .string)) blk: {
+                    var buf = std.ArrayList(u8).initCapacity(env.allocator, 64) catch return error.OutOfMemory;
+                    defer buf.deinit(env.allocator);
+                    try appendValueString(env, &buf, current_val);
+                    try appendValueString(env, &buf, right_val);
+                    const s = buf.toOwnedSlice(env.allocator) catch return error.OutOfMemory;
+                    env.owned_strings.append(env.allocator, s) catch {};
+                    break :blk .{ .string = s };
+                } else switch (b.operator) {
                     .PlusAssign => switch (current_val) {
                         .integer => |lv| switch (right_val) {
                             .integer => |rv| ast.Value{ .integer = lv + rv },
@@ -720,6 +841,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         },
                         else => return error.TypeMismatch,
                     },
+                    .PowerAssign => .{ .float = std.math.pow(f64, try valueToF64(current_val), try valueToF64(right_val)) },
                     .UnsignedRightShiftAssign => switch (current_val) {
                         .integer => |lv| switch (right_val) {
                             .integer => |rv| ast.Value{
@@ -745,7 +867,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     else => unreachable,
                 };
-                try env.setInScope(name, result);
+                switch (target) {
+                    .Identifier => try env.setInScope(name, result),
+                    .MemberAccess => |m| try obj_val.js_object.properties.put(m.property, result),
+                    .ArrayIndex => try writeIndexed(env, obj_val, key_val, result),
+                    else => unreachable,
+                }
                 return result;
             }
 
