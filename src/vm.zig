@@ -27,6 +27,8 @@ pub const Op = enum(u8) {
     strict_ne,
     lt,
     gt,
+    le,
+    ge,
     not_,
     and_,
     or_,
@@ -1005,14 +1007,8 @@ pub const Compiler = struct {
                                 .StrictNotEqual => self.c.op(.strict_ne),
                                 .LessThan => self.c.op(.lt),
                                 .GreaterThan => self.c.op(.gt),
-                                .LessThanOrEqual => {
-                                    self.c.op(.gt);
-                                    self.c.op(.not_);
-                                },
-                                .GreaterThanOrEqual => {
-                                    self.c.op(.lt);
-                                    self.c.op(.not_);
-                                },
+                                .LessThanOrEqual => self.c.op(.le),
+                                .GreaterThanOrEqual => self.c.op(.ge),
                                 .Not => self.c.op(.not_),
                                 .BitAnd => self.c.op(.bit_and),
                                 .BitOr => self.c.op(.bit_or),
@@ -1483,8 +1479,8 @@ pub const VM = struct {
                         self.env.owned_strings.append(self.env.allocator, s) catch {};
                         self.push(.{ .string = s });
                     } else {
-                        const av = toF64(a) orelse 0.0;
-                        const bv = toF64(b) orelse 0.0;
+                        const av = toNumber(a);
+                        const bv = toNumber(b);
                         self.push(.{ .float = switch (op) {
                             .add => av + bv,
                             .sub => av - bv,
@@ -1516,13 +1512,13 @@ pub const VM = struct {
                         };
                         self.push(.{ .big_int = result });
                     } else {
-                        const av = toF64(a) orelse 0.0;
-                        const bv = toF64(b) orelse 0.0;
+                        const av = toNumber(a);
+                        const bv = toNumber(b);
                         self.push(.{ .float = std.math.pow(f64, av, bv) });
                     }
                 },
                 .negate => {
-                    const v = toF64(self.pop()) orelse 0.0;
+                    const v = toNumber(self.pop());
                     self.push(.{ .float = -v });
                 },
                 .eq => self.push(.{ .boolean = valEq(self.env.allocator, &self.env.bigints, self.pop(), self.pop()) }),
@@ -1532,23 +1528,53 @@ pub const VM = struct {
                 .lt => {
                     const b = self.pop();
                     const a = self.pop();
-                    if (a == .big_int and b == .big_int) {
+                    if (a == .string and b == .string) {
+                        self.push(.{ .boolean = std.mem.order(u8, a.string, b.string) == .lt });
+                    } else if (a == .big_int and b == .big_int) {
                         self.push(.{ .boolean = a.big_int.compare(b.big_int) == .lt });
                     } else {
-                        const av = toF64(a) orelse 0.0;
-                        const bv = toF64(b) orelse 0.0;
+                        const av = toNumber(a);
+                        const bv = toNumber(b);
                         self.push(.{ .boolean = av < bv });
                     }
                 },
                 .gt => {
                     const b = self.pop();
                     const a = self.pop();
-                    if (a == .big_int and b == .big_int) {
+                    if (a == .string and b == .string) {
+                        self.push(.{ .boolean = std.mem.order(u8, a.string, b.string) == .gt });
+                    } else if (a == .big_int and b == .big_int) {
                         self.push(.{ .boolean = a.big_int.compare(b.big_int) == .gt });
                     } else {
-                        const av = toF64(a) orelse 0.0;
-                        const bv = toF64(b) orelse 0.0;
+                        const av = toNumber(a);
+                        const bv = toNumber(b);
                         self.push(.{ .boolean = av > bv });
+                    }
+                },
+                .le => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    if (a == .string and b == .string) {
+                        const ord = std.mem.order(u8, a.string, b.string);
+                        self.push(.{ .boolean = ord == .lt or ord == .eq });
+                    } else if (a == .big_int and b == .big_int) {
+                        const cmp = a.big_int.compare(b.big_int);
+                        self.push(.{ .boolean = cmp == .lt or cmp == .eq });
+                    } else {
+                        self.push(.{ .boolean = toNumber(a) <= toNumber(b) });
+                    }
+                },
+                .ge => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    if (a == .string and b == .string) {
+                        const ord = std.mem.order(u8, a.string, b.string);
+                        self.push(.{ .boolean = ord == .gt or ord == .eq });
+                    } else if (a == .big_int and b == .big_int) {
+                        const cmp = a.big_int.compare(b.big_int);
+                        self.push(.{ .boolean = cmp == .gt or cmp == .eq });
+                    } else {
+                        self.push(.{ .boolean = toNumber(a) >= toNumber(b) });
                     }
                 },
                 .not_ => self.push(.{ .boolean = !truthy(self.pop()) }),
@@ -2646,12 +2672,50 @@ fn truthy(v: Value) bool {
         else => true,
     };
 }
-fn toF64(v: Value) ?f64 {
+/// ECMAScript ToNumber for VM arithmetic and relational comparison.
+/// undefined (and array holes) coerce to NaN, null to +0, booleans to 0/1,
+/// strings to their decimal literal ("" -> 0). Objects/arrays keep the legacy
+/// 0 fallback; full ToPrimitive lives in the builtin layer.
+fn toNumber(v: Value) f64 {
     return switch (v) {
-        .float => |f| f,
         .integer => |i| @floatFromInt(i),
-        else => null,
+        .float => |f| f,
+        .boolean => |b| if (b) 1.0 else 0.0,
+        .null => 0.0,
+        .void, .hole => std.math.nan(f64),
+        .string => |s| stringToNumber(s),
+        .big_int => |b| if (b.toI64()) |i| @floatFromInt(i) else 0.0,
+        else => 0.0,
     };
+}
+
+fn stringToNumber(s: []const u8) f64 {
+    const trimmed = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+    if (trimmed.len == 0) return 0.0;
+    if (std.ascii.eqlIgnoreCase(trimmed, "Infinity")) return std.math.inf(f64);
+    if (std.ascii.eqlIgnoreCase(trimmed, "-Infinity")) return -std.math.inf(f64);
+    if (std.ascii.eqlIgnoreCase(trimmed, "+Infinity")) return std.math.inf(f64);
+
+    var body = trimmed;
+    const signed = body.len > 0 and (body[0] == '+' or body[0] == '-');
+    if (signed) body = body[1..];
+
+    // Hex/binary/octal literals are unsigned in ECMAScript: "-0x10" is NaN.
+    if (body.len > 2 and body[0] == '0') {
+        const radix: u8 = switch (body[1]) {
+            'x', 'X' => 16,
+            'b', 'B' => 2,
+            'o', 'O' => 8,
+            else => 0,
+        };
+        if (radix != 0) {
+            if (signed) return std.math.nan(f64);
+            const parsed = std.fmt.parseInt(u64, body[2..], radix) catch return std.math.nan(f64);
+            return @floatFromInt(parsed);
+        }
+    }
+
+    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 fn toInt(v: Value) i64 {
     return switch (v) {

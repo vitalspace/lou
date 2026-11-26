@@ -2,20 +2,18 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**pendiente (coerción resuelta)** — reverificado 2026-11-26 (compat: 57 PASS / 27 FAIL / 1 SKIP)
 
-`tests/compat/for-var-no-init.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+La parte de coerción ya coincide: `undefined < 3` es `false`, así que `for (var i; i < 3; i++)` no itera y las líneas 1–3 de salida son idénticas a Node.
+
+Queda el caso 5 (línea de salida 4):
 
 ```text
-Lou : var-no-init: undefined
-Node: let-no-init: undefined
+Lou : const-no-init: false
+Node: const-no-init: true
 ```
 
-`undefined < 3` se evalúa `true`, así que el bucle de `for (var i; i < 3; i++)` corre en Lou y en Node no. Es la misma coerción que hace `undefined + undefined = 0`.
-
-```bash
-diff <(./zig-out/bin/lou run tests/compat/for-var-no-init.lou) <(node tests/compat/for-var-no-init.js)
-```
+`eval("for (const c;;) {}")` no lanza nada: el parser acepta `const` sin inicializador. Aunque lo rechazara, `e instanceof SyntaxError` seguiría fallando porque `SyntaxError` es un object y no un constructor (ver `error-objects.md`). Bloqueado por los objetos Error.
 
 ## Problema
 

@@ -2,20 +2,11 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**COMPLETADO** — verificado 2026-11-26 (compat: 57 PASS / 27 FAIL / 1 SKIP)
 
-`tests/compat/nan-comparison.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+`NaN <= 5` se compilaba como `!(NaN > 5)` = `true`. Ahora `<=` y `>=` tienen opcodes propios (`le`, `ge`) que comparan directamente sobre `toNumber`, así que cualquier comparación con NaN da `false`, igual que Node. `tests/compat/nan-comparison.lou` pasa.
 
-```text
-Lou : true
-Node: false
-```
-
-`NaN <= 5` se compila como `!(NaN > 5)` = `!(false)` = `true`. `<=` y `>=` necesitan el caso NaN explícito (cualquier comparación con NaN es `false`).
-
-```bash
-diff <(./zig-out/bin/lou run tests/compat/nan-comparison.lou) <(node tests/compat/nan-comparison.js)
-```
+De paso, la misma ruta de comparación ahora hace lo correcto en dos casos vecinos: `string < string` es lexicográfico (no numérico) y `bigint` contra number convierte el BigInt a f64 vía `toI64` (`2n < 2` → `false`, `1n >= 1` → `true`).
 
 ## Problema
 

@@ -2,33 +2,20 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**COMPLETADO** — verificado 2026-11-26 (compat: 57 PASS / 27 FAIL / 1 SKIP)
 
-`tests/compat/destructuring.lou` sigue FAIL. Primera divergencia (línea 11), Lou vs Node:
-
-```text
-Lou : 0
-Node: NaN
-```
-
-El default de patrón completo (`f4()` con `{x, y} = {}`) da `0` en vez de `NaN`: `undefined + undefined` se evalúa como `0`.
-
-Estado de los 8 fixtures del área:
+Los 8 fixtures del área pasan byte-identical. El último fallo era `f4()` con default `{x, y} = {}`: `undefined + undefined` se evaluaba como `0` en vez de `NaN`. Se corrigió ToNumber en la VM (`toNumber`/`stringToNumber` en `src/vm.zig`): `undefined` y los huecos van a `NaN`, `null` a `0`, booleanos a `0/1` y strings se parsean (incluye `0x`/`0b`/`0o` e `Infinity`).
 
 | Test file | Status |
 |---|---|
-| `tests/compat/destructuring.lou` | **FAIL** (línea 11: `0` vs `NaN`) |
+| `tests/compat/destructuring.lou` | PASS |
 | `tests/compat/destructuring-decl.lou` | PASS |
 | `tests/compat/destructuring-assign.lou` | PASS |
 | `tests/compat/destructuring-nested.lou` | PASS |
-| `tests/compat/destructuring-nested-rest.lou` | **FAIL** (línea 1: `1` vs `NaN`) |
+| `tests/compat/destructuring-nested-rest.lou` | PASS |
 | `tests/compat/destructuring-array.lou` | PASS |
 | `tests/compat/destructuring-for-of.lou` | PASS |
 | `tests/compat/destructuring-for-in.lou` | PASS |
-
-```bash
-diff <(./zig-out/bin/lou run tests/compat/destructuring.lou) <(node tests/compat/destructuring.js)
-```
 
 ## Resumen de implementación
 
