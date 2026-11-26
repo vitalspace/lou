@@ -1424,6 +1424,73 @@ pub const Parser = struct {
             };
             this.nextToken(); // consume key
 
+            // ES2015 accessor properties: `get name() { ... }` /
+            // `set name(value) { ... }`. The first key we consumed is the
+            // `get`/`set` keyword, so a following colon means it is a normal
+            // property literally named "get"/"set".
+            if ((std.mem.eql(u8, key, "get") or std.mem.eql(u8, key, "set")) and
+                this.current_token.type != .Colon)
+            {
+                const accessor_key = switch (this.current_token.type) {
+                    .String, .Integer, .Float => this.current_token.literal,
+                    else => blk: {
+                        if (!isPropertyName(this.current_token.type)) return error.ExpectedPropertyName;
+                        break :blk this.current_token.literal;
+                    },
+                };
+                this.nextToken(); // consume accessor name
+
+                if (this.current_token.type != .LParen) return error.ExpectedLParen;
+                this.nextToken(); // consume '('
+                const params = try this.parseFunctionParameters();
+                if (this.current_token.type != .RParen) return error.ExpectedRParen;
+                this.nextToken(); // consume ')'
+
+                const body = try this.parseFunctionBody();
+                const final_body = if (params.destructured_preamble) |preamble| blk: {
+                    if (body.* == .BlockStatement) {
+                        var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, body.BlockStatement.statements.len + 1);
+                        defer new_stmts.deinit(this.allocator);
+                        try new_stmts.append(this.allocator, preamble);
+                        for (body.BlockStatement.statements) |s| try new_stmts.append(this.allocator, s);
+                        this.allocator.free(body.BlockStatement.statements);
+                        const wrapped = try this.allocator.create(ast.Node);
+                        wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                        break :blk wrapped;
+                    } else {
+                        var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
+                        defer new_stmts.deinit(this.allocator);
+                        try new_stmts.append(this.allocator, preamble);
+                        const ret = try this.allocator.create(ast.Node);
+                        ret.* = .{ .ReturnStatement = .{ .value = body } };
+                        try new_stmts.append(this.allocator, ret);
+                        const wrapped = try this.allocator.create(ast.Node);
+                        wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                        break :blk wrapped;
+                    }
+                } else body;
+
+                const fn_node = try this.allocator.create(ast.Node);
+                fn_node.* = .{ .FunctionDeclaration = .{
+                    .name = "",
+                    .parameters = params.names,
+                    .body = final_body,
+                    .rest_param = params.rest_param,
+                } };
+                try properties.append(this.allocator, .{
+                    .key = accessor_key,
+                    .value = fn_node,
+                    .kind = if (std.mem.eql(u8, key, "get")) .get else .set,
+                });
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                } else if (this.current_token.type != .RBrace) {
+                    return error.ExpectedCommaOrRBrace;
+                }
+                continue;
+            }
+
             if (this.current_token.type != .Colon) return error.ExpectedColon;
             this.nextToken(); // consume ':'
 

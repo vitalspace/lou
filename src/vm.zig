@@ -1215,6 +1215,7 @@ pub const Compiler = struct {
             .ObjectLiteral => |o| {
                 var has_spread = false;
                 var has_computed = false;
+                var has_accessor = false;
                 for (o.properties) |prop| {
                     if (prop.value.* == .SpreadExpression) {
                         has_spread = true;
@@ -1222,8 +1223,11 @@ pub const Compiler = struct {
                     if (prop.key_expr != null) {
                         has_computed = true;
                     }
+                    if (prop.kind != .init) {
+                        has_accessor = true;
+                    }
                 }
-                if (has_spread or has_computed) {
+                if (has_spread or has_computed or has_accessor) {
                     // Defer evaluation to runtime via eval_node opcode.
                     // Computed property keys must be evaluated at runtime.
                     self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
@@ -1478,6 +1482,52 @@ pub const VM = struct {
     /// accidental cycles) looking for property `name`. Returns the
     /// Value stored at the first link that has it, or null if neither
     /// the object nor any prototype in its chain defines it.
+    fn accessorPart(_: *VM, val: Value, part: []const u8) ?Value {
+        if (val != .js_object) return null;
+        const tag = val.js_object.properties.get("@@native") orelse return null;
+        if (tag != .string or !std.mem.eql(u8, tag.string, "Accessor")) return null;
+        return val.js_object.properties.get(part);
+    }
+
+    fn findAccessorValue(_: *VM, obj: *ast.ObjectValue, key: []const u8) ?Value {
+        var cur: ?*ast.ObjectValue = obj;
+        while (cur) |o| {
+            if (o.properties.get(key)) |v| {
+                if (v != .js_object) return null;
+                const tag = v.js_object.properties.get("@@native") orelse return null;
+                if (tag != .string or !std.mem.eql(u8, tag.string, "Accessor")) return null;
+                return v;
+            }
+            cur = o.prototype;
+        }
+        return null;
+    }
+
+    fn pushProperty(self: *VM, obj: Value, p: []const u8) !void {
+        var cur: ?*ast.ObjectValue = obj.js_object;
+        while (cur) |o| {
+            if (o.properties.get(p)) |v| {
+                if (self.accessorPart(v, "get")) |getter| {
+                    const r = callFunctionValue(getter, &[_]Value{}, self.env, obj) catch |err| {
+                        if (self.env.throw_hit) {
+                            if (try self.deliverBuiltinThrow()) return;
+                            return error.Thrown;
+                        }
+                        return err;
+                    };
+                    self.push(r);
+                } else if (self.accessorPart(v, "set") != null) {
+                    self.push(.{ .void = {} });
+                } else {
+                    self.push(v);
+                }
+                return;
+            }
+            cur = o.prototype;
+        }
+        self.push(.{ .void = {} });
+    }
+
     fn lookupInPrototypeChain(_: *VM, start: *ast.ObjectValue, name: []const u8) ?Value {
         var o: ?*ast.ObjectValue = start;
         var depth: u8 = 0;
@@ -2050,17 +2100,11 @@ pub const VM = struct {
                                 } else {
                                     self.push(.{ .integer = 0 });
                                 }
-                            } else if (obj.js_object.properties.get(p)) |v| {
-                                self.push(v);
                             } else {
-                                // @@type-bearing native: walk prototype chain for general members.
-                                self.push(self.lookupInPrototypeChain(obj.js_object, p) orelse .{ .void = {} });
+                                try self.pushProperty(obj, p);
                             }
-                        } else if (obj.js_object.properties.get(p)) |v| {
-                            self.push(v);
                         } else {
-                            // Plain object: walk prototype chain for inherited members.
-                            self.push(self.lookupInPrototypeChain(obj.js_object, p) orelse .{ .void = {} });
+                            try self.pushProperty(obj, p);
                         }
                     } else if (obj == .object) {
                         const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj.object));
@@ -2091,11 +2135,25 @@ pub const VM = struct {
                     const val = self.pop();
                     const obj = self.pop();
                     if (obj == .js_object) {
-                        obj.js_object.properties.put(p, val) catch {};
-                        if (self.env.globalObject()) |g| {
-                            if (g == obj.js_object) self.env.setGlobalProperty(p, val);
+                        if (self.findAccessorValue(obj.js_object, p)) |acc| {
+                            if (self.accessorPart(acc, "set")) |setter| {
+                                var setter_args = [_]Value{val};
+                                _ = callFunctionValue(setter, &setter_args, self.env, obj) catch |err| {
+                                    if (self.env.throw_hit) {
+                                        if (try self.deliverBuiltinThrow()) continue;
+                                        return error.Thrown;
+                                    }
+                                    return err;
+                                };
+                            }
+                            self.push(val);
+                        } else {
+                            obj.js_object.properties.put(p, val) catch {};
+                            if (self.env.globalObject()) |g| {
+                                if (g == obj.js_object) self.env.setGlobalProperty(p, val);
+                            }
+                            self.push(val);
                         }
-                        self.push(val);
                     } else {
                         self.push(.{ .void = {} });
                     }

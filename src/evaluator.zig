@@ -581,7 +581,26 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             else => "[object Object]",
                         };
                     } else prop.key;
-                    try obj.properties.put(key, val);
+                    if (prop.kind == .init) {
+                        try obj.properties.put(key, val);
+                    } else {
+                        var accessor: *ast.ObjectValue = undefined;
+                        if (obj.properties.get(key)) |existing| {
+                            if (isAccessorValue(existing)) {
+                                accessor = existing.js_object;
+                            } else {
+                                accessor = try ast.ObjectValue.init(env.allocator);
+                                try env.objects.append(env.allocator, accessor);
+                                try accessor.properties.put("@@native", .{ .string = "Accessor" });
+                            }
+                        } else {
+                            accessor = try ast.ObjectValue.init(env.allocator);
+                            try env.objects.append(env.allocator, accessor);
+                            try accessor.properties.put("@@native", .{ .string = "Accessor" });
+                        }
+                        try accessor.properties.put(if (prop.kind == .get) "get" else "set", val);
+                        try obj.properties.put(key, .{ .js_object = accessor });
+                    }
                 }
             }
 
@@ -629,8 +648,16 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     else => return error.InvalidIndex,
                 };
-                if (array_val.js_object.properties.get(key)) |v| {
-                    return v;
+                var cur: ?*ast.ObjectValue = array_val.js_object;
+                while (cur) |o| {
+                    if (o.properties.get(key)) |v| {
+                        if (accessorPart(v, "get")) |getter| {
+                            return try callFunctionValue(getter, &[_]ast.Value{}, env, .{ .js_object = array_val.js_object });
+                        }
+                        if (isAccessorValue(v)) return .{ .void = {} };
+                        return v;
+                    }
+                    cur = o.prototype;
                 }
                 return .{ .void = {} };
             }
@@ -688,7 +715,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return error.InvalidAssignmentTarget;
             }
             const val = try evaluate(p.value, env);
-            try object_val.js_object.properties.put(p.key, val);
+            if (!try setAccessorProperty(env, object_val.js_object, p.key, val)) {
+                try object_val.js_object.properties.put(p.key, val);
+            }
             if (env.globalObject()) |g| {
                 if (g == object_val.js_object) env.setGlobalProperty(p.key, val);
             }
@@ -714,7 +743,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     const obj_val = try evaluate(b.left.MemberAccess.object, env);
                     if (obj_val != .js_object) return error.InvalidAssignment;
                     const val = try evaluate(b.right, env);
-                    try obj_val.js_object.properties.put(b.left.MemberAccess.property, val);
+                    if (!try setAccessorProperty(env, obj_val.js_object, b.left.MemberAccess.property, val)) {
+                        try obj_val.js_object.properties.put(b.left.MemberAccess.property, val);
+                    }
                     if (env.globalObject()) |g| {
                         if (g == obj_val.js_object) env.setGlobalProperty(b.left.MemberAccess.property, val);
                     }
@@ -744,7 +775,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             },
                             else => return error.InvalidIndex,
                         };
-                        try obj_val.js_object.properties.put(key, val);
+                        if (!try setAccessorProperty(env, obj_val.js_object, key, val)) {
+                            try obj_val.js_object.properties.put(key, val);
+                        }
                         if (env.globalObject()) |g| {
                             if (g == obj_val.js_object) env.setGlobalProperty(key, val);
                         }
@@ -3249,9 +3282,19 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             } else if (value == .js_object) {
                 var cur: ?*ast.ObjectValue = value.js_object;
                 while (cur) |o| {
-                    if (o.properties.get(m.property)) |v| return v;
+                    if (o.properties.get(m.property)) |v| {
+                        if (accessorPart(v, "get")) |getter| {
+                            return try callFunctionValue(getter, &[_]ast.Value{}, env, .{ .js_object = value.js_object });
+                        }
+                        if (isAccessorValue(v)) return .{ .void = {} };
+                        return v;
+                    }
                     cur = o.prototype;
                 }
+                return .{ .void = {} };
+            } else if (value == .object) {
+                const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(value.object));
+                if (bObjPtr.getProperty(m.property)) |prop_val| return prop_val;
                 return .{ .void = {} };
             } else {
                 return error.InvalidMemberAccess;
@@ -4097,6 +4140,37 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             return try evaluate(func.body, func_env);
         }
     return error.NotAFunction;
+}
+
+fn isAccessorValue(val: ast.Value) bool {
+    if (val != .js_object) return false;
+    const tag = val.js_object.properties.get("@@native") orelse return false;
+    return tag == .string and std.mem.eql(u8, tag.string, "Accessor");
+}
+
+fn accessorPart(val: ast.Value, part: []const u8) ?ast.Value {
+    if (!isAccessorValue(val)) return null;
+    return val.js_object.properties.get(part);
+}
+
+fn findAccessorValue(obj: *ast.ObjectValue, key: []const u8) ?ast.Value {
+    var cur: ?*ast.ObjectValue = obj;
+    while (cur) |o| {
+        if (o.properties.get(key)) |v| {
+            return if (isAccessorValue(v)) v else null;
+        }
+        cur = o.prototype;
+    }
+    return null;
+}
+
+fn setAccessorProperty(env: *Environment, obj: *ast.ObjectValue, key: []const u8, val: ast.Value) !bool {
+    const acc = findAccessorValue(obj, key) orelse return false;
+    if (acc.js_object.properties.get("set")) |setter| {
+        var setter_args = [_]ast.Value{val};
+        _ = try callFunctionValue(setter, &setter_args, env, .{ .js_object = obj });
+    }
+    return true;
 }
 
 pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
@@ -5351,4 +5425,16 @@ test "Date objects coerce to timestamps in arithmetic" {
     const result = try parseAndEvaluate("new Date(1000) - new Date(500)", &env_);
     try std.testing.expect(result == .float);
     try std.testing.expectEqual(@as(f64, 500), result.float);
+}
+
+test "object literal getters and setters" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluate(
+        \\(() => { const o = { _v: 1, get v() { return this._v; }, set v(n) { this._v = n * 2; } }; o.v = 5; return o.v; })()
+    , &env_);
+    try std.testing.expect(result == .integer);
+    try std.testing.expectEqual(@as(i64, 10), result.integer);
 }

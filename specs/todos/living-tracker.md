@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 16:18:40 |
-| Commit | `04c80ac` |
+| Snapshot | 2026-11-26 16:32:19 |
+| Commit | `574edb8` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 75 |
-| FAIL | 10 |
+| PASS | 76 |
+| FAIL | 9 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,8 +19,8 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 75 |
-| **FAIL** | 10 |
+| **PASS** | 76 |
+| **FAIL** | 9 |
 | SKIP (sin .js) | 1 |
 | Specs pendientes | 38 |
 | Specs hechos | 61 |
@@ -55,42 +55,35 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
   - Lou : `error: ExpectedComma`
   - Node: `0`
 
-### 5. `getter-setter.lou` - FAIL
-
-- exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 1 vs 6 líneas):
-  - Lou : `error: ExpectedColon`
-  - Node: `42`
-
-### 6. `iterator-protocol.lou` - FAIL
+### 5. `iterator-protocol.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 10 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `array sum: 6`
 
-### 7. `json-parse.lou` - FAIL
+### 6. `json-parse.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 21, 23 vs 23 líneas):
   - Lou : `ok(\u  ): true / SyntaxError`
   - Node: `ok(\u): true / SyntaxError`
 
-### 8. `regex-literal.lou` - FAIL
+### 7. `regex-literal.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 5 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `--- regex literal syntax ---`
 
-### 9. `regex-properties.lou` - FAIL
+### 8. `regex-properties.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 19 vs 19 líneas):
   - Lou : `undefined`
   - Node: `hello`
 
-### 10. `weakref.lou` - FAIL
+### 9. `weakref.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 5, 12 vs 12 líneas):
