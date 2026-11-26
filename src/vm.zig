@@ -1205,7 +1205,22 @@ pub const Compiler = struct {
                 // Defer to evaluator - complex expressions need runtime evaluation
                 self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
             },
-            else => {},
+            .VoidExpression => |v| {
+                // Evaluate the operand for side effects, discard it, push undefined.
+                self.expr(v.operand);
+                self.c.op(.pop);
+                self.c.op(.void_);
+            },
+            .ImportMetaExpression, .DeleteExpression => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
+            else => {
+                // Unknown expression: let the AST evaluator handle it. Emitting
+                // nothing here silently corrupted the stack (the statement-level
+                // pop underflowed and aborted the process), so fall back instead
+                // of guessing.
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
         }
     }
 };
