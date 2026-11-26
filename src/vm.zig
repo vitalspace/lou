@@ -99,7 +99,7 @@ pub const Chunk = struct {
         self.w8(@truncate(v & 0xff));
     }
     fn op(self: *Chunk, o: Op) void {
-        self.w8(@intFromEnum(o));
+        self.w8(@backingInt(o));
     }
     fn op2(self: *Chunk, o: Op, b: u8) void {
         self.op(o);
@@ -905,8 +905,7 @@ pub const Compiler = struct {
                         }
                     }
                 },
-                .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign,
-                .PowerAssign, .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign => {
+                .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign, .PowerAssign, .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign => {
                     const op2: Op = switch (b.operator) {
                         .PlusAssign => .add,
                         .MinusAssign => .sub,
@@ -1449,7 +1448,7 @@ pub const VM = struct {
         self.sp = 0;
         while (true) {
             if (self.ip >= self.c.code.items.len) break;
-            const op: Op = @enumFromInt(self.c.code.items[self.ip]);
+            const op: Op = @fromBackingInt(@intCast(self.c.code.items[self.ip]));
             self.ip += 1;
             switch (op) {
                 .constant => {
@@ -2996,7 +2995,6 @@ fn getFloatValue(node: *ast.Node) ?f64 {
     };
 }
 
-
 test "VM throws TypeError for Map.size()" {
     const allocator = std.testing.allocator;
     const Lexer = @import("lexer.zig").Lexer;
@@ -3123,4 +3121,28 @@ test "VM throws TypeError for String.length()" {
     compiler.deinit();
 
     try std.testing.expectError(error.Thrown, vm.interpret(&chunk));
+}
+
+test "toNumber follows ECMAScript ToNumber" {
+    try std.testing.expect(std.math.isNan(toNumber(.{ .void = {} })));
+    try std.testing.expect(std.math.isNan(toNumber(.{ .hole = {} })));
+    try std.testing.expectEqual(@as(f64, 0.0), toNumber(.{ .null = {} }));
+    try std.testing.expectEqual(@as(f64, 1.0), toNumber(.{ .boolean = true }));
+    try std.testing.expectEqual(@as(f64, 0.0), toNumber(.{ .boolean = false }));
+    try std.testing.expectEqual(@as(f64, 42.5), toNumber(.{ .float = 42.5 }));
+    try std.testing.expectEqual(@as(f64, 42.0), toNumber(.{ .integer = 42 }));
+}
+
+test "stringToNumber parses StringNumericLiteral" {
+    try std.testing.expectEqual(@as(f64, 0.0), stringToNumber(""));
+    try std.testing.expectEqual(@as(f64, 0.0), stringToNumber("   "));
+    try std.testing.expectEqual(@as(f64, 42.0), stringToNumber(" 42 "));
+    try std.testing.expectEqual(@as(f64, 16.0), stringToNumber("0x10"));
+    try std.testing.expectEqual(@as(f64, 3.0), stringToNumber("0b11"));
+    try std.testing.expectEqual(@as(f64, 8.0), stringToNumber("0o10"));
+    try std.testing.expect(std.math.isNan(stringToNumber("abc")));
+    try std.testing.expect(std.math.isNan(stringToNumber("12px")));
+    try std.testing.expect(std.math.isNan(stringToNumber("-0x10")));
+    try std.testing.expect(std.math.isInf(stringToNumber("Infinity")));
+    try std.testing.expect(std.math.isInf(stringToNumber("-Infinity")));
 }
