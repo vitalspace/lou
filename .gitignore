@@ -20,3 +20,4 @@ profiler/results.json
 js/generators/bench-generators.js
 specs/todos/profiler.md
 specs/tools/profiler.md
+__pycache__/
