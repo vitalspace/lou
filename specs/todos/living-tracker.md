@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 13:21:42 |
-| Commit | `11a378a` |
+| Snapshot | 2026-11-26 13:33:25 |
+| Commit | `02ba3f9` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 59 |
-| FAIL | 26 |
+| PASS | 60 |
+| FAIL | 25 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,10 +19,10 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 59 |
-| **FAIL** | 26 |
+| **PASS** | 60 |
+| **FAIL** | 25 |
 | SKIP (sin .js) | 1 |
-| Specs pendientes | 46 |
+| Specs pendientes | 45 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -195,14 +195,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
   - Lou : `error: UnexpectedToken`
   - Node: `two`
 
-### 25. `typeof-undeclared.lou` - FAIL
-
-- exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 1 vs 8 líneas):
-  - Lou : `error: UndefinedVariable`
-  - Node: `undefined`
-
-### 26. `weakref.lou` - FAIL
+### 25. `weakref.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 5, 11 vs 12 líneas):
@@ -256,7 +249,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `temporal-dead-zone.md` | NOT IMPLEMENTED | `temporal-dead-zone` | sin test |
 | `temporal.md` | pendiente | `temporal` | sin test |
 | `typed-arrays.md` | pendiente | `typed-arrays` | sin test |
-| `typeof-undeclared.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `typeof-undeclared` | FAIL (typeof-undeclared) |
 | `weakmap.md` | pendiente | `weakmap` | sin test |
 | `weakset.md` | pendiente | `weakset` | sin test |
 

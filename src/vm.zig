@@ -1193,8 +1193,15 @@ pub const Compiler = struct {
                 self.c.ptch(end_jmp);
             },
             .TypeOfExpression => |t| {
-                self.expr(t.operand);
-                self.c.op(.typeof_op);
+                if (t.operand.* == .Identifier) {
+                    // typeof only tolerates an undeclared binding when the operand is a
+                    // bare identifier; defer so the evaluator can resolve the reference
+                    // without throwing (ES 13.5.3).
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                } else {
+                    self.expr(t.operand);
+                    self.c.op(.typeof_op);
+                }
             },
             .DirectCall => {
                 // Defer to evaluator - complex expressions need runtime evaluation

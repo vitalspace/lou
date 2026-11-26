@@ -2688,12 +2688,17 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .TypeOfExpression => |t| {
-            const val = evaluate(t.operand, env) catch |err| {
-                if (err == error.UndefinedVariable) {
-                    return .{ .string = "undefined" };
+            // Only a bare identifier reference may be undeclared here; anything else
+            // (typeof (x + 1), typeof a.b with a undeclared) must still throw.
+            const val = if (t.operand.* == .Identifier)
+                evaluate(t.operand, env) catch |err| {
+                    if (err == error.UndefinedVariable) {
+                        return .{ .string = "undefined" };
+                    }
+                    return err;
                 }
-                return err;
-            };
+            else
+                try evaluate(t.operand, env);
             const type_str: []const u8 = switch (val) {
                 .integer => "number",
                 .float => "number",
