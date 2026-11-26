@@ -65,6 +65,46 @@ zig build run -- run script.js
 > Debug builds use Zig's safety allocator with leak detection. They are
 > intentionally slower; benchmark with `zig build release`.
 
+## Benchmarks
+
+`bench.sh` runs the profiler in `profiler/` and turns the results into charts.
+
+```bash
+./bench.sh main                  # Lou vs Node on js/main.js (50 runs, deep)
+./bench.sh arrays                # Lou vs Bun on js/arrays/arrays.js
+./bench.sh benchmark --lou --node --bun --mode deep js/main.js
+./bench.sh plot                  # charts for every saved result
+./bench.sh plot --open           # ... and open the HTML report
+```
+
+Every run is saved to `bench-results/<timestamp>-<script>.json` and charted into
+`bench-results/latest/`:
+
+| File | Metric |
+| --- | --- |
+| `00-dashboard.png` | all charts in one image |
+| `01-wall-time.png` | execution time, median with min/max whiskers |
+| `02-cpu-usage.png` | user vs kernel CPU time, and CPU utilisation |
+| `03-memory.png` | peak RSS and how much it varies between runs |
+| `04-distribution.png` | every individual run (box plot + scatter) |
+| `05-system.png` | page faults and context switches |
+| `06-ratios.png` | wall, CPU and memory as a multiple of the fastest runtime |
+| `07-history.png` | trends across all saved results |
+| `index.html` | all of the above plus a summary table |
+
+Charts need Python 3 with matplotlib:
+
+```bash
+sudo pacman -S python-matplotlib      # Arch
+sudo apt install python3-matplotlib   # Debian/Ubuntu
+```
+
+The renderer is `scripts/bench_plot.py`; it also works on any profiler JSON:
+
+```bash
+python3 scripts/bench_plot.py results.json -o out/ --open
+```
+
 ## Console parity
 
 `console` is not a thin wrapper around `log`. It follows Node's behavior for
@@ -140,7 +180,7 @@ Current status:
 
 - **1,044** Zig tests pass.
 - **85** JavaScript compatibility fixtures.
-- **47** produce byte-identical output to Node, **37** are known gaps inherited from the current main branch, and **1** is skipped.
+- **51** produce byte-identical output to Node, **33** are known gaps, and **1** is skipped.
 - `console-output` and `console-inspection` match Node exactly, including ANSI output on a TTY.
 
 The compatibility runner strips ANSI before diffing, so color behavior is also
