@@ -1080,6 +1080,12 @@ pub const Compiler = struct {
                     // short-circuit bytecode with assignment is non-trivial.
                     self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
                 },
+                .In, .InstanceOf => {
+                    // Membership/prototype operators need object introspection;
+                    // the AST evaluator implements them, so evaluate the whole
+                    // node at runtime instead of emitting two stray operands.
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                },
                 .Not => {
                     // !x is parsed as BinaryExpression(left=false, op=Not, right=x)
                     self.expr(b.right);

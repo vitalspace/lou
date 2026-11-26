@@ -541,6 +541,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         .ObjectLiteral => |o| {
             const obj = try ast.ObjectValue.init(env.allocator);
             errdefer obj.deinit();
+            obj.prototype = env.object_prototype;
 
             for (o.properties) |prop| {
                 if (prop.value.* == .SpreadExpression) {
@@ -1186,10 +1187,19 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     else => return .{ .boolean = false },
                 };
                 return switch (right) {
-                    .js_object => |obj| .{ .boolean = obj.properties.contains(key) },
+                    .js_object => |obj| blk: {
+                        var cur: ?*ast.ObjectValue = obj;
+                        while (cur) |o| {
+                            if (o.properties.contains(key)) break :blk .{ .boolean = true };
+                            cur = o.prototype;
+                        }
+                        break :blk .{ .boolean = false };
+                    },
                     .array => |arr| blk: {
-                        const index = std.fmt.parseInt(usize, key, 10) catch break :blk ast.Value{ .boolean = false };
-                        break :blk .{ .boolean = index < arr.elements.items.len };
+                        if (std.mem.eql(u8, key, "length")) break :blk .{ .boolean = true };
+                        const index = arrayKeyIndex(key) orelse break :blk ast.Value{ .boolean = false };
+                        if (index >= arr.elements.items.len) break :blk .{ .boolean = false };
+                        break :blk .{ .boolean = arr.elements.items[index] != .hole };
                     },
                     .string => |s| blk: {
                         const index = std.fmt.parseInt(usize, key, 10) catch break :blk ast.Value{ .boolean = false };
@@ -5278,4 +5288,42 @@ test "looseValuesEqual - number/string/bool coercion" {
     try std.testing.expect(looseValuesEqual(allocator, &bigints, .{ .integer = 1 }, .{ .float = 1.0 }));
     try std.testing.expect(!looseValuesEqual(allocator, &bigints, .{ .integer = 1 }, .{ .string = "2" }));
     try std.testing.expect(!looseValuesEqual(allocator, &bigints, .{ .null = {} }, .{ .integer = 0 }));
+}
+
+/// Canonical array index key: decimal digits only, no leading zeros ("0" is valid).
+fn arrayKeyIndex(key: []const u8) ?usize {
+    if (key.len == 0) return null;
+    if (key.len > 1 and key[0] == '0') return null;
+    for (key) |ch| {
+        if (ch < '0' or ch > '9') return null;
+    }
+    return std.fmt.parseInt(usize, key, 10) catch null;
+}
+
+test "in operator - own properties, arrays and holes" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expect((try parseAndEvaluate("'a' in { a: 1 }", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("'z' in { a: 1 }", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("0 in [10, 20]", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("2 in [10, 20]", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("0 in [, 1]", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("1 in [, 1]", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("'01' in [1, 2]", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("'length' in [1, 2]", &env_)).boolean);
+}
+
+test "instanceof operator - builtins and primitives" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try std.testing.expect((try parseAndEvaluate("[] instanceof Array", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("[] instanceof Object", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("({}) instanceof Object", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("'hi' instanceof String", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("null instanceof Object", &env_)).boolean);
+    try std.testing.expect(!(try parseAndEvaluate("undefined instanceof Object", &env_)).boolean);
 }
