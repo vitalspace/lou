@@ -2285,9 +2285,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             switch (object_val) {
                 .js_object => |obj| {
-                    var it = obj.properties.iterator();
-                    while (it.next()) |entry| {
-                        const key = entry.key_ptr.*;
+                    // ES [[OwnPropertyKeys]] order: integer keys ascending, then
+                    // string keys in insertion order (@@ internals skipped).
+                    const ordered = obj.getForInKeys(env.allocator, &env.arrays) catch return error.OutOfMemory;
+                    for (ordered.elements.items) |key_value| {
+                        const key = key_value.string;
                         try setLoopVar(loop_env, f.kind, f.variable, .{ .string = key });
                         result = try evaluate(f.body, loop_env);
                         if (loop_env.return_hit) break;

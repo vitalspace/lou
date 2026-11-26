@@ -130,7 +130,9 @@ pub const ObjectValue = struct {
              if (std.fmt.parseInt(usize, key, 10)) |num| {
                  var buf: [32]u8 = undefined;
                  const canonical = std.fmt.bufPrint(&buf, "{d}", .{num}) catch "_";
-                 if (std.mem.eql(u8, key, canonical)) {
+                 // ECMAScript array indices are < 2^32 - 1, so 4294967295
+                  // and larger are plain string keys, not integer keys.
+                  if (num < 4294967295 and std.mem.eql(u8, key, canonical)) {
                      try int_keys.append(env_allocator, .{ .key = key, .num = num });
                  } else {
                      try str_keys.append(env_allocator, key);
@@ -603,6 +605,30 @@ test "getForInKeys: only integer keys sorted ascending" {
     try std.testing.expectEqualStrings("3", keys.elements.items[1].string);
     try std.testing.expectEqualStrings("5", keys.elements.items[2].string);
     try std.testing.expectEqualStrings("20", keys.elements.items[3].string);
+}
+
+test "getForInKeys: 4294967295 is a string key, not an array index" {
+    const allocator = std.testing.allocator;
+
+    var obj = try ObjectValue.init(allocator);
+    defer obj.deinit();
+
+    try obj.properties.put("a", .{ .float = 1.0 });
+    try obj.properties.put("4294967295", .{ .float = 2.0 });
+    try obj.properties.put("5", .{ .float = 3.0 });
+    try obj.properties.put("b", .{ .float = 4.0 });
+
+    var arrays = try std.ArrayList(*ArrayObject).initCapacity(allocator, 0);
+    defer arrays.deinit(allocator);
+
+    const keys = try obj.getForInKeys(allocator, &arrays);
+    defer keys.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), keys.elements.items.len);
+    try std.testing.expectEqualStrings("5", keys.elements.items[0].string);
+    try std.testing.expectEqualStrings("a", keys.elements.items[1].string);
+    try std.testing.expectEqualStrings("4294967295", keys.elements.items[2].string);
+    try std.testing.expectEqualStrings("b", keys.elements.items[3].string);
 }
 
 test "getForInKeys: only string keys preserve insertion order" {

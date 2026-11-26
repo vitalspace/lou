@@ -2593,15 +2593,14 @@ pub const VM = struct {
                 },
                 .get_for_in_keys => {
                     const val = self.pop();
-                    const keys_arr = ast.ArrayObject.init(self.env.allocator) catch unreachable;
+                    var keys_arr = ast.ArrayObject.init(self.env.allocator) catch unreachable;
                     switch (val) {
                         .js_object => |obj| {
-                            var it = obj.properties.iterator();
-                            while (it.next()) |entry| {
-                                const key_str = try self.env.allocator.dupe(u8, entry.key_ptr.*);
-                                self.env.owned_strings.append(self.env.allocator, key_str) catch {};
-                                keys_arr.elements.append(keys_arr.allocator, .{ .string = key_str }) catch {};
-                            }
+                            // ES [[OwnPropertyKeys]] order: integer keys ascending,
+                            // then string keys in insertion order. getForInKeys also
+                            // registers the array in env.arrays.
+                            keys_arr.deinit();
+                            keys_arr = obj.getForInKeys(self.env.allocator, &self.env.arrays) catch return error.OutOfMemory;
                         },
                         .array => |arr| {
                             var i: usize = 0;
@@ -2653,7 +2652,9 @@ pub const VM = struct {
                         },
                         else => {},
                     }
-                    self.env.arrays.append(self.env.allocator, keys_arr) catch {};
+                    if (val != .js_object) {
+                        self.env.arrays.append(self.env.allocator, keys_arr) catch {};
+                    }
                     // Create ForInIterator js_object with keys + index
                     const for_in_obj = ast.ObjectValue.init(self.env.allocator) catch unreachable;
                     self.env.objects.append(self.env.allocator, for_in_obj) catch {};
