@@ -40,7 +40,7 @@ pub fn TimeEnd(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult
         const elapsed_ns = nowNs(env) - start_time;
         if (env.io) |io| {
             var buf: [4096]u8 = undefined;
-            var file_writer = std.Io.File.Writer.init(.stdout(), io, &buf);
+            var file_writer = std.Io.File.Writer.initStreaming(.stdout(), io, &buf);
             const out = &file_writer.interface;
             formatElapsedTo(out, label, elapsed_ns);
             file_writer.flush() catch {};
@@ -49,7 +49,7 @@ pub fn TimeEnd(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult
     } else {
         if (env.io) |io| {
             var buf: [4096]u8 = undefined;
-            var file_writer = std.Io.File.Writer.init(.stdout(), io, &buf);
+            var file_writer = std.Io.File.Writer.initStreaming(.stdout(), io, &buf);
             const out = &file_writer.interface;
             out.print("Timer '{s}' does not exist\n", .{label}) catch {};
             file_writer.flush() catch {};

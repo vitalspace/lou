@@ -5,7 +5,7 @@ pub fn Clear(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     _ = args;
     if (env.io) |io| {
         var buf: [4096]u8 = undefined;
-        var file_writer = std.Io.File.Writer.init(.stdout(), io, &buf);
+        var file_writer = std.Io.File.Writer.initStreaming(.stdout(), io, &buf);
         const out = &file_writer.interface;
         out.print("\x1B[2J\x1B[H", .{}) catch {};
         file_writer.flush() catch {};

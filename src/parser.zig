@@ -955,7 +955,13 @@ pub const Parser = struct {
                 if (this.current_token.type == .Integer) {
                     const node = try this.allocator.create(ast.Node);
                     const value = try std.fmt.parseInt(i64, this.current_token.literal, 10);
-                    node.* = .{ .IntegerLiteral = .{ .value = -value } };
+                    // `-0` must stay a negative zero float; negating the
+                    // integer zero would lose the sign.
+                    if (value == 0) {
+                        node.* = .{ .FloatLiteral = .{ .value = -0.0 } };
+                    } else {
+                        node.* = .{ .IntegerLiteral = .{ .value = -value } };
+                    }
                     this.nextToken();
                     return node;
                 } else if (this.current_token.type == .Float) {

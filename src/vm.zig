@@ -1328,6 +1328,10 @@ pub const VM = struct {
             else => return self.push(.{ .void = {} }),
         };
 
+        const trace_name: []const u8 = if (fn_name.len > 0) fn_name else "<anonymous>";
+        self.env.pushTraceFrame(trace_name, 0);
+        defer self.env.popTraceFrame();
+
         // Try compiled bytecode first (only for named functions)
         if (fn_name.len > 0) {
             if (self.compiled_chunks.get(fn_name)) |chunk| {

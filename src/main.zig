@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Dir = Io.Dir;
 
@@ -74,17 +75,17 @@ fn openFile(filePath: []const u8, allocator: std.mem.Allocator, io: Io) ![]const
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var gpa = std.heap.DebugAllocator(.{
-        .thread_safe = true,
-        .never_unmap = true,
-        .retain_metadata = true,
-    }){};
-    defer {
-        if (gpa.deinit() == .leak) {
+    // Debug builds use the safety allocator with leak detection; release builds
+    // use the fast general-purpose allocator.
+    const Mode = @TypeOf(builtin.mode);
+    const is_debug = if (@hasField(Mode, "debug")) builtin.mode == .debug else builtin.mode == .Debug;
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer if (is_debug) {
+        if (debug_allocator.deinit() == .leak) {
             @panic("MEMORY LEAK DETECTED");
         }
-    }
-    const allocator = gpa.allocator();
+    };
+    const allocator = if (is_debug) debug_allocator.allocator() else std.heap.smp_allocator;
 
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
     defer args_it.deinit();
@@ -132,6 +133,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var env_ = try Environment.initWithIo(allocator, null, io);
+    env_.source_name = filePath;
+    env_.ansi_disabled =
+        if (init.environ_map.get("NO_COLOR")) |value| value.len > 0
+        else if (init.environ_map.get("TERM")) |term| std.mem.eql(u8, term, "dumb")
+        else false;
     // Bootstrap Object.prototype singleton so plain object literals
     // created later inherit it via their `.prototype` field.
     env_.object_prototype = try objectPrototypeMod.createObjectPrototype(allocator, &env_.objects);

@@ -91,7 +91,7 @@ pub const Vm = struct {
 
         var search_start: u32 = start_offset;
         while (search_start <= input.len) : (search_start += 1) {
-            var saves = [_]u32{0} ** SAVE_SLOTS;
+            var saves: [SAVE_SLOTS]u32 = @splat(0);
             saves[0] = search_start;
             saves[1] = search_start;
 

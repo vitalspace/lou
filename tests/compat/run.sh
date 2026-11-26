@@ -23,6 +23,8 @@ for lou in tests/compat/*.lou; do
     python3 -c '
 import sys, re
 text = sys.stdin.read()
+# console.time/timeEnd output is nondeterministic; never compare its value.
+text = re.sub(r"(?m)^[^\n]*:\s*[0-9]+(?:\.[0-9]+)?\s*(?:ns|µs|us|ms|s)\s*$", "", text)
 def collapse(m):
     inner = m.group(1)
     items = []

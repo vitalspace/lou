@@ -32,6 +32,11 @@ inline fn freeValue(value: ast.Value) void {
     }
 }
 
+pub const TraceFrame = struct {
+    name: []const u8,
+    line: u32,
+};
+
 pub const ModuleCacheEntry = struct {
     exports: std.StringHashMap(ast.Value),
     functions: std.StringHashMap(*ast.Node),
@@ -51,6 +56,15 @@ pub const Environment = struct {
     builtins: std.StringHashMap(builtinsTypes.BuiltinFn),
     builtin_objects: std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl),
     timers: std.StringHashMap(i128),
+    console_counts: std.StringHashMap(u64),
+    console_group_depth: u32 = 0,
+    /// Root-only: user-visible call frames for `console.trace`.
+    trace_frames: std.ArrayList(TraceFrame),
+    /// Root-only: name of the script currently being executed.
+    source_name: []const u8 = "<script>",
+    current_call_line: u32 = 0,
+    /// Root-only: `NO_COLOR`/`TERM=dumb` requested plain output.
+    ansi_disabled: bool = false,
     arrays: std.ArrayList(*ast.ArrayObject),
     iterators: std.ArrayList(*ast.ArrayIterator),
     objects: std.ArrayList(*ast.ObjectValue),
@@ -150,6 +164,7 @@ pub const Environment = struct {
         const closure_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
         const synthetic_asts = try std.ArrayList(*ast.Node).initCapacity(allocator, 0);
         const closures = try std.ArrayList(*ast.ClosureValue).initCapacity(allocator, 0);
+        const trace_frames = try std.ArrayList(TraceFrame).initCapacity(allocator, 0);
 
         const env = Environment{
             .allocator = allocator,
@@ -160,6 +175,8 @@ pub const Environment = struct {
             .builtins = try builtins.initBuiltins(allocator),
             .builtin_objects = try builtins.initBuiltinObjects(allocator),
             .timers = std.StringHashMap(i128).init(allocator),
+            .console_counts = std.StringHashMap(u64).init(allocator),
+            .trace_frames = trace_frames,
             .arrays = arrays,
             .iterators = iterators,
             .objects = objects,
@@ -215,6 +232,7 @@ pub const Environment = struct {
         const closure_envs = try std.ArrayList(*Environment).initCapacity(allocator, 0);
         const closures = try std.ArrayList(*ast.ClosureValue).initCapacity(allocator, 0);
         const synthetic_asts = try std.ArrayList(*ast.Node).initCapacity(allocator, 0);
+        const trace_frames = try std.ArrayList(TraceFrame).initCapacity(allocator, 0);
         const env = Environment{
             .allocator = allocator,
             .io = outer.io,
@@ -224,6 +242,8 @@ pub const Environment = struct {
             .builtins = std.StringHashMap(builtinsTypes.BuiltinFn).init(allocator),
             .builtin_objects = std.StringHashMap(*const builtinsTypes.BuiltinObjectImpl).init(allocator),
             .timers = std.StringHashMap(i128).init(allocator),
+            .console_counts = std.StringHashMap(u64).init(allocator),
+            .trace_frames = trace_frames,
             .arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0),
             .iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0),
             .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
@@ -260,9 +280,9 @@ pub const Environment = struct {
 
     pub fn getFunctionWithModuleFallback(self: *Environment, name: []const u8) ?*ast.Node {
         if (self.getFunction(name)) |node| return node;
-        var root = self;
-        while (root.outer) |outer| root = outer;
-        var it = root.module_cache.iterator();
+        var root_env = self;
+        while (root_env.outer) |outer| root_env = outer;
+        var it = root_env.module_cache.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.functions.get(name)) |node| return node;
         }
@@ -476,6 +496,8 @@ pub const Environment = struct {
         self.builtins.deinit();
         self.builtin_objects.deinit();
         self.timers.deinit();
+        self.console_counts.deinit();
+        self.trace_frames.deinit(self.allocator);
 
         for (self.module_contents.items) |c| {
             self.allocator.free(c);
@@ -494,6 +516,38 @@ pub const Environment = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.module_cache.deinit();
+    }
+
+    pub fn root(self: *Environment) *Environment {
+        var env_ptr = self;
+        while (env_ptr.outer) |outer| env_ptr = outer;
+        return env_ptr;
+    }
+
+    /// Record a new user-visible call frame. The root owns the stack so every
+    /// nested environment pushes to the same place; builtins never call this.
+    pub fn pushTraceFrame(self: *Environment, name: []const u8, line: u32) void {
+        const rt = self.root();
+        rt.trace_frames.append(rt.allocator, .{ .name = name, .line = line }) catch {};
+    }
+
+    /// Update the line of the frame currently executing. Call sites emit this
+    /// before invoking a function, so the caller frame reports the line of the
+    /// call expression (matching Node's stack frames).
+    pub fn setTraceLine(self: *Environment, line: u32) void {
+        if (line == 0) return;
+        const rt = self.root();
+        rt.current_call_line = line;
+        if (rt.trace_frames.items.len > 0) {
+            rt.trace_frames.items[rt.trace_frames.items.len - 1].line = line;
+        }
+    }
+
+    pub fn popTraceFrame(self: *Environment) void {
+        const rt = self.root();
+        if (rt.trace_frames.items.len > 0) {
+            _ = rt.trace_frames.pop();
+        }
     }
 
     pub fn get(self: *Environment, name: []const u8) ?ast.Value {

@@ -111,8 +111,12 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+    // Zig 0.17 replaced `Build.args` with `Run.addPassthruArgs`; keep both
+    // toolchains building.
+    if (@hasField(std.Build, "args")) {
+        if (b.args) |args| run_cmd.addArgs(args);
+    } else {
+        run_cmd.addPassthruArgs();
     }
 
     // Creates an executable that will run `test` blocks from the provided module.
@@ -141,6 +145,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // End-to-end JS compatibility suite: runs every tests/compat/*.lou and
+    // diffs its output against the .js counterpart executed by node.
+    // `zig build compat` runs it standalone; `zig build test` runs it too.
+    const compat_step = b.step("compat", "Run the JS compatibility suite (requires node)");
+    const run_compat = b.addSystemCommand(&.{ "bash", "tests/compat/run.sh" });
+    run_compat.step.dependOn(b.getInstallStep());
+    compat_step.dependOn(&run_compat.step);
+    test_step.dependOn(&run_compat.step);
 
     // Build ReleaseFast binary for benchmarking.
     // Usage: zig build bench

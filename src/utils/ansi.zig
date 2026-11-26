@@ -2,7 +2,12 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const Reset = "\x1b[0m";
+/// Reset only the foreground color, leaving other attributes intact. This is
+/// what Node's `util.inspect` uses between colored tokens.
+pub const DefaultForeground = "\x1b[39m";
 pub const Bold = "\x1b[1m";
+/// Turn bold off without resetting the foreground (Node uses this for null).
+pub const BoldOff = "\x1b[22m";
 pub const Dim = "\x1b[2m";
 pub const Italic = "\x1b[3m";
 pub const Underline = "\x1b[4m";
@@ -23,7 +28,8 @@ pub const BrightMagenta = "\x1b[95m";
 pub const BrightCyan = "\x1b[96m";
 pub const BrightWhite = "\x1b[97m";
 
-pub fn supportsAnsi(io: Io) bool {
+pub fn supportsAnsi(io: Io, disabled: bool) bool {
+    if (disabled) return false;
     const file = Io.File.stdout();
     return Io.File.supportsAnsiEscapeCodes(file, io) catch false;
 }

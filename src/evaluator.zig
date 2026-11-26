@@ -3749,6 +3749,15 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
         try env.generators.append(env.allocator, gen_obj);
         return .{ .generator = gen_obj };
     }
+        const traced = func_node.* == .FunctionDeclaration or func_node.* == .ArrowFunction;
+        if (traced) {
+            const frame_name: []const u8 = switch (func_node.*) {
+                .FunctionDeclaration => |f| if (f.name.len > 0) f.name else "<anonymous>",
+                else => "<anonymous>",
+            };
+            env.pushTraceFrame(frame_name, 0);
+        }
+        defer if (traced) env.popTraceFrame();
         if (func_node.* == .FunctionDeclaration) {
             const func = func_node.FunctionDeclaration;
             var func_env = try Environment.init(env.allocator, env);

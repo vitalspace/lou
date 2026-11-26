@@ -1,0 +1,11 @@
+console.log(1e21, 1e-7, 1 / 0, -1 / 0, -0, NaN);
+console.log(1, -0, 0.1 + 0.2, 2 ** 53);
+console.assert(true, "no");
+console.assert(false, "assert-msg");
+console.assert(false);
+console.count(); console.count(); console.countReset(); console.count();
+console.count("x"); console.countReset("x"); console.count("x");
+console.group("g"); console.log("in"); console.group(); console.log("deep"); console.groupEnd(); console.groupEnd();
+console.log([1, "a", [2]], { a: 1 }, null, undefined, true);
+console.dir({ a: 1 });
+console.info("info"); console.warn("warn"); console.error("error"); console.debug("debug");
