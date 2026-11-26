@@ -448,7 +448,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     switch (spread_val) {
                         .array => |src_arr| {
                             for (src_arr.elements.items) |item| {
-                                try array_obj.elements.append(env.allocator, item);
+                                // Spread reads holes as undefined (ArrayIterator), so the
+                                // new array gets dense undefined values, not new holes.
+                                const value: ast.Value = if (item == .hole) .{ .void = {} } else item;
+                                try array_obj.elements.append(env.allocator, value);
                             }
                         },
                         .js_object => |obj| {

@@ -55,9 +55,41 @@ fn valueDisplayWidth(v: Types.Value) usize {
     };
 }
 
+/// Width of the token V8 prints for a run of N holes, i.e. "<N empty item(s)>".
+fn holeRunWidth(count: usize) usize {
+    var digits: usize = 1;
+    var n = count;
+    while (n >= 10) {
+        n /= 10;
+        digits += 1;
+    }
+    return 9 + digits + if (count == 1) @as(usize, 4) else 5;
+}
+
+fn printHoleRun(out: anytype, count: usize, ctx: Ctx) void {
+    const Gy = if (ctx.use_ansi) ansi.Gray else "";
+    const R = if (ctx.use_ansi) ansi.DefaultForeground else "";
+    if (count == 1) {
+        out.print("{s}<1 empty item>{s}", .{ Gy, R }) catch {};
+    } else {
+        out.print("{s}<{d} empty items>{s}", .{ Gy, count, R }) catch {};
+    }
+}
+
 fn shouldFormatArrayWrapped(a: *Types.ArrayObject) bool {
     var total: usize = 4;
-    for (a.elements.items) |elem| total += valueDisplayWidth(elem) + 2;
+    var i: usize = 0;
+    while (i < a.elements.items.len) {
+        if (a.elements.items[i] == .hole) {
+            var run: usize = 1;
+            while (i + run < a.elements.items.len and a.elements.items[i + run] == .hole) run += 1;
+            total += holeRunWidth(run) + 2;
+            i += run;
+        } else {
+            total += valueDisplayWidth(a.elements.items[i]) + 2;
+            i += 1;
+        }
+    }
     return total > MaxLineWidth;
 }
 
@@ -115,9 +147,19 @@ fn printArrayInline(out: anytype, a: *Types.ArrayObject, ctx: Ctx) void {
     out.print("[ ", .{}) catch {};
     const total = a.elements.items.len;
     const limit = if (ctx.max_array_length) |max| @min(max, total) else total;
-    for (a.elements.items[0..limit], 0..) |elem, j| {
+    var j: usize = 0;
+    while (j < limit) {
         if (j > 0) out.print(", ", .{}) catch {};
-        printChild(out, elem, ctx);
+        const elem = a.elements.items[j];
+        if (elem == .hole) {
+            var run: usize = 1;
+            while (j + run < limit and a.elements.items[j + run] == .hole) run += 1;
+            printHoleRun(out, run, ctx);
+            j += run;
+        } else {
+            printChild(out, elem, ctx);
+            j += 1;
+        }
     }
     if (limit < total) {
         if (limit > 0) out.print(", ", .{}) catch {};
@@ -153,12 +195,22 @@ fn printArrayWrapped(out: anytype, a: *Types.ArrayObject, ctx: Ctx) void {
     out.print("[ ", .{}) catch {};
     const total = a.elements.items.len;
     const limit = if (ctx.max_array_length) |max| @min(max, total) else total;
-    for (a.elements.items[0..limit], 0..) |elem, j| {
+    var j: usize = 0;
+    while (j < limit) {
         if (j > 0) {
             out.print(", ", .{}) catch {};
             if ((j % 6) == 0) out.print("\n  ", .{}) catch {};
         }
-        printChild(out, elem, ctx);
+        const elem = a.elements.items[j];
+        if (elem == .hole) {
+            var run: usize = 1;
+            while (j + run < limit and a.elements.items[j + run] == .hole) run += 1;
+            printHoleRun(out, run, ctx);
+            j += run;
+        } else {
+            printChild(out, elem, ctx);
+            j += 1;
+        }
     }
     if (limit < total) {
         if (limit > 0) out.print(", ", .{}) catch {};
@@ -287,7 +339,7 @@ fn printValueCtx(out: anytype, value: Types.Value, ctx: Ctx) void {
         .iterator => out.print("{s}[object Array Iterator]{s}", .{ C, R }) catch {},
         .generator => out.print("{s}[generator]{s}", .{ C, R }) catch {},
         .symbol => |sym| {
-            if (sym.id <= @intFromEnum(Types.WellKnownSymbol.asyncDispose)) {
+            if (sym.id <= @backingInt(Types.WellKnownSymbol.asyncDispose)) {
                 out.print("{s}Symbol(Symbol.{s}){s}", .{ G, sym.description, R }) catch {};
             } else {
                 out.print("{s}Symbol({s}){s}", .{ G, sym.description, R }) catch {};

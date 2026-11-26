@@ -1747,12 +1747,12 @@ pub const VM = struct {
                             // Per ES2020 ToIndex / ToIntegerOrInfinity semantics.
                             const big = idx.big_int;
                             if (big.eqlZero()) {
-                                self.push(arr.array.get(0) orelse .{ .void = {} });
+                                self.push(arrayGet(arr.array, 0));
                             } else if (big.toI64()) |i| {
                                 if (i < 0) {
                                     self.push(.{ .void = {} });
                                 } else {
-                                    self.push(arr.array.get(@intCast(i)) orelse .{ .void = {} });
+                                    self.push(arrayGet(arr.array, @intCast(i)));
                                 }
                             } else {
                                 self.push(.{ .void = {} });
@@ -1769,7 +1769,7 @@ pub const VM = struct {
                                     .float => |n| @intFromFloat(n),
                                     else => return error.InvalidIndex,
                                 };
-                                self.push(arr.array.get(i) orelse .{ .void = {} });
+                                self.push(arrayGet(arr.array, i));
                             }
                         }
                     } else if (arr == .js_object) {
@@ -2686,6 +2686,12 @@ fn toNumber(v: Value) f64 {
         .big_int => |b| if (b.toI64()) |i| @floatFromInt(i) else 0.0,
         else => 0.0,
     };
+}
+
+/// Reading a hole yields undefined, like a missing element (ES ArrayGet).
+fn arrayGet(a: *ast.ArrayObject, i: usize) Value {
+    const v = a.get(i) orelse return .{ .void = {} };
+    return if (v == .hole) .{ .void = {} } else v;
 }
 
 fn stringToNumber(s: []const u8) f64 {

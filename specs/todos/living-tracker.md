@@ -6,24 +6,24 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-26 13:06:39 |
-| Commit | `90ff044` |
+| Snapshot | 2026-11-26 13:21:42 |
+| Commit | `11a378a` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 85 |
-| PASS | 57 |
-| FAIL | 27 |
+| Fixtures | 86 |
+| PASS | 59 |
+| FAIL | 26 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
 
 | Estado | Count |
 |---|---|
-| Test files total | 85 |
-| **PASS** | 57 |
-| **FAIL** | 27 |
+| Test files total | 86 |
+| **PASS** | 59 |
+| **FAIL** | 26 |
 | SKIP (sin .js) | 1 |
-| Specs pendientes | 47 |
-| Specs hechos | 62 |
+| Specs pendientes | 46 |
+| Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
 
@@ -51,14 +51,14 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 4. `call-apply-bind.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 9 vs 16 líneas):
+- Primera divergencia (línea 1, 3 vs 16 líneas):
   - Lou : `undefined`
   - Node: `Hello Alice`
 
 ### 5. `closure-capture.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 23 vs 7 líneas):
+- Primera divergencia (línea 2, 2 vs 7 líneas):
   - Lou : `error: UndefinedVariable`
   - Node: `1`
 
@@ -72,147 +72,140 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 ### 7. `default-parameters.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 15 vs 13 líneas):
+- Primera divergencia (línea 1, 1 vs 13 líneas):
   - Lou : `error: ExpectedComma`
   - Node: `0`
 
-### 8. `delete-operator.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 2, 15 vs 15 líneas):
-  - Lou : `[1,<empty>,3,4]`
-  - Node: `[1,<1 empty item>,3,4]`
-
-### 9. `equality-coercion.lou` - FAIL
+### 8. `equality-coercion.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 29 vs 29 líneas):
   - Lou : `0=='' false`
   - Node: `0=='' true`
 
-### 10. `error-objects.lou` - FAIL
+### 9. `error-objects.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 5, 14 vs 62 líneas):
+- Primera divergencia (línea 5, 5 vs 62 líneas):
   - Lou : `error: Thrown`
   - Node: `instanceof Error: true`
 
-### 11. `finalization-registry.lou` - FAIL
+### 10. `finalization-registry.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 9, 21 vs 15 líneas):
+- Primera divergencia (línea 9, 12 vs 15 líneas):
   - Lou : `register primitive: no error`
   - Node: `register primitive: true`
 
-### 12. `for-in-order.lou` - FAIL
+### 11. `for-in-order.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 5 vs 5 líneas):
   - Lou : `b,0,a`
   - Node: `0,b,a`
 
-### 13. `for-var-no-init.lou` - FAIL
+### 12. `for-var-no-init.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 4, 4 vs 4 líneas):
   - Lou : `const-no-init: false`
   - Node: `const-no-init: true`
 
-### 14. `getter-setter.lou` - FAIL
+### 13. `getter-setter.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 25 vs 6 líneas):
+- Primera divergencia (línea 1, 1 vs 6 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `42`
 
-### 15. `globalThis.lou` - FAIL
+### 14. `globalThis.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 10 vs 6 líneas):
+- Primera divergencia (línea 2, 4 vs 6 líneas):
   - Lou : `self_ref: false`
   - Node: `self_ref: true`
 
-### 16. `in-operator.lou` - FAIL
+### 15. `in-operator.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 10 vs 8 líneas):
+- Primera divergencia (línea 1, 1 vs 8 líneas):
   - Lou : `error: Thrown`
   - Node: `true`
 
-### 17. `instanceof-operator.lou` - FAIL
+### 16. `instanceof-operator.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 2, 11 vs 15 líneas):
+- Primera divergencia (línea 2, 2 vs 15 líneas):
   - Lou : `error: Thrown`
   - Node: `true`
 
-### 18. `iterator-protocol.lou` - FAIL
+### 17. `iterator-protocol.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 25 vs 10 líneas):
+- Primera divergencia (línea 1, 1 vs 10 líneas):
   - Lou : `error: ExpectedColon`
   - Node: `array sum: 6`
 
-### 19. `json-parse.lou` - FAIL
+### 18. `json-parse.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 17, 23 vs 23 líneas):
   - Lou : `FAIL(\x): no throw`
   - Node: `ok(\x): true / SyntaxError`
 
-### 20. `let-per-iteration.lou` - FAIL
+### 19. `let-per-iteration.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 4 vs 4 líneas):
   - Lou : `3 3 3`
   - Node: `0 1 2`
 
-### 21. `map-groupby.lou` - FAIL
+### 20. `map-groupby.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 19, 19 vs 20 líneas):
   - Lou : `---Throw did not propagate---`
   - Node: `---Throw propagated---`
 
-### 22. `prototype-chain.lou` - FAIL
+### 21. `prototype-chain.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 4, 9 vs 9 líneas):
   - Lou : `false`
   - Node: `true`
 
-### 23. `regex-literal.lou` - FAIL
+### 22. `regex-literal.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 36 vs 5 líneas):
+- Primera divergencia (línea 1, 1 vs 5 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `--- regex literal syntax ---`
 
-### 24. `regex-properties.lou` - FAIL
+### 23. `regex-properties.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 19 vs 19 líneas):
   - Lou : `undefined`
   - Node: `hello`
 
-### 25. `switch-case.lou` - FAIL
+### 24. `switch-case.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 17 vs 9 líneas):
+- Primera divergencia (línea 1, 1 vs 9 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `two`
 
-### 26. `typeof-undeclared.lou` - FAIL
+### 25. `typeof-undeclared.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 7 vs 8 líneas):
+- Primera divergencia (línea 1, 1 vs 8 líneas):
   - Lou : `error: UndefinedVariable`
   - Node: `undefined`
 
-### 27. `weakref.lou` - FAIL
+### 26. `weakref.lou` - FAIL
 
 - exit: Lou 1 / Node 0
-- Primera divergencia (línea 5, 20 vs 12 líneas):
+- Primera divergencia (línea 5, 11 vs 12 líneas):
   - Lou : `no throw for number`
   - Node: `TypeError for number: true`
 
@@ -227,7 +220,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `boolean-object.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `boolean` | FAIL (boolean) |
 | `call-apply-bind.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `call-apply-bind` | FAIL (call-apply-bind) |
 | `classes.md` | pendiente | `classes` | sin test |
-| `console-array-holes.md` | pendiente — detectado 2026-11-26 por el barrido `./bench.sh compat`. | `array-holes`, `delete-operator` | FAIL (delete-operator) |
 | `date-object-regression.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | FAIL (date-object) |
 | `date-object.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `date-object` | FAIL (date-object) |
 | `default-parameters-compat.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `default-parameters` | FAIL (default-parameters) |
@@ -270,9 +262,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 ## Section 4 — Drift: specs en `hechos/` cuyo test sigue FAIL
 
-| Spec | Estado declarado | Test | Resultado |
-|---|---|---|---|
-| `delete-operator.md` | implementado (semántica) — `delete obj.prop`, `delete arr[i]` y `dele… | `delete-operator` | FAIL (delete-operator) |
+Ninguno.
 
 ## Section 5 — How To Regenerate
 
