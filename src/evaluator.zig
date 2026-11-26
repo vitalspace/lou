@@ -6,6 +6,7 @@ const debugPrint = env_mod.debugPrint;
 const optimizations = @import("optimizations.zig");
 const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
 const throwError = @import("./builtins/error.zig").throwError;
+const coercion = @import("coercion.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -120,11 +121,26 @@ fn valuesEqual(left: ast.Value, right: ast.Value) bool {
         .void => right == .void,
         .null => right == .null,
         .hole => right == .void,
-        .array_iterator => right == .array_iterator,
-        .regexp => right == .regexp,
-        .closure => right == .closure,
-        .iterator => right == .iterator,
-        .js_object => right == .js_object,
+        .array_iterator => |lo| switch (right) {
+            .array_iterator => |ro| lo == ro,
+            else => false,
+        },
+        .regexp => |lo| switch (right) {
+            .regexp => |ro| lo == ro,
+            else => false,
+        },
+        .closure => |lo| switch (right) {
+            .closure => |ro| lo == ro,
+            else => false,
+        },
+        .iterator => |lo| switch (right) {
+            .iterator => |ro| lo == ro,
+            else => false,
+        },
+        .js_object => |lo| switch (right) {
+            .js_object => |ro| lo == ro,
+            else => false,
+        },
         .symbol => |ls| switch (right) {
             .symbol => |rs| ls.id == rs.id,
             else => false,
@@ -205,8 +221,15 @@ fn looseValuesEqual(
             .void => true,
             .null => true,
             .hole => true,
-            else => false, // array/object/function/etc. compare by identity via valuesEqual
+            else => valuesEqual(left, right), // identity for arrays/objects/functions
         };
+    }
+
+    // Number <-> Number: integer/float are the same JS Number type.
+    if ((left == .integer or left == .float) and (right == .integer or right == .float)) {
+        const lf: f64 = if (left == .integer) @floatFromInt(left.integer) else left.float;
+        const rf: f64 = if (right == .integer) @floatFromInt(right.integer) else right.float;
+        return lf == rf;
     }
 
     // Step 2/3: null == undefined (and vice-versa).
@@ -231,6 +254,20 @@ fn looseValuesEqual(
         }
     }
 
+    // Step 10: Object <-> primitive -> ToPrimitive(default), then recurse.
+    {
+        const l_obj = coercion.isObjectLike(left);
+        const r_obj = coercion.isObjectLike(right);
+        if (l_obj != r_obj) {
+            const obj_side = if (l_obj) left else right;
+            const other = if (l_obj) right else left;
+            if (coercion.toPrimitiveString(allocator, obj_side)) |prim| {
+                defer allocator.free(prim);
+                return looseValuesEqual(allocator, bigints_list, .{ .string = prim }, other);
+            }
+        }
+    }
+
     // Step 6: BigInt ↔ String → StringToBigInt (integer literal syntax only;
     // "1.0", "1e2" or "1n" parse to no value and compare false).
     {
@@ -248,7 +285,7 @@ fn looseValuesEqual(
         const str_side: ?ast.Value = if (left == .string) left else if (right == .string) right else null;
         if (str_side != null) {
             const num_side = if (left == .string) right else left;
-            const parsed = std.fmt.parseFloat(f64, str_side.?.string) catch std.math.nan(f64);
+            const parsed = coercion.stringToNumber(str_side.?.string);
             return switch (num_side) {
                 .integer => |i| parsed == @as(f64, @floatFromInt(i)),
                 .float => |f| parsed == f,
@@ -5173,4 +5210,17 @@ test "TypeError thrown when calling String.length as function" {
         \\const str = "hi";
         \\str.length();
     , &env_));
+}
+
+test "looseValuesEqual - number/string/bool coercion" {
+    const allocator = std.testing.allocator;
+    var bigints = std.ArrayList(*ast.BigIntValue).initCapacity(allocator, 0) catch unreachable;
+    defer bigints.deinit(allocator);
+
+    try std.testing.expect(looseValuesEqual(allocator, &bigints, .{ .integer = 0 }, .{ .string = "" }));
+    try std.testing.expect(looseValuesEqual(allocator, &bigints, .{ .integer = 0 }, .{ .string = "0" }));
+    try std.testing.expect(looseValuesEqual(allocator, &bigints, .{ .boolean = false }, .{ .string = "" }));
+    try std.testing.expect(looseValuesEqual(allocator, &bigints, .{ .integer = 1 }, .{ .float = 1.0 }));
+    try std.testing.expect(!looseValuesEqual(allocator, &bigints, .{ .integer = 1 }, .{ .string = "2" }));
+    try std.testing.expect(!looseValuesEqual(allocator, &bigints, .{ .null = {} }, .{ .integer = 0 }));
 }

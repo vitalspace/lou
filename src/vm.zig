@@ -12,6 +12,7 @@ const callFunctionValue = @import("evaluator.zig").callFunctionValue;
 const throwError = @import("./builtins/error.zig").throwError;
 const runtime = @import("./types/runtime.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
+const coercion = @import("coercion.zig");
 
 pub const Op = enum(u8) {
     constant,
@@ -3032,7 +3033,42 @@ fn valStrictEq(l: Value, r: Value) bool {
             .symbol => |rs| ls.id == rs.id,
             else => false,
         },
-        else => false,
+        .array => |la| switch (r) {
+            .array => |ra| la == ra,
+            else => false,
+        },
+        .object => |lo| switch (r) {
+            .object => |ro| lo == ro,
+            else => false,
+        },
+        .function => |lf| switch (r) {
+            .function => |rf| lf == rf,
+            else => false,
+        },
+        .closure => |lc| switch (r) {
+            .closure => |rc| lc == rc,
+            else => false,
+        },
+        .js_object => |lo| switch (r) {
+            .js_object => |ro| lo == ro,
+            else => false,
+        },
+        .regexp => |lo| switch (r) {
+            .regexp => |ro| lo == ro,
+            else => false,
+        },
+        .iterator => |lo| switch (r) {
+            .iterator => |ro| lo == ro,
+            else => false,
+        },
+        .array_iterator => |lo| switch (r) {
+            .array_iterator => |ro| lo == ro,
+            else => false,
+        },
+        .generator => |lg| switch (r) {
+            .generator => |rg| lg == rg,
+            else => false,
+        },
     };
 }
 
@@ -3062,8 +3098,13 @@ fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntV
                 else => unreachable,
             },
             .void, .null, .hole => true,
-            else => false,
+            else => valStrictEq(l, r),
         };
+    }
+
+    // Number <-> Number: integer/float are the same JS Number type.
+    if ((l == .integer or l == .float) and (r == .integer or r == .float)) {
+        return toNumber(l) == toNumber(r);
     }
 
     // Step 2/3: null == undefined (and vice-versa).
@@ -3084,6 +3125,20 @@ fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntV
         }
     }
 
+    // Step 10: Object <-> primitive -> ToPrimitive(default), then recurse.
+    {
+        const l_obj = coercion.isObjectLike(l);
+        const r_obj = coercion.isObjectLike(r);
+        if (l_obj != r_obj) {
+            const obj_side = if (l_obj) l else r;
+            const other = if (l_obj) r else l;
+            if (coercion.toPrimitiveString(allocator, obj_side)) |prim| {
+                defer allocator.free(prim);
+                return valEq(allocator, bigints_list, .{ .string = prim }, other);
+            }
+        }
+    }
+
     // Step 6: BigInt ↔ String → StringToBigInt (integer literal syntax only;
     // "1.0", "1e2" or "1n" parse to no value and compare false).
     {
@@ -3101,7 +3156,7 @@ fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntV
         const str_side: ?Value = if (l == .string) l else if (r == .string) r else null;
         if (str_side != null) {
             const num_side = if (l == .string) r else l;
-            const parsed = std.fmt.parseFloat(f64, str_side.?.string) catch std.math.nan(f64);
+            const parsed = coercion.stringToNumber(str_side.?.string);
             return switch (num_side) {
                 .integer => |i| parsed == @as(f64, @floatFromInt(i)),
                 .float => |f| parsed == f,
