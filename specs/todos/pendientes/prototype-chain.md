@@ -2,7 +2,20 @@
 
 ## status
 
-NOT IMPLEMENTED
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+`tests/compat/prototype-chain.lou` sigue FAIL. Primera divergencia (línea 4), Lou vs Node:
+
+```text
+Lou : false
+Node: true
+```
+
+`obj.valueOf() === obj` da `false`: `valueOf` devuelve una copia/primitivo en vez del mismo objeto.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/prototype-chain.lou) <(node tests/compat/prototype-chain.js)
+```
 
 ## Problema
 

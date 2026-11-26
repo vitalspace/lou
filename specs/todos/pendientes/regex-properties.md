@@ -1,7 +1,21 @@
 # RegExp Properties (`/regex/.source`, `.flags`, `.lastIndex`)
 
 ## status
-FAIL (Nunca pasó)
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+`tests/compat/regex-properties.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : undefined
+Node: hello
+```
+
+Los getters `source`/`flags`/`global`/... de una instancia RegExp devuelven `undefined`. El archivo estaba en `hechos/` pese a declarar FAIL.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/regex-properties.lou) <(node tests/compat/regex-properties.js)
+```
 
 ## Problema
 `tests/compat/regex-properties.lou` falla. Output actual (Lou) emite `undefined` para

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+set -o pipefail
 cd "$(dirname "$0")/../.."
 
 PASS=0

@@ -2,9 +2,9 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marcado completado)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`tests/compat/finalization-registry.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body claims exact-match PASS against Node, but the current compat run produces a diff. Reverted status to reflect open follow-up work.
+El test `tests/compat/finalization-registry.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 El objeto `FinalizationRegistry` no está implementado.

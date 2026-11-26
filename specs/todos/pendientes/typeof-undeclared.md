@@ -2,9 +2,9 @@
 
 ## status
 
-**COMPLETADO** — verificado 2026-07-30
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`typeof-undeclared.lou` PASSes with byte-identical output to Node.js. The fix: evaluator catches `error.UndefinedVariable` and returns `"undefined"` string; VM delegates to evaluator via `eval_node`.
+El test `tests/compat/typeof-undeclared.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 

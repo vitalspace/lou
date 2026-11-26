@@ -2,9 +2,20 @@
 
 ## status
 
-NOT IMPLEMENTED (drift corrected 2026-06-29)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-The `NOT IMPLEMENTED` header was already accurate — `for (var x; ...)` and `for (let x;;)` still emit `'error: ExpectedAssign'`. The file lived in hechos/ by mistake; moved back to pendientes/ where unmatched status headers belong.
+`tests/compat/for-var-no-init.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : var-no-init: undefined
+Node: let-no-init: undefined
+```
+
+`undefined < 3` se evalúa `true`, así que el bucle de `for (var i; i < 3; i++)` corre en Lou y en Node no. Es la misma coerción que hace `undefined + undefined = 0`.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/for-var-no-init.lou) <(node tests/compat/for-var-no-init.js)
+```
 
 ## Problema
 

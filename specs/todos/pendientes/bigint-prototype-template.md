@@ -2,9 +2,20 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`tests/compat/bigint-prototype.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body claims BigInt `toString`, `toLocaleString`, and template-literal interpolation are wired up, but the compat test does not pass byte-identical against Node. Reverted status to accurately reflect open follow-up work.
+`tests/compat/bigint-prototype.lou` sigue FAIL. Primera divergencia (línea 19), Lou vs Node:
+
+```text
+Lou : --- Distinción toString vs console.log ---
+Node: caught: toString() radix argument must be between 2 and 36
+```
+
+`BigInt.prototype.toString(radix)` no valida el radix: Node lanza `RangeError` y Lou sigue. Además `${42n}` se imprime literal en vez de `42`. El archivo estaba en `hechos/`.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/bigint-prototype.lou) <(node tests/compat/bigint-prototype.js)
+```
 
 ## Problema
 

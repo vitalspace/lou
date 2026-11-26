@@ -2,9 +2,20 @@
 
 ## status
 
-**COMPLETADO** — verificado 2026-07-30
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-NaN comparison compat test (`tests/compat/nan-comparison.lou`) PASSes with byte-identical output to Node.js.
+`tests/compat/nan-comparison.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : true
+Node: false
+```
+
+`NaN <= 5` se compila como `!(NaN > 5)` = `!(false)` = `true`. `<=` y `>=` necesitan el caso NaN explícito (cualquier comparación con NaN es `false`).
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/nan-comparison.lou) <(node tests/compat/nan-comparison.js)
+```
 
 ## Problema
 

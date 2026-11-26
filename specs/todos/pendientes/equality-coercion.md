@@ -2,9 +2,20 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marked COMPLETADO)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`tests/compat/equality-coercion.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec body's `## Cambios aplicados` block describes changes that did not actually close the test. Reverted status to accurately reflect that the feature is not yet matching Node semantics.
+`tests/compat/equality-coercion.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : 0=='' false
+Node: 0=='' true
+```
+
+Coerción abstracta de `==`: falta ToPrimitive/ToNumber para `''`, `'0'` y booleanos. El archivo estaba en `hechos/` pese a declarar `pendiente`.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/equality-coercion.lou) <(node tests/compat/equality-coercion.js)
+```
 
 ## Problema
 

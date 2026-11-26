@@ -1,7 +1,21 @@
 # Boolean — Constructor + `toString`/`valueOf`
 
 ## status
-implementado
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+`tests/compat/boolean.lou` sigue FAIL. Primera divergencia (línea 20), Lou vs Node:
+
+```text
+Lou : boolean
+Node: object
+```
+
+`typeof new Boolean(true)` devuelve `boolean` en vez de `object`: el wrapper se sigue tratando como primitivo (el cuerpo de este doc lo da por implementado).
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/boolean.lou) <(node tests/compat/boolean.js)
+```
 
 ## Problema
 

@@ -2,7 +2,20 @@
 
 ## status
 
-**pendiente (drift corrected 2026-07-30)** — previously marked `COMPLETADO` but `tests/compat/for-in-order.lou` FAILs per compat baseline (43P/39F/1S)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+`tests/compat/for-in-order.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : b,0,a
+Node: 0,b,a
+```
+
+Orden de enumeración: los índices enteros deben ir primero y en orden ascendente. El archivo estaba en `hechos/` pese a declarar `pendiente`.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/for-in-order.lou) <(node tests/compat/for-in-order.js)
+```
 
 ## Problema
 

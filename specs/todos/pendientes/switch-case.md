@@ -2,7 +2,9 @@
 
 ## status
 
-**pendiente (drift corrected 2026-07-30)** — `tests/compat/switch-case.lou` FAILs per compat baseline (43P/39F/1S)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+El test `tests/compat/switch-case.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 El lexer tiene tokens `Switch`, `Case`, `Default` pero el parser y VM no implementan la sentencia `switch`.

@@ -2,9 +2,9 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`tests/compat/default-parameters.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec was placed in `hechos/` with a description of a regression fix in an earlier turn, but the underlying compat test does not pass. Reverted status to reflect open follow-up work.
+El test `tests/compat/default-parameters.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 Los parámetros por defecto en funciones no están implementados. No se puede definir un valor default para un parámetro.

@@ -2,9 +2,20 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marked implementado)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-Previously migrated to hechos/ with status `implementado (2026-06-28)` but the canonical `tests/compat/let-per-iteration.lou` reproducer FAILS (Lou outputs `3 3 3`, Node outputs `0 1 2`). The `## Resumen de implementación` block claims `cur_iter_env` propagation through `invokeFunctionNode`, which does not actually close the closure-capture test case. Reverted to pendientes/ for accurate tracking.
+`tests/compat/let-per-iteration.lou` sigue FAIL. Primera divergencia (línea 1), Lou vs Node:
+
+```text
+Lou : 3 3 3
+Node: 0 1 2
+```
+
+Los closures de un `for (let i ...)` comparten un único binding: falta crear un entorno por iteración.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/let-per-iteration.lou) <(node tests/compat/let-per-iteration.js)
+```
 
 ## Problema
 

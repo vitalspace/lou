@@ -2,9 +2,9 @@
 
 ## status
 
-pendiente (drift corrected 2026-06-29; previously falsely marked COMPLETADO)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-`tests/compat/error-objects.lou` currently FAILs per the compat baseline (30 PASS / 50 FAIL / 1 SKIP). The spec was placed in `hechos/` with a description of a 7-constructor + toString implementation, but the underlying compat test does not pass byte-identical. Reverted status to reflect open follow-up work.
+El test `tests/compat/error-objects.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 Los objetos `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `EvalError`, `URIError` no están implementados como constructores.

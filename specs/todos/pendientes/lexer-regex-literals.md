@@ -1,7 +1,10 @@
 # Regex Literal Syntax (`/pattern/flags`)
 
 ## status
-IMPLEMENTED (lexer + parser; runtime pending RegExp builtin wiring)
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+El test `tests/compat/regex-literal.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Resumen
 

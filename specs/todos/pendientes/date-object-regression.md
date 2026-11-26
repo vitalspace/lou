@@ -1,7 +1,21 @@
 # Date object — Regresión en compat test
 
 ## status
-implementado
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+`tests/compat/date-object.lou` sigue FAIL. Primera divergencia (línea 17), Lou vs Node:
+
+```text
+Lou : 0
+Node: 31536000000
+```
+
+La resta de fechas (`d2 - d1`) da `0`: `toNum`/`toF64` no extraen `timestamp_ms` del `DateValue`. Este doc duplica el tema de `date-object.md`; se mantiene solo como histórico de la regresión.
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/date-object.lou) <(node tests/compat/date-object.js)
+```
 
 ## Problema
 `tests/compat/date-object.lou` falla. Output actual (Lou) tiene la

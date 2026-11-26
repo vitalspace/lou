@@ -578,7 +578,7 @@ pub fn Parse(args: []const Types.Value, env: *Types.Environment) Types.BuiltinRe
 
 // =========================================================================
 // Unit tests for Parse — locks down the parser shape so refactors don't
-// silently regress (per specs/todos/hechos/json-parse.md). Runs as part of
+// silently regress (per specs/todos/pendientes/json-parse.md). Runs as part of
 // `zig build test` (-g test).
 // =========================================================================
 

@@ -1,6 +1,10 @@
-# globalThis## status
+# globalThis
 
-**pendiente (drift corrected 2026-07-30)** — previously marked `implementado` but `tests/compat/globalThis.lou` FAILs per compat baseline (43P/39F/1S)
+## status
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+El test `tests/compat/globalThis.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 La variable global `globalThis` no está implementada.

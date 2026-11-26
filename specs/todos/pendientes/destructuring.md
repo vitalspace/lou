@@ -2,20 +2,33 @@
 
 ## status
 
-**COMPLETADO** — verificado 2026-07-30
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-All 8 compat tests pass with byte-identical output to Node.js.
+`tests/compat/destructuring.lou` sigue FAIL. Primera divergencia (línea 11), Lou vs Node:
+
+```text
+Lou : 0
+Node: NaN
+```
+
+El default de patrón completo (`f4()` con `{x, y} = {}`) da `0` en vez de `NaN`: `undefined + undefined` se evalúa como `0`.
+
+Estado de los 8 fixtures del área:
 
 | Test file | Status |
 |---|---|
-| `tests/compat/destructuring.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-decl.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-assign.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-nested.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-nested-rest.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-array.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-for-of.lou` | **PASS** (MATCH) |
-| `tests/compat/destructuring-for-in.lou` | **PASS** (MATCH) |
+| `tests/compat/destructuring.lou` | **FAIL** (línea 11: `0` vs `NaN`) |
+| `tests/compat/destructuring-decl.lou` | PASS |
+| `tests/compat/destructuring-assign.lou` | PASS |
+| `tests/compat/destructuring-nested.lou` | PASS |
+| `tests/compat/destructuring-nested-rest.lou` | **FAIL** (línea 1: `1` vs `NaN`) |
+| `tests/compat/destructuring-array.lou` | PASS |
+| `tests/compat/destructuring-for-of.lou` | PASS |
+| `tests/compat/destructuring-for-in.lou` | PASS |
+
+```bash
+diff <(./zig-out/bin/lou run tests/compat/destructuring.lou) <(node tests/compat/destructuring.js)
+```
 
 ## Resumen de implementación
 

@@ -1,7 +1,10 @@
 # Function.prototype.call/apply/bind
 
 ## status
-implementado
+
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+
+El test `tests/compat/call-apply-bind.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 `tests/compat/call-apply-bind.lou` falla con `error: UndefinedFunction` al llamar a métodos `call`, `apply`, `bind` sobre funciones:

@@ -1,13 +1,9 @@
 # Date
 ## status
 
-**pendiente (drift corrected 2026-07-30)** — previously marked `implementado` but `tests/compat/date-object.lou` FAILs per compat baseline (43P/39F/1S)
+**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
 
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `date-object.lou`
-- Test status: `FAIL` (1 diff remaining: line 12 `false`→`true` — pre-existing `string.length` bug, not Date-specific)
-- Line 17 (`d2 - d1`) now PASSES: `toF64`/`toNum` extract `timestamp_ms` from Date js_objects.
+El test `tests/compat/date-object.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 
 ## Problema
 
