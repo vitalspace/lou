@@ -1,0 +1,10 @@
+console.log("ÜBER Café".toLowerCase());
+console.log("über café".toUpperCase());
+console.log("straße".toUpperCase());
+console.log("İ".toLowerCase());
+console.log("ΟΣ".toLowerCase());
+console.log("ΣΣ".toLowerCase());
+console.log("ǰ".toUpperCase());
+console.log("ﬃ".toUpperCase());
+console.log("ΑΒΓ".toLowerCase());
+console.log("中文".toUpperCase());

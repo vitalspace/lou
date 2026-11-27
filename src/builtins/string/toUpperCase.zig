@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Environment = @import("../../evaluator.zig").Environment;
+const unicode_case = @import("unicode_case.zig");
 
 pub fn ToUpper(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 1) return .{ .value = .{ .string = "" } };
@@ -23,14 +24,22 @@ pub fn ToUpper(args: []const Types.Value, env: *Types.Environment) Types.Builtin
             i += byte_len;
             continue;
         };
-        const upper = switch (cp) {
-            'a'...'z' => cp - 32,
-            else => cp,
-        };
+        i += byte_len;
+        if (cp < 0x80) {
+            const upper: u21 = if (cp >= 'a' and cp <= 'z') cp - 32 else cp;
+            var encoded: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(upper, &encoded) catch unreachable;
+            buf.appendSlice(env.allocator, encoded[0..len]) catch {};
+            continue;
+        }
+        if (unicode_case.specialUpper(cp)) |mapping| {
+            buf.appendSlice(env.allocator, mapping) catch {};
+            continue;
+        }
+        const upper = unicode_case.upper(cp) orelse cp;
         var encoded: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(upper, &encoded) catch unreachable;
         buf.appendSlice(env.allocator, encoded[0..len]) catch {};
-        i += byte_len;
     }
     const result = buf.toOwnedSlice(env.allocator) catch {
         return .{ .value = .{ .void = {} } };
@@ -104,4 +113,23 @@ test "toUpperCase no args returns empty string" {
     try testing.expect(result == .value);
     try testing.expect(result.value == .string);
     try testing.expectEqualStrings("", result.value.string);
+}
+test "toUpperCase maps non-ASCII letters" {
+    var env = try Environment.init(testing.allocator, null);
+    defer env.deinit();
+
+    var args = [_]Types.Value{ .{ .string = "über café ναι" } };
+    const result = ToUpper(&args, &env);
+    try testing.expect(result == .value);
+    try testing.expectEqualStrings("ÜBER CAFÉ ΝΑΙ", result.value.string);
+}
+
+test "toUpperCase expands sharp s and ligatures" {
+    var env = try Environment.init(testing.allocator, null);
+    defer env.deinit();
+
+    var args = [_]Types.Value{ .{ .string = "straße ﬃ" } };
+    const result = ToUpper(&args, &env);
+    try testing.expect(result == .value);
+    try testing.expectEqualStrings("STRASSE FFI", result.value.string);
 }

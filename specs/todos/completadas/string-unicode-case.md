@@ -2,7 +2,7 @@
 
 ## status
 
-❌ PENDIENTE
+✅ COMPLETADO
 
 ## Problema
 
