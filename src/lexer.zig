@@ -65,6 +65,7 @@ pub const TokenType = enum {
 
     // Ternary
     Question, // ?
+    QuestionDot, // ?.
     Colon, // :
 
     // Keywords
@@ -331,6 +332,9 @@ pub const Lexer = struct {
                         break :blk .{ .type = .NullishAssign, .literal = "??=" };
                     }
                     break :blk .{ .type = .Nullish, .literal = "??" };
+                } else if (this.peekChar() == '.') {
+                    this.readChar();
+                    break :blk .{ .type = .QuestionDot, .literal = "?." };
                 } else {
                     break :blk .{ .type = .Question, .literal = "?" };
                 }

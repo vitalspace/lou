@@ -1,8 +1,8 @@
 # Optional Chaining (?.)
 
 ## status
-pendiente
 
+**completada** — `?.`, `?.[...]` y `?.(...)` implementados con el nodo `OptionalChain` (parser y evaluador; el VM delega vía `eval_node`). La cadena completa cortocircuita ante `null`/`undefined`, se preserva `this` en llamadas de método y `TypeError` solo cuando la llamada no es a una función. `tests/compat/optional-chaining.lou` PASS (baseline 93 PASS / 0 FAIL / 0 SKIP, 2026-11-27). El resto del documento queda como contexto histórico.
 ## Problema
 El operador `?.` (optional chaining) no está implementado. No se puede acceder a propiedades de forma segura cuando el objeto puede ser null/undefined.
 ## Contexto
@@ -143,36 +143,3 @@ console.log(data?.items?.[0]?.name); // undefined
 ### Comparar salida raw (sin interpretar ANSI)
 ./zig-out/bin/lou run js/tests/optional-chaining.js 2>&1 | od -c
 node js/tests/optional-chaining.js 2>&1 | od -c
-
-### pendiente
-- Implementar token, AST, parser, VM opcode y evaluator para ?.
-
-## Edge cases encontrados durante implementación
-
-Listar aquí los bugs, comportamientos inesperados o requisitos descubiertos
-mientras se implementaba este spec. Cada edge case debe ser promovido a su
-propio spec (usando esta misma plantilla) si requiere cambios de diseño
-propios, o documentado inline si es un fix puntual.
-
-Ejemplos de edge cases típicos:
-- Comportamiento cuando se mezcla el tipo con primitivos incompatibles
-  (TypeError vs coerción silenciosa).
-- Formato de impresión / `toString` — sufijo, base, mayúsculas.
-- Comparación loose vs strict.
-- Conversión a otros tipos (string concat, Number, BigInt).
-- División por cero, exponente negativo, overflow.
-- Capturabilidad del error por `try/catch` JS (no abortar el proceso).
-
-Plantilla para promover un edge case a spec:
-1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
-2. Enlazar desde este spec principal con un enlace relativo.
-3. Verificar que el test correspondiente cubre el caso.
-
-
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `-` (NO-MATCH)
-- Test status: `-`
-
-- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/optional-chaining.lou + tests/compat/optional-chaining.js to enable automatic PASS/FAIL tracking.
-

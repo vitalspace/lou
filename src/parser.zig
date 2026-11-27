@@ -1125,12 +1125,20 @@ pub const Parser = struct {
             else => return error.UnexpectedToken,
         }
 
-        // Postfix chain: .prop, [index], (args)
+        // Postfix chain: .prop, [index], (args), ?.prop, ?.[index], ?.(args)
         while (true) {
-            if (this.current_token.type == .LBracket) {
+            if (this.current_token.type == .QuestionDot) {
+                base = try this.parseOptionalChainPostfix(base);
+            } else if (this.current_token.type == .LBracket and base.* == .OptionalChain) {
+                base = try this.parseChainIndexPostfix(base);
+            } else if (this.current_token.type == .Dot and base.* == .OptionalChain) {
+                base = try this.parseChainDotPostfix(base);
+            } else if (this.current_token.type == .LBracket) {
                 base = try this.parseArrayIndex(base);
             } else if (this.current_token.type == .Dot) {
                 base = try this.parseMemberAccessOrCall(base);
+            } else if (this.current_token.type == .LParen and base.* == .OptionalChain) {
+                base = try this.parseChainCallPostfix(base);
             } else if (this.current_token.type == .LParen) {
                 base = try this.parseFunctionCallFromBase(base);
             } else {
@@ -2493,6 +2501,90 @@ pub const Parser = struct {
         return node;
     }
 
+    fn appendOptionalLink(this: *Parser, base: *ast.Node, link: ast.OptionalLink) anyerror!*ast.Node {
+        if (base.* == .OptionalChain) {
+            var oc = &base.OptionalChain;
+            var list = try std.ArrayList(ast.OptionalLink).initCapacity(this.allocator, oc.links.len + 1);
+            defer list.deinit(this.allocator);
+            try list.appendSlice(this.allocator, oc.links);
+            try list.append(this.allocator, link);
+            const new_links = try list.toOwnedSlice(this.allocator);
+            this.allocator.free(oc.links);
+            oc.links = new_links;
+            return base;
+        }
+        const links = try this.allocator.alloc(ast.OptionalLink, 1);
+        links[0] = link;
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .OptionalChain = .{ .base = base, .links = links } };
+        return node;
+    }
+
+    fn parseCallLink(this: *Parser, optional: bool) anyerror!ast.OptionalLink {
+        this.nextToken(); // consume '('
+        var args = try this.parseCallArguments();
+        defer args.deinit(this.allocator);
+        if (this.current_token.type != .RParen) return error.ExpectedRParen;
+        this.nextToken(); // consume ')'
+        return .{ .kind = .call, .optional = optional, .arguments = try args.toOwnedSlice(this.allocator) };
+    }
+
+    fn parseOptionalChainPostfix(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
+        this.nextToken(); // consume '?.'
+        var node = base;
+        if (this.current_token.type == .LBracket) {
+            this.nextToken(); // consume '['
+            const index = try this.parseExpression();
+            if (this.current_token.type != .RBracket) {
+                ast.freeAst(this.allocator, index);
+                return error.ExpectedRBracket;
+            }
+            this.nextToken(); // consume ']'
+            return this.appendOptionalLink(node, .{ .kind = .index, .optional = true, .expr = index });
+        }
+        if (this.current_token.type == .LParen) {
+            const link = try this.parseCallLink(true);
+            return this.appendOptionalLink(node, link);
+        }
+        if (!isPropertyName(this.current_token.type)) return error.ExpectedIdentifier;
+        const name = this.current_token.literal;
+        this.nextToken();
+        node = try this.appendOptionalLink(node, .{ .kind = .property, .optional = true, .name = name });
+        if (this.current_token.type == .LParen) {
+            const link = try this.parseCallLink(false);
+            node = try this.appendOptionalLink(node, link);
+        }
+        return node;
+    }
+
+    fn parseChainDotPostfix(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
+        this.nextToken(); // consume '.'
+        if (!isPropertyName(this.current_token.type)) return error.ExpectedIdentifier;
+        const name = this.current_token.literal;
+        this.nextToken();
+        var node = try this.appendOptionalLink(base, .{ .kind = .property, .optional = false, .name = name });
+        if (this.current_token.type == .LParen) {
+            const link = try this.parseCallLink(false);
+            node = try this.appendOptionalLink(node, link);
+        }
+        return node;
+    }
+
+    fn parseChainIndexPostfix(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
+        this.nextToken(); // consume '['
+        const index = try this.parseExpression();
+        if (this.current_token.type != .RBracket) {
+            ast.freeAst(this.allocator, index);
+            return error.ExpectedRBracket;
+        }
+        this.nextToken(); // consume ']'
+        return this.appendOptionalLink(base, .{ .kind = .index, .optional = false, .expr = index });
+    }
+
+    fn parseChainCallPostfix(this: *Parser, base: *ast.Node) anyerror!*ast.Node {
+        const link = try this.parseCallLink(false);
+        return this.appendOptionalLink(base, link);
+    }
     fn parseMemberAccessOrCall(this: *Parser, object: *ast.Node) anyerror!*ast.Node {
         // Si esta función falla, debemos liberar el object
         errdefer ast.freeAst(this.allocator, object);

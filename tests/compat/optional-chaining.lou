@@ -1,0 +1,22 @@
+// Optional chaining: ?. property, ?.[index], ?.(call) and full-chain short-circuit.
+const user = { profile: { name: "Ada" }, greet: function () { return "hi " + this.profile.name; } };
+console.log(user?.profile?.name);
+console.log(user?.missing?.name);
+console.log(user?.profile.name);
+console.log(user.missing?.name);
+const empty = null;
+console.log(empty?.profile?.name);
+console.log(empty?.profile.name);
+console.log(empty?.["profile"]);
+const list = [10, 20];
+console.log(list?.[0], list?.[5], list?.length);
+console.log([1, 2]?.map(function (x) { return x * 2; }).join(","));
+const fn = null;
+console.log(fn?.(1));
+const obj = { double: function (x) { return x * 2; } };
+console.log(obj?.double(4));
+console.log(obj.double?.(5));
+console.log(obj.nope?.(6));
+const tn = { m: function () { return this.tag; }, tag: "ctx" };
+console.log(tn.m?.());
+console.log(tn.greet?.());

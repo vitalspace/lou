@@ -1276,6 +1276,9 @@ pub const Compiler = struct {
                     self.c.w8(@intCast(fc.arguments.len));
                 }
             },
+            .OptionalChain => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
             .NewExpression => {
                 self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
             },

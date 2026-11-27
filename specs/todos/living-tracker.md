@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 14:39:46 |
-| Commit | `0c06392` |
+| Snapshot | 2026-11-27 15:17:52 |
+| Commit | `d149b7b` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 92 |
-| PASS | 92 |
+| Fixtures | 93 |
+| PASS | 93 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 92 |
-| **PASS** | 92 |
+| Test files total | 93 |
+| **PASS** | 93 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 19 |
+| Specs pendientes | 18 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -38,7 +38,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-zero-arg-arrow.md` | pendiente | — | sin test |
-| `optional-chaining.md` | pendiente | `optional-chaining` | sin test |
 | `promise-withresolvers.md` | pendiente | `promise-withresolvers` | sin test |
 | `proxy.md` | pendiente | `proxy` | sin test |
 | `reflect.md` | pendiente | `reflect` | sin test |

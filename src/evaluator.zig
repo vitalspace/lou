@@ -3343,6 +3343,48 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return try invokeFunctionNode(func_node, dc_args.items, env, dc_this);
             }
         },
+        .OptionalChain => |oc| {
+            var current: ast.Value = .{ .void = {} };
+            var receiver: ?ast.Value = null;
+            var method_name: []const u8 = "";
+            switch (oc.base.*) {
+                .MemberAccess => |m| {
+                    receiver = try evaluate(m.object, env);
+                    method_name = m.property;
+                    current = try ocMember(receiver.?, m.property, env);
+                },
+                .ArrayIndex => |a| {
+                    const idx = try evaluate(a.index, env);
+                    receiver = try evaluate(a.array, env);
+                    current = try ocIndex(receiver.?, idx, env);
+                },
+                else => current = try evaluate(oc.base, env),
+            }
+            for (oc.links) |link| {
+                if (link.optional and ocIsNullish(current)) {
+                    return .{ .void = {} };
+                }
+                switch (link.kind) {
+                    .property => {
+                        receiver = current;
+                        method_name = link.name;
+                        current = try ocMember(current, link.name, env);
+                    },
+                    .index => {
+                        const idx = try evaluate(link.expr.?, env);
+                        receiver = current;
+                        method_name = "";
+                        current = try ocIndex(current, idx, env);
+                    },
+                    .call => {
+                        var args = try evaluateArgs(link.arguments, env);
+                        defer args.deinit(env.allocator);
+                        current = try ocCall(current, receiver, args.items, env, method_name);
+                    },
+                }
+            }
+            return current;
+        },
         .MemberAccess => |m| {
             const value = try evaluate(m.object, env);
 
@@ -4419,6 +4461,129 @@ fn evaluateFunctionPrototypeMethod(method: []const u8, receiver: ast.Value, arg_
     return try callFunctionValue(receiver, call_args.items, env, this_arg);
 }
 
+fn ocIsNullish(v: ast.Value) bool {
+    return v == .void or v == .null;
+}
+
+fn ocKeyString(value: ast.Value, env: *Environment) anyerror![]const u8 {
+    return switch (value) {
+        .string => |s| s,
+        .integer => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return error.OutOfMemory;
+            const owned = try env.allocator.dupe(u8, s);
+            env.owned_strings.append(env.allocator, owned) catch {};
+            break :blk owned;
+        },
+        .float => |f| blk: {
+            var buf: [64]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.OutOfMemory;
+            const owned = try env.allocator.dupe(u8, s);
+            env.owned_strings.append(env.allocator, owned) catch {};
+            break :blk owned;
+        },
+        .symbol => |sym| blk: {
+            const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
+            env.owned_strings.append(env.allocator, prop_name) catch {};
+            break :blk prop_name;
+        },
+        else => return error.InvalidIndex,
+    };
+}
+
+fn ocMember(value: ast.Value, property: []const u8, env: *Environment) anyerror!ast.Value {
+    if (value == .array) {
+        if (std.mem.eql(u8, property, "length")) {
+            return .{ .integer = @intCast(value.array.elements.items.len) };
+        }
+        const builtin_obj = env.getBuiltinObject("Array") orelse return error.UndefinedObject;
+        if (builtin_obj.getMethod(property)) |_| {
+            return .{ .object = @ptrCast(builtin_obj) };
+        }
+        return .{ .void = {} };
+    }
+    if (value == .iterator) return .{ .void = {} };
+    if (value == .regexp) return regexpMod.getProperty(value.regexp, property);
+    if (value == .js_object) {
+        var cur: ?*ast.ObjectValue = value.js_object;
+        while (cur) |o| {
+            if (o.properties.get(property)) |v| {
+                if (accessorPart(v, "get")) |getter| {
+                    return try callFunctionValue(getter, &[_]ast.Value{}, env, .{ .js_object = value.js_object });
+                }
+                if (isAccessorValue(v)) return .{ .void = {} };
+                return v;
+            }
+            cur = o.prototype;
+        }
+        return .{ .void = {} };
+    }
+    if (value == .object) {
+        const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(value.object));
+        if (bObjPtr.getProperty(property)) |prop_val| return prop_val;
+        return .{ .void = {} };
+    }
+    return error.InvalidMemberAccess;
+}
+
+fn ocIndex(value: ast.Value, index_val: ast.Value, env: *Environment) anyerror!ast.Value {
+    if (value == .js_object) {
+        const key = try ocKeyString(index_val, env);
+        var cur: ?*ast.ObjectValue = value.js_object;
+        while (cur) |o| {
+            if (o.properties.get(key)) |v| {
+                if (accessorPart(v, "get")) |getter| {
+                    return try callFunctionValue(getter, &[_]ast.Value{}, env, .{ .js_object = value.js_object });
+                }
+                if (isAccessorValue(v)) return .{ .void = {} };
+                return v;
+            }
+            cur = o.prototype;
+        }
+        return .{ .void = {} };
+    }
+    if (value == .array) {
+        if (index_val == .integer and index_val.integer >= 0) {
+            const i: usize = @intCast(index_val.integer);
+            if (i < value.array.elements.items.len) {
+                const v = value.array.elements.items[i];
+                if (v == .hole) return .{ .void = {} };
+                return v;
+            }
+        }
+        return .{ .void = {} };
+    }
+    return .{ .void = {} };
+}
+
+fn ocCall(current: ast.Value, receiver: ?ast.Value, args: []ast.Value, env: *Environment, method_name: []const u8) anyerror!ast.Value {
+    switch (current) {
+        .function, .closure, .generator => return try callFunctionValue(current, args, env, receiver),
+        .js_object => {
+            if (functionMod.isBoundFunction(current.js_object)) {
+                return try callFunctionValue(current, args, env, receiver);
+            }
+            return error.NotAFunction;
+        },
+        .object => {
+            const recv = receiver orelse return error.NotAFunction;
+            const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(current.object));
+            const md = bObjPtr.getMethod(method_name) orelse return error.NotAFunction;
+            var list = try std.ArrayList(ast.Value).initCapacity(env.allocator, args.len + 1);
+            defer list.deinit(env.allocator);
+            try list.append(env.allocator, recv);
+            try list.appendSlice(env.allocator, args);
+            env.throw_hit = false;
+            const res = md(list.items, env);
+            if (env.throw_hit) return error.Thrown;
+            return switch (res) {
+                .value => |v| v,
+                .void => .{ .void = {} },
+            };
+        },
+        else => return error.NotAFunction,
+    }
+}
 pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
     switch (val) {
         .function => |fn_ptr| {
@@ -5876,4 +6041,13 @@ test "reserved words are valid property names after a dot" {
 
     const r = try parseAndEvaluate("(() => { const o = { x: 1 }; o.delete = 2; o.new = 3; return o.delete + o.new; })()", &env_);
     try std.testing.expectEqual(@as(i64, 5), r.integer);
+}
+
+test "optional chaining short-circuits and preserves method this" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const o = null; const t = { v: 1, get: function () { return this.v; } }; return [o?.a?.b, t.get?.(), t?.get()].join(\",\"); })()", &env_);
+    try std.testing.expectEqualStrings(",1,1", r.string);
 }

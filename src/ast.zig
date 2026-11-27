@@ -23,6 +23,16 @@ pub const Property = struct {
     key_expr: ?*Node = null,
 };
 
+pub const OptionalLinkKind = enum { property, index, call };
+
+pub const OptionalLink = struct {
+    kind: OptionalLinkKind,
+    optional: bool = false,
+    name: []const u8 = "",
+    expr: ?*Node = null,
+    arguments: []*Node = &[_]*Node{},
+};
+
 pub const NodeType = enum {
     IntegerLiteral, // Literales enteros como 42
     FloatLiteral, // Literales flotantes como 3.14
@@ -56,6 +66,7 @@ pub const NodeType = enum {
     ArrowFunction,
     MemberAccess, // Nuevo: Para console.log (sin llamada)
     MethodCall, // Nuevo: Para console.log() (con llamada)
+    OptionalChain, // a?.b, a?.[x], a?.(...), a?.b.c
     ImportStatement,
     ExportStatement,
     GeneratorDeclaration,
@@ -212,6 +223,10 @@ pub const Node = union(NodeType) {
         object: *Node, // Nodo del objeto
         method: []const u8, // Nombre del método
         arguments: []*Node, // Argumentos de la llamada
+    },
+    OptionalChain: struct {
+        base: *Node,
+        links: []OptionalLink,
     },
     ImportStatement: struct {
         module_path: []const u8,
@@ -853,6 +868,16 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("Consequent:\n", .{});
             try printAst(sc.consequent, depth + 2, writer);
         },
+        .OptionalChain => |oc| {
+            try writer.print("OptionalChain:\n", .{});
+            try printAst(oc.base, depth + 1, writer);
+            for (oc.links) |link| {
+                try printIdent(writer, depth + 1);
+                try writer.print("Link {s} optional={}\n", .{ @tagName(link.kind), link.optional });
+                if (link.expr) |expr| try printAst(expr, depth + 2, writer);
+                for (link.arguments) |arg| try printAst(arg, depth + 2, writer);
+            }
+        },
         .ImportMetaExpression => try writer.print("ImportMetaExpression\n", .{}),
         .DynamicImportExpression => |di| try writer.print("DynamicImportExpression: {s}\n", .{di.module_path}),
     }
@@ -872,6 +897,18 @@ pub fn containsClosure(node: *const Node) bool {
                 if (containsClosure(prop.value)) break :blk true;
                 if (prop.key_expr) |ke| {
                     if (containsClosure(ke)) break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        .OptionalChain => |oc| blk: {
+            if (containsClosure(oc.base)) break :blk true;
+            for (oc.links) |link| {
+                if (link.expr) |expr| {
+                    if (containsClosure(expr)) break :blk true;
+                }
+                for (link.arguments) |arg| {
+                    if (containsClosure(arg)) break :blk true;
                 }
             }
             break :blk false;
@@ -1069,6 +1106,15 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
                 freeAst(allocator, arg);
             }
             allocator.free(m.arguments);
+        },
+        .OptionalChain => |oc| {
+            freeAst(allocator, oc.base);
+            for (oc.links) |link| {
+                if (link.expr) |expr| freeAst(allocator, expr);
+                for (link.arguments) |arg| freeAst(allocator, arg);
+                allocator.free(link.arguments);
+            }
+            allocator.free(oc.links);
         },
         .StringLiteral => {},
         .BooleanLiteral => {},
