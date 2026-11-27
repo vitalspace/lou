@@ -22,6 +22,7 @@ const WEAKREF_OBJECT = @import("./weakref.zig").WEAKREF_OBJECT;
 const WEAKMAP_OBJECT = @import("./weak/weakmap.zig").WEAKMAP_OBJECT;
 const WEAKSET_OBJECT = @import("./weak/weakset.zig").WEAKSET_OBJECT;
 const PROMISE_OBJECT = @import("./promise/promise.zig").PROMISE_OBJECT;
+const REFLECT_OBJECT = @import("./reflect/reflect.zig").REFLECT_OBJECT;
 const JSON_OBJECT = @import("./json/json.zig").JSON_OBJECT;
 const intl = @import("./intl/intl.zig");
 const NUMBER_OBJECT = @import("./number/number_object.zig").NUMBER_OBJECT;
@@ -51,6 +52,7 @@ pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &WEAKMAP_OBJECT,
     &WEAKSET_OBJECT,
     &PROMISE_OBJECT,
+    &REFLECT_OBJECT,
     &JSON_OBJECT,
     &intl.INTL_OBJECT,
     &intl.NUMBERFORMAT_OBJECT,

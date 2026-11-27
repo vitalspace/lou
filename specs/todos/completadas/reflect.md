@@ -1,8 +1,8 @@
 # Reflect
 
 ## status
-pendiente
 
+**completada** — `Reflect` registrado como `BuiltinObjectImpl` con 13 métodos: `get`, `set`, `has`, `deleteProperty`, `ownKeys`, `apply`, `construct`, `defineProperty`, `getOwnPropertyDescriptor`, `getPrototypeOf`, `setPrototypeOf`, `isExtensible`, `preventExtensions`. Los targets no-objeto lanzan el `TypeError` de ECMAScript (`Reflect.<m> called on non-object`). `apply`/`construct` delegan en `callFunctionValue`; `get` recorre la cadena de prototipos e invoca getters. Limitaciones documentadas: sin traps de Proxy (Reflect es la operación base), flags de descriptor por defecto `true` (no se persisten), claves símbolo no soportadas y arrays soportados en get/set/has/delete/ownKeys. Fixture `tests/compat/reflect.lou` PASS y 3 unit tests. Baseline 95 PASS / 0 FAIL / 0 SKIP, 2026-11-27.
 ## Problema
 El objeto `Reflect` no está implementado. No hay acceso a las operaciones fundamentales del lenguaje como funciones.
 ## Contexto
@@ -169,36 +169,3 @@ console.log(proxy.a); // "intercepted: a" → 1
 ### Comparar salida raw (sin interpretar ANSI)
 ./zig-out/bin/lou run js/tests/reflect.js 2>&1 | od -c
 node js/tests/reflect.js 2>&1 | od -c
-
-### pendiente
-- Implementar Reflect como builtin con todos los métodos estáticos
-
-## Edge cases encontrados durante implementación
-
-Listar aquí los bugs, comportamientos inesperados o requisitos descubiertos
-mientras se implementaba este spec. Cada edge case debe ser promovido a su
-propio spec (usando esta misma plantilla) si requiere cambios de diseño
-propios, o documentado inline si es un fix puntual.
-
-Ejemplos de edge cases típicos:
-- Comportamiento cuando se mezcla el tipo con primitivos incompatibles
-  (TypeError vs coerción silenciosa).
-- Formato de impresión / `toString` — sufijo, base, mayúsculas.
-- Comparación loose vs strict.
-- Conversión a otros tipos (string concat, Number, BigInt).
-- División por cero, exponente negativo, overflow.
-- Capturabilidad del error por `try/catch` JS (no abortar el proceso).
-
-Plantilla para promover un edge case a spec:
-1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
-2. Enlazar desde este spec principal con un enlace relativo.
-3. Verificar que el test correspondiente cubre el caso.
-
-
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `-` (NO-MATCH)
-- Test status: `-`
-
-- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/reflect.lou + tests/compat/reflect.js to enable automatic PASS/FAIL tracking.
-
