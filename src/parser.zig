@@ -1465,6 +1465,48 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parseMethodProperty(this: *Parser, key: []const u8, key_expr: ?*ast.Node) !ast.Property {
+        // ES2015 method shorthand: `name(params) { ... }` inside an object
+        // literal. The function is a normal (non-arrow) function so `this`
+        // binds dynamically when it is called as a method.
+        this.nextToken(); // consume '('
+        const params = try this.parseFunctionParameters();
+        if (this.current_token.type != .RParen) return error.ExpectedRParen;
+        this.nextToken(); // consume ')'
+        const body = try this.parseFunctionBody();
+        const final_body = if (params.destructured_preamble) |preamble| blk: {
+            if (body.* == .BlockStatement) {
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, body.BlockStatement.statements.len + 1);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                for (body.BlockStatement.statements) |s| try new_stmts.append(this.allocator, s);
+                this.allocator.free(body.BlockStatement.statements);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            } else {
+                var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, 2);
+                defer new_stmts.deinit(this.allocator);
+                try new_stmts.append(this.allocator, preamble);
+                const ret = try this.allocator.create(ast.Node);
+                ret.* = .{ .ReturnStatement = .{ .value = body } };
+                try new_stmts.append(this.allocator, ret);
+                const wrapped = try this.allocator.create(ast.Node);
+                wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                break :blk wrapped;
+            }
+        } else body;
+        const fn_node = try this.allocator.create(ast.Node);
+        fn_node.* = .{ .FunctionDeclaration = .{
+            .name = "",
+            .parameters = params.names,
+            .body = final_body,
+            .rest_param = params.rest_param,
+            .param_defaults = params.defaults,
+        } };
+        return .{ .key = key, .value = fn_node, .key_expr = key_expr };
+    }
+
     fn parseObjectLiteral(this: *Parser) anyerror!*ast.Node {
         this.nextToken(); // consume '{'
         var properties = try std.ArrayList(ast.Property).initCapacity(this.allocator, 8);
@@ -1494,12 +1536,15 @@ pub const Parser = struct {
                 if (this.current_token.type != .RBracket) return error.ExpectedRBracket;
                 this.nextToken(); // consume ']'
 
-                if (this.current_token.type != .Colon) return error.ExpectedColon;
-                this.nextToken(); // consume ':'
-
-                const value = try this.parseExpression();
-
-                try properties.append(this.allocator, .{ .key = "", .value = value, .key_expr = key_expr });
+                if (this.current_token.type == .LParen) {
+                    const prop = try this.parseMethodProperty("", key_expr);
+                    try properties.append(this.allocator, prop);
+                } else {
+                    if (this.current_token.type != .Colon) return error.ExpectedColon;
+                    this.nextToken(); // consume ':'
+                    const value = try this.parseExpression();
+                    try properties.append(this.allocator, .{ .key = "", .value = value, .key_expr = key_expr });
+                }
 
                 if (this.current_token.type == .Comma) {
                     this.nextToken(); // consume ','
@@ -1584,6 +1629,18 @@ pub const Parser = struct {
                     .value = fn_node,
                     .kind = if (std.mem.eql(u8, key, "get")) .get else .set,
                 });
+
+                if (this.current_token.type == .Comma) {
+                    this.nextToken(); // consume ','
+                } else if (this.current_token.type != .RBrace) {
+                    return error.ExpectedCommaOrRBrace;
+                }
+                continue;
+            }
+
+            if (this.current_token.type == .LParen) {
+                const prop = try this.parseMethodProperty(key, null);
+                try properties.append(this.allocator, prop);
 
                 if (this.current_token.type == .Comma) {
                     this.nextToken(); // consume ','

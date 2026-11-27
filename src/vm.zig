@@ -2838,6 +2838,14 @@ pub const VM = struct {
                             obj.properties.put("length", .{ .integer = @intCast(s.len) }) catch {};
                             self.push(.{ .js_object = obj });
                         },
+                        .js_object => |obj| {
+                            if (obj.properties.get("@@iterator")) |iter_fn| {
+                                const res = callFunctionValue(iter_fn, &[_]Value{}, self.env, .{ .js_object = obj }) catch Value{ .void = {} };
+                                self.push(res);
+                            } else {
+                                self.push(.{ .void = {} });
+                            }
+                        },
                         else => {
                             // For other types, try to create an array iterator if it has .array property
                             self.push(.{ .void = {} });
@@ -2885,7 +2893,18 @@ pub const VM = struct {
                         .js_object => |obj| {
                             // StringIterator: custom iterator for strings
                             const type_tag = obj.properties.get("@@type");
-                            if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "StringIterator")) {
+                            if (obj.properties.get("next")) |next_fn| {
+                                const res = callFunctionValue(next_fn, &[_]Value{}, self.env, .{ .js_object = obj }) catch Value{ .void = {} };
+                                if (res == .js_object) {
+                                    const value_val: Value = res.js_object.properties.get("value") orelse .{ .void = {} };
+                                    const done_val: Value = res.js_object.properties.get("done") orelse .{ .boolean = true };
+                                    self.push(value_val);
+                                    self.push(done_val);
+                                } else {
+                                    self.push(.{ .void = {} });
+                                    self.push(.{ .boolean = true });
+                                }
+                            } else if (type_tag != null and type_tag.? == .string and std.mem.eql(u8, type_tag.?.string, "StringIterator")) {
                                 const idx_val: Value = obj.properties.get("index") orelse .{ .integer = 0 };
                                 const str_val: Value = obj.properties.get("str") orelse .{ .string = "" };
                                 const idx: i64 = switch (idx_val) {

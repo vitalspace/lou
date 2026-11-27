@@ -149,6 +149,8 @@ pub const Environment = struct {
     /// Set once a closure adopted this scope, so the call-site cleanup knows
     /// it must not free it anymore.
     captured: bool = false,
+    /// Set when this scope's storage has already been released.
+    deinited: bool = false,
     /// This environment exists only as a captured lexical scope (it is not a
     /// call frame and is freed at program exit together with closure_envs).
     is_closure_env: bool = false,
@@ -278,6 +280,22 @@ pub const Environment = struct {
             return self;
         }
         const outer = self.outer.?;
+        // The copy is parented to outer, so every heap-owned ancestor on
+        // that chain must stay alive as a captured scope. Without this, a
+        // function scope whose block created the closure is freed on return
+        // and the copy's parent chain dangles.
+        {
+            var anc: ?*Environment = outer;
+            while (anc) |a| {
+                if (a.owned) {
+                    if (!a.captured) {
+                        a.captured = true;
+                        if (!a.is_closure_env) try a.root().closure_envs.append(self.allocator, a);
+                    }
+                } else break;
+                anc = a.outer;
+            }
+        }
         const heap = try initClosureHeap(self.allocator, outer);
         var it = self.values.iterator();
         while (it.next()) |entry| {
@@ -449,6 +467,33 @@ pub const Environment = struct {
     }
 
     pub fn deinit(self: *Environment) void {
+        if (self.outer) |outer| {
+            if (outer.deinited) self.outer = null;
+        }
+        self.deinited = true;
+        // Drain both heap-tracked env lists. These were kept alive past
+        // their natural scope so closures could safely reference them.
+        // We deinit each one (their own lists are drained recursively)
+        // and free the backing memory.
+        // Reverse creation order: a nested scope's parent was always created
+        // before it, so children are torn down before their parents.
+        var re_i: usize = self.iter_envs.items.len;
+        while (re_i > 0) {
+            re_i -= 1;
+            const iter_env = self.iter_envs.items[re_i];
+            iter_env.deinit();
+            self.allocator.destroy(iter_env);
+        }
+        self.iter_envs.deinit(self.allocator);
+
+        var ce_i: usize = self.closure_envs.items.len;
+        while (ce_i > 0) {
+            ce_i -= 1;
+            const closure_env = self.closure_envs.items[ce_i];
+            closure_env.deinit();
+            self.allocator.destroy(closure_env);
+        }
+        self.closure_envs.deinit(self.allocator);
         // Clean up generators FIRST so they can safely promote to outer
         // before outer's lists are freed.
         if (self.outer) |outer| {
@@ -540,30 +585,6 @@ pub const Environment = struct {
             r.deinit();
         }
         self.regexp_objects.deinit(self.allocator);
-
-        // Drain both heap-tracked env lists. These were kept alive past
-        // their natural scope so closures could safely reference them.
-        // We deinit each one (their own lists are drained recursively)
-        // and free the backing memory.
-        // Reverse creation order: a nested scope's parent was always created
-        // before it, so children are torn down before their parents.
-        var re_i: usize = self.iter_envs.items.len;
-        while (re_i > 0) {
-            re_i -= 1;
-            const iter_env = self.iter_envs.items[re_i];
-            iter_env.deinit();
-            self.allocator.destroy(iter_env);
-        }
-        self.iter_envs.deinit(self.allocator);
-
-        var ce_i: usize = self.closure_envs.items.len;
-        while (ce_i > 0) {
-            ce_i -= 1;
-            const closure_env = self.closure_envs.items[ce_i];
-            closure_env.deinit();
-            self.allocator.destroy(closure_env);
-        }
-        self.closure_envs.deinit(self.allocator);
 
         for (self.synthetic_asts.items) |node| {
             ast.freeAst(self.allocator, node);

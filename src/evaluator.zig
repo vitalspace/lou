@@ -580,6 +580,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             .boolean => |b| if (b) "true" else "false",
                             .null => "null",
                             .void => "undefined",
+                            .symbol => |sym| blk2: {
+                                const prop_name = try ast.symbolPropertyName(env.allocator, sym.description);
+                                env.owned_strings.append(env.allocator, prop_name) catch {};
+                                break :blk2 prop_name;
+                            },
                             else => "[object Object]",
                         };
                     } else prop.key;
@@ -1780,6 +1785,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 for (b.statements) |stmt| {
                     if (stmt.* == .ReturnStatement) {
                         const ret_stmt = stmt.ReturnStatement;
+                        // A return nested in a block must abort the enclosing
+                        // function, not just this block.
+                        env.return_hit = true;
                         if (ret_stmt.value) |val| {
                             return try evaluate(val, env);
                         } else {
@@ -1799,6 +1807,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             for (b.statements) |stmt| {
                 if (stmt.* == .ReturnStatement) {
                     const ret_stmt = stmt.ReturnStatement;
+                    block_env.return_hit = true;
+                    env.return_hit = true;
                     if (ret_stmt.value) |val| {
                         return try evaluate(val, &block_env);
                     } else {
@@ -2265,6 +2275,49 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                 },
                 .js_object => |obj| {
+                    if (obj.properties.get("@@iterator")) |iter_fn| {
+                        const it = try callFunctionValue(iter_fn, &[_]ast.Value{}, env, .{ .js_object = obj });
+                        if (it == .js_object) {
+                            const iterator_obj = it.js_object;
+                            while (true) {
+                                const next_fn = iterator_obj.properties.get("next") orelse break;
+                                const next_res = try callFunctionValue(next_fn, &[_]ast.Value{}, env, .{ .js_object = iterator_obj });
+                                if (next_res != .js_object) break;
+                                const done_val = next_res.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
+                                const is_done = switch (done_val) {
+                                    .boolean => |b| b,
+                                    else => true,
+                                };
+                                if (is_done) break;
+                                const val = next_res.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                                try setLoopVar(loop_env, f.kind, f.variable, val);
+                                result = try evaluate(f.body, loop_env);
+                                if (loop_env.yield_hit) {
+                                    if (loop_env.yield_star_gen != null) env.yield_star_gen = loop_env.yield_star_gen;
+                                    if (loop_env.yield_star_array != null) {
+                                        env.yield_star_array = loop_env.yield_star_array;
+                                        env.yield_star_index = loop_env.yield_star_index;
+                                    }
+                                    env.yield_hit = true;
+                                    env.yield_value = loop_env.yield_value;
+                                    env.yield_caught_by_loop = true;
+                                    result = loop_env.yield_value;
+                                    loop_env.yield_hit = false;
+                                    break;
+                                }
+                                if (loop_env.return_hit) break;
+                                if (loop_env.break_hit) {
+                                    consumeBreak(loop_env, fo_my_label);
+                                    break;
+                                }
+                                if (loop_env.continue_hit) {
+                                    if (consumeContinue(loop_env, fo_my_label)) continue;
+                                    break;
+                                }
+                            }
+                        }
+                        return result;
+                    }
                     const type_tag = obj.properties.get("@@type");
                     var handled = false;
                     if (type_tag != null and type_tag.? == .string) {
@@ -3213,6 +3266,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             const callee_val = try evaluate(dc.callee, env);
             if (callee_val == .generator) {
                 // Evaluate args for side effects, then return the generator
+                for (dc.arguments) |arg| {
+                    _ = try evaluate(arg, env);
+                }
+                return callee_val;
+            }
+            if (callee_val == .iterator) {
+                // arr[Symbol.iterator]() yields the iterator itself.
                 for (dc.arguments) |arg| {
                     _ = try evaluate(arg, env);
                 }
@@ -5613,4 +5673,40 @@ test "Function.prototype call, apply and bind" {
     const r = try parseAndEvaluate("(() => { function f(a, b) { return a + b + (this.n || 0); } const o = { n: 10 }; const g = f.bind(o, 1); return f.call(o, 2, 3) + '/' + f.apply(o, [4, 5]) + '/' + g(2); })()", &env_);
     try std.testing.expect(r == .string);
     try std.testing.expectEqualStrings("15/19/13", r.string);
+}
+
+test "object literal method shorthand" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const o = { n: 4, m() { return this.n + 3; } }; return o.m(); })()", &env_);
+    try std.testing.expectEqual(@as(i64, 7), r.integer);
+}
+
+test "custom iterable for-of respects @@iterator" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const it = {}; it[\"@@iterator\"] = function () { let i = 0; return { next() { if (i < 3) { return { value: i++, done: false }; } return { done: true }; } }; }; let s = 0; for (const x of it) { s += x; } return s; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 3), r.integer);
+}
+
+test "nested block return aborts the enclosing function" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(function f() { if (true) { return 1; } return 2; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 1), r.integer);
+}
+
+test "closures keep the function scope alive when created inside a block" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { function make() { let i = 0; return { n() { if (i < 3) { return { value: i, done: false }; } return { done: true }; } }; } const it = make(); return it.n().value; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 0), r.integer);
 }

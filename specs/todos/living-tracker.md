@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 12:03:57 |
-| Commit | `0889a0b` |
+| Snapshot | 2026-11-27 12:50:50 |
+| Commit | `0d12912` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 81 |
-| FAIL | 4 |
+| PASS | 82 |
+| FAIL | 3 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,36 +19,29 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 81 |
-| **FAIL** | 4 |
+| **PASS** | 82 |
+| **FAIL** | 3 |
 | SKIP (sin .js) | 1 |
 | Specs pendientes | 30 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
 
-### 1. `iterator-protocol.lou` - FAIL
-
-- exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 1 vs 10 líneas):
-  - Lou : `error: ExpectedColon`
-  - Node: `array sum: 6`
-
-### 2. `regex-literal.lou` - FAIL
+### 1. `regex-literal.lou` - FAIL
 
 - exit: Lou 1 / Node 0
 - Primera divergencia (línea 1, 1 vs 5 líneas):
   - Lou : `error: UnexpectedToken`
   - Node: `--- regex literal syntax ---`
 
-### 3. `regex-properties.lou` - FAIL
+### 2. `regex-properties.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 1, 19 vs 19 líneas):
   - Lou : `undefined`
   - Node: `hello`
 
-### 4. `weakref.lou` - FAIL
+### 3. `weakref.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 5, 12 vs 12 líneas):
