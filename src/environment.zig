@@ -457,13 +457,25 @@ pub const Environment = struct {
     }
 
     pub fn setLet(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.values.contains(name)) {
-            return error.LetRedeclaration;
+        if (self.values.get(name)) |existing| {
+            if (existing != .hole) return error.LetRedeclaration;
         }
         if (self.constants.contains(name)) {
             return error.ConstantReassignment;
         }
         try self.values.put(name, value);
+    }
+
+    /// Reserve a lexical binding at scope entry. It reads as a TDZ sentinel
+    /// until its declaration statement initializes it.
+    pub fn declareLexical(self: *Environment, name: []const u8) !void {
+        if (!self.values.contains(name)) {
+            try self.values.put(name, .{ .hole = {} });
+        }
+    }
+
+    pub fn isUninitialized(self: *Environment, name: []const u8) bool {
+        return if (self.values.get(name)) |value| value == .hole else false;
     }
 
     pub fn deinit(self: *Environment) void {
@@ -699,8 +711,8 @@ pub const Environment = struct {
     }
 
     pub fn setConstant(self: *Environment, name: []const u8, value: ast.Value) !void {
-        if (self.values.contains(name)) {
-            return error.ConstantReassignment;
+        if (self.values.get(name)) |existing| {
+            if (existing != .hole) return error.ConstantReassignment;
         }
         try self.values.put(name, value);
         try self.constants.put(name, {});

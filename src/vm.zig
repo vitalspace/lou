@@ -11,6 +11,7 @@ const evaluateGeneratorNext = @import("evaluator.zig").evaluateGeneratorNext;
 const evaluateGeneratorReturn = @import("evaluator.zig").evaluateGeneratorReturn;
 const evaluateGeneratorThrow = @import("evaluator.zig").evaluateGeneratorThrow;
 const callFunctionValue = @import("evaluator.zig").callFunctionValue;
+const predeclareLexicals = @import("evaluator.zig").predeclareLexicals;
 const throwError = @import("./builtins/error.zig").throwError;
 const runtime = @import("./types/runtime.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
@@ -1476,6 +1477,13 @@ pub const VM = struct {
     /// Call right after a builtin invocation: routes the pending throw to the
     /// nearest handler and returns true (the call's result must be discarded),
     /// or returns error.Thrown when there is no handler.
+    fn raiseTdz(self: *VM, name: []const u8) !bool {
+        const allocated = std.fmt.allocPrint(self.env.allocator, "Cannot access '{s}' before initialization", .{name}) catch null;
+        if (allocated) |msg| self.env.owned_strings.append(self.env.allocator, msg) catch {};
+        _ = throwError(self.env, "ReferenceError", .{ .string = allocated orelse "Cannot access variable before initialization" });
+        return try self.deliverBuiltinThrow();
+    }
+
     fn deliverBuiltinThrow(self: *VM) !bool {
         if (!self.env.throw_hit) return false;
         const val = self.env.throw_value;
@@ -1667,6 +1675,7 @@ pub const VM = struct {
                     }
                 }
                 try bindRestParam(&func_env, rest_param, params, args);
+                if (body.* == .BlockStatement) predeclareLexicals(&func_env, body.BlockStatement.statements);
                 var sub_vm = VM.init(&func_env);
                 sub_vm.compiled_chunks = self.compiled_chunks; // inherit parent's chunks
                 // NOTE: sub_vm.deinit() would free compiled_chunks entries (shared with parent),
@@ -1706,7 +1715,14 @@ pub const VM = struct {
             }
         }
         try bindRestParam(&func_env, rest_param, params, args);
-        const r = try evaluate(body, &func_env);
+        if (body.* == .BlockStatement) predeclareLexicals(&func_env, body.BlockStatement.statements);
+        const r = evaluate(body, &func_env) catch |err| {
+            if (func_env.throw_hit) {
+                try self.propagateThrow(&func_env);
+                return;
+            }
+            return err;
+        };
         if (func_env.throw_hit) {
             try self.propagateThrow(&func_env);
             return;
@@ -1933,11 +1949,16 @@ pub const VM = struct {
                     const v = self.peek(0);
                     self.sp -= 1;
                     self.env.setVar(n, v) catch {};
+
                 },
                 .get_global => {
                     const ci = self.readU16();
                     const n = self.c.consts.items[ci].string;
                     if (self.env.get(n)) |v| {
+                        if (v == .hole) {
+                            _ = try self.raiseTdz(n);
+                            continue;
+                        }
                         self.push(v);
                     } else if (self.env.getFunction(n)) |funcNode| {
                         self.push(.{ .function = @ptrCast(funcNode) });

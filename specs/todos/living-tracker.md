@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 17:03:41 |
-| Commit | `46dd8bd` |
+| Snapshot | 2026-11-27 17:13:48 |
+| Commit | `6b266ff` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 98 |
-| PASS | 98 |
+| Fixtures | 99 |
+| PASS | 99 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 98 |
-| **PASS** | 98 |
+| Test files total | 99 |
+| **PASS** | 99 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 13 |
+| Specs pendientes | 12 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -41,7 +41,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `proxy.md` | pendiente | `proxy` | sin test |
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |
-| `temporal-dead-zone.md` | NOT IMPLEMENTED | `temporal-dead-zone` | sin test |
 | `temporal.md` | pendiente | `temporal` | sin test |
 | `typed-arrays.md` | pendiente | `typed-arrays` | sin test |
 

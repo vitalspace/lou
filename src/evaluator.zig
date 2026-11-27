@@ -735,6 +735,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             if (env.getFunction(i.name)) |funcNode| {
                 return .{ .function = @ptrCast(funcNode) };
             } else if (env.get(i.name)) |value| {
+                if (value == .hole) {
+                    _ = throwTdzValue(env, i.name);
+                    return error.Thrown;
+                }
                 return value;
             } else if (env.getBuiltinObject(i.name)) |obj| {
                 return .{ .object = @ptrCast(obj) };
@@ -1812,6 +1816,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             var block_env = try Environment.initBlock(env.allocator, env);
             defer block_env.deinit();
+            predeclareLexicals(&block_env, b.statements);
 
             var result: ast.Value = .{ .float = 0.0 };
             for (b.statements) |stmt| {
@@ -1826,7 +1831,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                 }
 
-                result = try evaluate(stmt, &block_env);
+                result = evaluate(stmt, &block_env) catch |err| {
+                    if (block_env.throw_hit) {
+                        env.throw_hit = true;
+                        env.throw_value = block_env.throw_value;
+                    }
+                    return err;
+                };
                 if (block_env.return_hit or block_env.break_hit or block_env.continue_hit) break;
             }
             return result;
@@ -4358,7 +4369,14 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
-            return try evaluate(func.body, func_env);
+            if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
+            return evaluate(func.body, func_env) catch |err| {
+                if (func_env.throw_hit) {
+                    env.throw_hit = true;
+                    env.throw_value = func_env.throw_value;
+                }
+                return err;
+            };
         }
         if (func_node.* == .ArrowFunction) {
             const func = func_node.ArrowFunction;
@@ -4373,7 +4391,14 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
-            return try evaluate(func.body, func_env);
+            if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
+            return evaluate(func.body, func_env) catch |err| {
+                if (func_env.throw_hit) {
+                    env.throw_hit = true;
+                    env.throw_value = func_env.throw_value;
+                }
+                return err;
+            };
         }
     return error.NotAFunction;
 }
@@ -4593,7 +4618,15 @@ pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, t
         .closure => |cl| {
             const scope: *Environment = @alignCast(@ptrCast(cl.env));
             const func_node: *ast.Node = @alignCast(@ptrCast(cl.func_node));
-            return try invokeFunctionNode(func_node, args, scope, this_val);
+            return invokeFunctionNode(func_node, args, scope, this_val) catch |err| {
+                // The captured scope is not necessarily the caller frame; make
+                // the pending JS throw visible where the call was made.
+                if (scope.throw_hit) {
+                    env.throw_hit = true;
+                    env.throw_value = scope.throw_value;
+                }
+                return err;
+            };
         },
         .generator => |gen| {
             return .{ .generator = gen };
@@ -4797,6 +4830,23 @@ pub fn evaluateGeneratorThrow(gen: *GeneratorObject, caller_env: *Environment, a
 
 /// `eval(code)` — parses and evaluates `code` as Lou source in the current
 /// environment. Throws SyntaxError on parse failure.
+pub fn predeclareLexicals(env: *Environment, statements: []*ast.Node) void {
+    for (statements) |stmt| {
+        switch (stmt.*) {
+            .LetDeclaration => |v| env.declareLexical(v.name) catch {},
+            .ConstantDeclaration => |c| env.declareLexical(c.name) catch {},
+            else => {},
+        }
+    }
+}
+
+fn throwTdzValue(env: *Environment, name: []const u8) ast.Value {
+    const allocated = std.fmt.allocPrint(env.allocator, "Cannot access '{s}' before initialization", .{name}) catch null;
+    if (allocated) |msg| env.owned_strings.append(env.allocator, msg) catch {};
+    _ = throwError(env, "ReferenceError", .{ .string = allocated orelse "Cannot access variable before initialization" });
+    return .{ .void = {} };
+}
+
 pub fn evalFn(args: []ast.Value, env: *builtinsTypes.Environment) builtinsTypes.BuiltinResult {
     if (args.len == 0 or args[0] != .string) return .{ .value = .{ .void = {} } };
 
@@ -4843,6 +4893,36 @@ pub fn evalFn(args: []ast.Value, env: *builtinsTypes.Environment) builtinsTypes.
     }
 
     return .{ .value = result };
+}
+
+test "let binding stays in TDZ until initialized" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try env_.declareLexical("x");
+    try std.testing.expect(env_.isUninitialized("x"));
+    try std.testing.expectError(error.Thrown, parseAndEvaluate("x", &env_));
+    try std.testing.expect(env_.throw_hit);
+    try std.testing.expectEqualStrings("ReferenceError", env_.throw_value.js_object.properties.get("@@subtype").?.string);
+    env_.throw_hit = false;
+
+    try env_.setLet("x", .{ .integer = 5 });
+    try std.testing.expect(!env_.isUninitialized("x"));
+    const value = try parseAndEvaluate("x", &env_);
+    try std.testing.expectEqual(@as(i64, 5), value.integer);
+}
+
+test "constant binding can initialize a predeclared slot" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try env_.declareLexical("c");
+    try env_.setConstant("c", .{ .integer = 7 });
+    try std.testing.expect(!env_.isUninitialized("c"));
+    try std.testing.expect(env_.isConstant("c"));
+    try std.testing.expectEqual(@as(i64, 7), env_.get("c").?.integer);
 }
 
 test "evalFn scopes let but keeps var in caller" {

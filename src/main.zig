@@ -170,6 +170,16 @@ pub fn main(init: std.process.Init) !void {
     try global_this_obj.properties.put("undefined", .{ .void = {} });
     try env_.setConstant("globalThis", .{ .js_object = global_this_obj });
 
+    // Reserve top-level lexical bindings so reads before their declaration
+    // hit the temporal dead zone instead of falling through to `undefined`.
+    for (program) |stmt| {
+        switch (stmt.*) {
+            .LetDeclaration => |v| env_.declareLexical(v.name) catch {},
+            .ConstantDeclaration => |c| env_.declareLexical(c.name) catch {},
+            else => {},
+        }
+    }
+
     if (use_vm) {
         var chunk = Chunk.init(allocator);
         defer chunk.deinit();

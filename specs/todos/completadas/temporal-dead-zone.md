@@ -2,7 +2,7 @@
 
 ## status
 
-NOT IMPLEMENTED
+✅ COMPLETADO
 
 ## Problema
 
@@ -172,8 +172,15 @@ Plantilla para promover un edge case a spec:
 
 ## Estado del test (auto 2026-06-22)
 
-- Compat test match: `-` (NO-MATCH)
-- Test status: `-`
+- Compat test match: `tests/compat/temporal-dead-zone.lou`
+- Test status: PASS
 
 - Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/temporal-dead-zone.lou + tests/compat/temporal-dead-zone.js to enable automatic PASS/FAIL tracking.
 
+
+## Implementación
+
+- `Environment.declareLexical()` reserva el binding con el sentinel interno `.hole`.
+- El programa, cada bloque y cada cuerpo de función predeclaran sus `let`/`const` antes de ejecutar.
+- `get`/`get_global` detectan el sentinel y lanzan `ReferenceError`; `setLet`/`setConstant` lo reemplazan al inicializar.
+- `var` mantiene su comportamiento previo (sin TDZ).
