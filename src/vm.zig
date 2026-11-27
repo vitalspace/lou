@@ -2769,6 +2769,7 @@ pub const VM = struct {
                     const node = self.c.consts.items[ci].function;
                     const val = evaluate(@as(*ast.Node, @ptrCast(@alignCast(node))), self.env) catch {
                         if (self.env.throw_hit) {
+                            if (try self.deliverBuiltinThrow()) continue;
                             return error.Thrown;
                         }
                         self.push(.{ .void = {} });

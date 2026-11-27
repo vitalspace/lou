@@ -1065,6 +1065,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             defer args.deinit(env.allocator);
                             try args.append(env.allocator, left_val);
                             const result = builtin_fn(args.items, env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .{ .float = 0.0 },
@@ -1087,6 +1088,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                     try args.append(env.allocator, val);
                                 }
                                 const result = builtin_fn(args.items, env);
+                                if (env.throw_hit) return error.Thrown;
                                 return switch (result) {
                                     .value => |val| val,
                                     .void => .{ .float = 0.0 },
@@ -3001,6 +3003,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     var expanded = try evaluateArgs(f.arguments, env);
                     defer expanded.deinit(env.allocator);
                     const result = builtin_fn(expanded.items, env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .{ .float = 0.0 },
@@ -3013,6 +3016,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         stack_buf[idx] = try evaluate(arg, env);
                     }
                     const result = builtin_fn(stack_buf[0..total], env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .{ .float = 0.0 },
@@ -3026,6 +3030,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 const result = builtin_fn(args.items, env);
                 args.clearAndFree(env.allocator);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result) {
                     .value => |val| val,
                     .void => .{ .float = 0.0 },
@@ -3114,6 +3119,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     var expanded = try evaluateArgs(ne.arguments, env);
                     defer expanded.deinit(env.allocator);
                     const result = builtin_fn(expanded.items, env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                         .void => .{ .float = 0.0 },
@@ -3126,6 +3132,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         stack_buf[idx] = try evaluate(arg, env);
                     }
                     const result = builtin_fn(stack_buf[0..total], env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                         .void => .{ .float = 0.0 },
@@ -3139,6 +3146,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 const result = builtin_fn(args.items, env);
                 args.clearAndFree(env.allocator);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result) {
                     .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                     .void => .{ .float = 0.0 },
@@ -5771,4 +5779,18 @@ test "regexp lastIndex is writable and division still divides" {
 
     const d = try parseAndEvaluate("6 / 3", &env_);
     try std.testing.expectEqual(@as(f64, 2.0), d.float);
+}
+test "WeakRef rejects primitives and deref returns the target" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const ok = try parseAndEvaluate("(() => { const o = { n: 1 }; const w = new WeakRef(o); return w.deref() === o; })()", &env_);
+    try std.testing.expect(ok.boolean);
+
+    const num = try parseAndEvaluate("(() => { try { new WeakRef(1); return \"no\"; } catch (e) { return e instanceof TypeError ? \"yes\" : \"other\"; } })()", &env_);
+    try std.testing.expectEqualStrings("yes", num.string);
+
+    const none = try parseAndEvaluate("(() => { try { new WeakRef(); return \"no\"; } catch (e) { return e instanceof TypeError ? \"yes\" : \"other\"; } })()", &env_);
+    try std.testing.expectEqualStrings("yes", none.string);
 }

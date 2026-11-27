@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 13:21:26 |
-| Commit | `2ee4d6f` |
+| Snapshot | 2026-11-27 13:55:44 |
+| Commit | `035b2a0` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 84 |
-| FAIL | 1 |
+| PASS | 85 |
+| FAIL | 0 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,20 +19,13 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 84 |
-| **FAIL** | 1 |
+| **PASS** | 85 |
+| **FAIL** | 0 |
 | SKIP (sin .js) | 1 |
 | Specs pendientes | 30 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
-
-### 1. `weakref.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 5, 12 vs 12 líneas):
-  - Lou : `no throw for number`
-  - Node: `TypeError for number: true`
 
 ## Section 3 — Specs pendientes
 
