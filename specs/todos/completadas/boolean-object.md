@@ -2,7 +2,7 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**completada** — implementada (compat: 81 PASS / 4 FAIL / 1 SKIP)
 
 `tests/compat/boolean.lou` sigue FAIL. Primera divergencia (línea 20), Lou vs Node:
 

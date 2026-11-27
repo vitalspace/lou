@@ -8,6 +8,8 @@ const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
 const throwError = @import("./builtins/error.zig").throwError;
 const coercion = @import("coercion.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
+const booleanMod = @import("./builtins/boolean/boolean.zig");
+const functionMod = @import("./builtins/function/function.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -2854,7 +2856,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .void => "undefined",
                 .null => "object",
                 .array => "object",
-                .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null) "function" else "object",
+                .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null or functionMod.isBoundFunction(val.js_object)) "function" else "object",
                 .function => "function",
                 .closure => "function",
                 .object => "object",
@@ -2978,6 +2980,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         defer closed_args.deinit(env.allocator);
                         return try callFunctionValue(val, closed_args.items, env, ast.Value{ .void = {} });
                     }
+                    if (val == .js_object and functionMod.isBoundFunction(val.js_object)) {
+                        var bound_call_args = try evaluateArgs(f.arguments, env);
+                        defer bound_call_args.deinit(env.allocator);
+                        return try invokeBoundFunction(val.js_object, bound_call_args.items, env);
+                    }
                 }
             }
 
@@ -3043,12 +3050,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             };
 
             if (env.getBuiltin(func_name)) |builtin_fn| {
+            const is_boolean_ctor = std.mem.eql(u8, func_name, "Boolean");
                 if (has_spread_args) {
                     var expanded = try evaluateArgs(ne.arguments, env);
                     defer expanded.deinit(env.allocator);
                     const result = builtin_fn(expanded.items, env);
                     return switch (result) {
-                        .value => |val| val,
+                        .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                         .void => .{ .float = 0.0 },
                     };
                 }
@@ -3060,7 +3068,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                     const result = builtin_fn(stack_buf[0..total], env);
                     return switch (result) {
-                        .value => |val| val,
+                        .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                         .void => .{ .float = 0.0 },
                     };
                 }
@@ -3073,7 +3081,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 const result = builtin_fn(args.items, env);
                 args.clearAndFree(env.allocator);
                 return switch (result) {
-                    .value => |val| val,
+                    .value => |val| if (is_boolean_ctor) (try booleanMod.makeBooleanWrapper(env, val)) orelse val else val,
                     .void => .{ .float = 0.0 },
                 };
             }
@@ -3215,6 +3223,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 defer expanded.deinit(env.allocator);
                 return try callFunctionValue(callee_val, expanded.items, env, ast.Value{ .void = {} });
             }
+            if (callee_val == .js_object and functionMod.isBoundFunction(callee_val.js_object)) {
+                var expanded = try evaluateArgs(dc.arguments, env);
+                defer expanded.deinit(env.allocator);
+                return try invokeBoundFunction(callee_val.js_object, expanded.items, env);
+            }
             if (callee_val != .function) {
                 return error.NotAFunction;
             }
@@ -3317,6 +3330,14 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             if (has_spread_args) {
                 expanded_method_args = try evaluateArgs(m.arguments, env);
+            }
+
+            if (!has_spread_args and isFunctionProtoMethod(m.method)) {
+                if (functionProtoReceiver(env, m.object)) |recv| {
+                    if ((recv == .function or recv == .closure or recv == .generator or (recv == .js_object and functionMod.isBoundFunction(recv.js_object)))) {
+                        return try evaluateFunctionPrototypeMethod(m.method, recv, m.arguments, env);
+                    }
+                }
             }
 
             if (m.object.* == .Identifier) {
@@ -3757,6 +3778,26 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                     return try callFunctionValue(method_val, js_args.items, env, value);
                 }
+                // Wrapper objects (Boolean, Number, String, ...) expose their
+                // prototype methods through the builtin object registry.
+                if (value.js_object.properties.get("@@type")) |tt| {
+                    if (tt == .string and m.arguments.len + 1 <= 16) {
+                        if (env.getBuiltinObject(tt.string)) |bObj| {
+                            if (bObj.getMethod(m.method)) |md| {
+                                var wrap_args: [16]ast.Value = undefined;
+                                wrap_args[0] = value;
+                                for (m.arguments, 0..) |arg, idx| {
+                                    wrap_args[idx + 1] = try evaluate(arg, env);
+                                }
+                                const wrap_res = md(wrap_args[0 .. m.arguments.len + 1], env);
+                                return switch (wrap_res) {
+                                    .value => |val| val,
+                                    .void => .{ .void = {} },
+                                };
+                            }
+                        }
+                    }
+                }
                 return .{ .void = {} };
             } else if (value == .object) {
                 const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(value.object));
@@ -3851,7 +3892,18 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .value => |val| val,
                     .void => .void,
                 };
+            } else if (value == .closure) {
+                if (isFunctionProtoMethod(m.method)) {
+                    return try evaluateFunctionPrototypeMethod(m.method, value, m.arguments, env);
+                }
+                var closure_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                defer closure_args.deinit(env.allocator);
+                for (m.arguments) |arg| try closure_args.append(env.allocator, try evaluate(arg, env));
+                return try callFunctionValue(value, closure_args.items, env, ast.Value{ .void = {} });
             } else if (value == .function) {
+                if (isFunctionProtoMethod(m.method)) {
+                    return try evaluateFunctionPrototypeMethod(m.method, value, m.arguments, env);
+                }
                 const func_node: *ast.Node = @alignCast(@ptrCast(value.function));
 
                 const has_spread = if (expanded_method_args) |ema| ema.items.len > 0 else false;
@@ -4130,7 +4182,12 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
                 env.allocator.destroy(func_env);
             };
             if (this_val) |tv| {
-                try func_env.set("this", tv);
+                // Sloppy-mode `this` coercion: null/undefined become the global object.
+                const bound_this: ast.Value = switch (tv) {
+                    .null, .void => if (env.globalObject()) |g| ast.Value{ .js_object = g } else tv,
+                    else => tv,
+                };
+                try func_env.set("this", bound_this);
             }
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
@@ -4186,6 +4243,58 @@ fn setAccessorProperty(env: *Environment, obj: *ast.ObjectValue, key: []const u8
     return true;
 }
 
+fn isFunctionProtoMethod(method: []const u8) bool {
+    return std.mem.eql(u8, method, "call") or std.mem.eql(u8, method, "apply") or std.mem.eql(u8, method, "bind");
+}
+
+fn functionProtoReceiver(env: *Environment, node: *ast.Node) ?ast.Value {
+    if (node.* != .Identifier) return null;
+    const name = node.Identifier.name;
+    if (env.get(name)) |v| return v;
+    if (env.getFunction(name)) |fn_node| return .{ .function = @ptrCast(@alignCast(fn_node)) };
+    return null;
+}
+
+/// Invokes a bound-function wrapper: concatenates the wrapper's bound
+/// arguments with the call arguments and unwraps nested bound wrappers until
+/// a real function is reached.
+pub fn invokeBoundFunction(obj: *ast.ObjectValue, extra_args: []const ast.Value, env: *Environment) anyerror!ast.Value {
+    const info = functionMod.extractBoundFunction(obj) orelse return error.NotAFunction;
+    var merged = try std.ArrayList(ast.Value).initCapacity(env.allocator, info.bound_args.len + extra_args.len);
+    defer merged.deinit(env.allocator);
+    try merged.appendSlice(env.allocator, info.bound_args);
+    try merged.appendSlice(env.allocator, extra_args);
+    if (info.target == .js_object and functionMod.isBoundFunction(info.target.js_object)) {
+        return try invokeBoundFunction(info.target.js_object, merged.items, env);
+    }
+    return try callFunctionValue(info.target, merged.items, env, info.bound_this);
+}
+
+fn evaluateFunctionPrototypeMethod(method: []const u8, receiver: ast.Value, arg_nodes: []*ast.Node, env: *Environment) anyerror!ast.Value {
+    var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, arg_nodes.len);
+    defer args.deinit(env.allocator);
+    for (arg_nodes) |n| try args.append(env.allocator, try evaluate(n, env));
+
+    const this_arg: ast.Value = if (args.items.len > 0) args.items[0] else .{ .void = {} };
+    if (std.mem.eql(u8, method, "bind")) {
+        const bound_args: []const ast.Value = if (args.items.len > 1) args.items[1..] else &[_]ast.Value{};
+        return .{ .js_object = functionMod.makeBoundFunction(env, receiver, this_arg, bound_args) };
+    }
+
+    var call_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, if (args.items.len > 1) args.items.len - 1 else 0);
+    defer call_args.deinit(env.allocator);
+    if (std.mem.eql(u8, method, "call")) {
+        if (args.items.len > 1) try call_args.appendSlice(env.allocator, args.items[1..]);
+    } else if (args.items.len > 1 and args.items[1] == .array) {
+        try call_args.appendSlice(env.allocator, args.items[1].array.elements.items);
+    }
+
+    if (receiver == .js_object and functionMod.isBoundFunction(receiver.js_object)) {
+        return try invokeBoundFunction(receiver.js_object, call_args.items, env);
+    }
+    return try callFunctionValue(receiver, call_args.items, env, this_arg);
+}
+
 pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
     switch (val) {
         .function => |fn_ptr| {
@@ -4199,6 +4308,10 @@ pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, t
         },
         .generator => |gen| {
             return .{ .generator = gen };
+        },
+        .js_object => |obj| {
+            if (functionMod.isBoundFunction(obj)) return try invokeBoundFunction(obj, args, env);
+            return error.NotAFunction;
         },
         else => return error.NotAFunction,
     }
@@ -5466,4 +5579,38 @@ test "default parameter values" {
         \\(function f(x = 1, y = x * 2) { return y; })(undefined)
     , &env_);
     try std.testing.expectEqual(@as(i64, 2), r2.integer);
+}
+
+test "template literal interpolation" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const x = 2; return `v=${x}-${1 + 2}-ok`; })()", &env_);
+    try std.testing.expect(r == .string);
+    try std.testing.expectEqualStrings("v=2-3-ok", r.string);
+}
+
+test "Boolean wrapper objects" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const b = new Boolean(false); return typeof b + ':' + b.valueOf() + ':' + b.toString(); })()", &env_);
+    try std.testing.expect(r == .string);
+    try std.testing.expectEqualStrings("object:false:false", r.string);
+
+    const truthy = try parseAndEvaluate("(new Boolean(false)) ? 'truthy' : 'falsy'", &env_);
+    try std.testing.expect(truthy == .string);
+    try std.testing.expectEqualStrings("truthy", truthy.string);
+}
+
+test "Function.prototype call, apply and bind" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { function f(a, b) { return a + b + (this.n || 0); } const o = { n: 10 }; const g = f.bind(o, 1); return f.call(o, 2, 3) + '/' + f.apply(o, [4, 5]) + '/' + g(2); })()", &env_);
+    try std.testing.expect(r == .string);
+    try std.testing.expectEqualStrings("15/19/13", r.string);
 }

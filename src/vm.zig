@@ -4,6 +4,8 @@ const Value = ast.Value;
 const Environment = @import("evaluator.zig").Environment;
 const builtinsTypes = @import("./types/types.zig");
 const evaluate = @import("evaluator.zig").evaluate;
+const invokeBoundFunction = @import("evaluator.zig").invokeBoundFunction;
+const functionMod = @import("./builtins/function/function.zig");
 const GeneratorObject = @import("./types/runtime.zig").GeneratorObject;
 const evaluateGeneratorNext = @import("evaluator.zig").evaluateGeneratorNext;
 const evaluateGeneratorReturn = @import("evaluator.zig").evaluateGeneratorReturn;
@@ -1273,6 +1275,12 @@ pub const Compiler = struct {
                 self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
             },
             .MethodCall => |mc| {
+                if ((mc.object.* == .Identifier or mc.object.* == .FunctionDeclaration or mc.object.* == .ArrowFunction) and
+                    (std.mem.eql(u8, mc.method, "call") or std.mem.eql(u8, mc.method, "apply") or std.mem.eql(u8, mc.method, "bind")))
+                {
+                    self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                    return;
+                }
                 var has_spread = false;
                 for (mc.arguments) |a| {
                     if (a.* == .SpreadExpression) {
@@ -1744,20 +1752,18 @@ pub const VM = struct {
                 .add, .sub, .mul, .div, .mod_ => {
                     const b = self.pop();
                     const a = self.pop();
-                    // BigInt + BigInt / BigInt + Number — handle directly here.
-                    if (a == .big_int or b == .big_int) {
-                        const result = vmBigIntArith(self.env.allocator, &self.env.bigints, op, a, b);
-                        self.push(result);
-                        continue;
-                    }
                     if (op == .add and (a == .string or b == .string)) {
                         var buf = std.ArrayList(u8).initCapacity(self.env.allocator, 64) catch unreachable;
                         defer buf.deinit(self.env.allocator);
-                        valToStr(self.env.allocator, &buf, a);
-                        valToStr(self.env.allocator, &buf, b);
+                        valToStrConcat(self.env.allocator, &buf, a);
+                        valToStrConcat(self.env.allocator, &buf, b);
                         const s = buf.toOwnedSlice(self.env.allocator) catch unreachable;
                         self.env.owned_strings.append(self.env.allocator, s) catch {};
                         self.push(.{ .string = s });
+                    } else if (a == .big_int or b == .big_int) {
+                        // BigInt + BigInt / BigInt + Number - handled natively.
+                        const result = vmBigIntArith(self.env.allocator, &self.env.bigints, op, a, b);
+                        self.push(result);
                     } else {
                         const av = toNumber(a);
                         const bv = toNumber(b);
@@ -2205,6 +2211,10 @@ pub const VM = struct {
                             try self.callFuncNode(@as(*ast.Node, @ptrCast(@alignCast(val.function))), args);
                         } else if (val == .closure) {
                             try self.callClosureValue(val, args);
+                        } else if (val == .js_object and functionMod.isBoundFunction(val.js_object)) {
+                            const r = invokeBoundFunction(val.js_object, args.items, self.env) catch Value{ .void = {} };
+                            if (try self.deliverBuiltinThrow()) continue;
+                            self.push(r);
                         } else {
                             return error.UndefinedFunction;
                         }
@@ -3350,6 +3360,18 @@ fn valEq(allocator: std.mem.Allocator, bigints_list: *std.ArrayList(*ast.BigIntV
     // Step 11/12: Object ↔ primitive → ToPrimitive not implemented yet.
     return false;
 }
+/// Like `valToStr`, but BigInt values lose their `n` suffix, as required by
+/// ECMAScript `ToString` for string concatenation.
+fn valToStrConcat(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void {
+    if (v == .big_int) {
+        const digits = v.big_int.toString(a) catch return;
+        defer a.free(digits);
+        buf.appendSlice(a, digits) catch {};
+        return;
+    }
+    valToStr(a, buf, v);
+}
+
 fn valToStr(a: std.mem.Allocator, buf: *std.ArrayList(u8), v: Value) void {
     switch (v) {
         .string => |s| buf.appendSlice(a, s) catch {},

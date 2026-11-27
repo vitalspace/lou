@@ -16,6 +16,34 @@ fn isRightAssociative(token: TokenType) bool {
     };
 }
 
+
+fn findTemplateExprEnd(raw: []const u8, start: usize) ?usize {
+    var depth: usize = 1;
+    var i = start;
+    var quote: u8 = 0;
+    while (i < raw.len) : (i += 1) {
+        const c = raw[i];
+        if (quote != 0) {
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (c == quote) quote = 0;
+            continue;
+        }
+        switch (c) {
+            '\'', '"', '`' => quote = c,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
 pub const Parser = struct {
     lexer: *Lexer,
     current_token: Token,
@@ -844,7 +872,7 @@ pub const Parser = struct {
             .Float => base = try this.parseFloatLiteral(),
             .BigInt => base = try this.parseBigIntLiteral(),
             .String => base = try this.parseStringLiteral(),
-            .TemplateString => base = try this.parseStringLiteral(),
+            .TemplateString => base = try this.parseTemplateString(),
             .True => base = try this.parseBooleanLiteral(true),
             .False => base = try this.parseBooleanLiteral(false),
             .Null, .Undefined => {
@@ -1200,6 +1228,80 @@ pub const Parser = struct {
             .{ .StringLiteral = .{ .value = raw } };
         this.nextToken();
         return node;
+    }
+
+    /// Template literals are desugared into a left-associative `+` chain of
+    /// string literals and expressions, so both engines work unchanged.
+    fn parseTemplateString(this: *Parser) !*ast.Node {
+        const raw = this.current_token.literal;
+        if (std.mem.indexOf(u8, raw, "${") == null) {
+            const node = try this.allocator.create(ast.Node);
+            node.* = if (std.mem.indexOfScalar(u8, raw, '\\')) |_|
+                .{ .StringLiteral = .{ .value = try this.processStringEscapes(raw) } }
+            else
+                .{ .StringLiteral = .{ .value = raw } };
+            this.nextToken();
+            return node;
+        }
+
+        var chain: ?*ast.Node = null;
+        var lit_start: usize = 0;
+        var i: usize = 0;
+        while (i < raw.len) {
+            if (raw[i] == '\\') {
+                i += if (i + 1 < raw.len) 2 else 1;
+                continue;
+            }
+            if (raw[i] == '$' and i + 1 < raw.len and raw[i + 1] == '{') {
+                chain = try this.templateAppendString(chain, raw[lit_start..i]);
+                const expr_start = i + 2;
+                const close = findTemplateExprEnd(raw, expr_start) orelse return error.UnterminatedTemplate;
+                chain = try this.templateAppendExpression(chain, raw[expr_start..close]);
+                i = close + 1;
+                lit_start = i;
+                continue;
+            }
+            i += 1;
+        }
+        chain = try this.templateAppendString(chain, raw[lit_start..]);
+        this.nextToken();
+        return chain.?;
+    }
+
+    fn templatePlus(this: *Parser, left: *ast.Node, right: *ast.Node) !*ast.Node {
+        const node = try this.allocator.create(ast.Node);
+        node.* = .{ .BinaryExpression = .{ .left = left, .operator = .Plus, .right = right } };
+        return node;
+    }
+
+    fn templateAppendString(this: *Parser, chain: ?*ast.Node, text: []const u8) !*ast.Node {
+        const node = try this.allocator.create(ast.Node);
+        node.* = if (std.mem.indexOfScalar(u8, text, '\\')) |_|
+            .{ .StringLiteral = .{ .value = try this.processStringEscapes(text) } }
+        else
+            .{ .StringLiteral = .{ .value = text } };
+        if (chain) |left| return try this.templatePlus(left, node);
+        return node;
+    }
+
+    fn templateAppendExpression(this: *Parser, chain: ?*ast.Node, source: []const u8) !*ast.Node {
+        var sub_lexer = Lexer.init(source);
+        var sub = Parser{
+            .lexer = &sub_lexer,
+            .current_token = undefined,
+            .peek_token = undefined,
+            .allocator = this.allocator,
+            .arena = this.arena,
+            .arena_child = this.arena_child,
+        };
+        sub.nextToken();
+        sub.nextToken();
+        const expr = sub.parseCommaExpression() catch return error.InvalidTemplateExpression;
+        if (sub.current_token.type != .EOF) return error.InvalidTemplateExpression;
+        if (chain) |left| return try this.templatePlus(left, expr);
+        const empty = try this.allocator.create(ast.Node);
+        empty.* = .{ .StringLiteral = .{ .value = "" } };
+        return try this.templatePlus(empty, expr);
     }
 
     fn processStringEscapes(this: *Parser, raw: []const u8) ![]const u8 {

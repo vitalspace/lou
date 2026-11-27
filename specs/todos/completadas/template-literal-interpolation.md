@@ -2,7 +2,7 @@
 
 ## status
 
-NOT IMPLEMENTED
+**completada** — implementada (compat: 81 PASS / 4 FAIL / 1 SKIP)
 
 ## Problema
 
