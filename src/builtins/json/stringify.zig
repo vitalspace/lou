@@ -107,7 +107,7 @@ fn valueToJson(
     depth: usize,
     indent: ?[]const u8,
     replacer_fn: ?*Ast.Node,
-    allowed_keys: ?*const std.StringHashMap(void),
+    allowed_keys: ?*const std.StringArrayHashMapUnmanaged(void),
     env: *Types.Environment,
 ) !void {
     // The replacer is applied by the caller (Stringify for root, object/array loops for children).
@@ -186,74 +186,84 @@ fn valueToJson(
             try buf.append(allocator, ']');
         },
         .js_object => |obj| {
+            const ordered = try obj.getForInKeys(env.allocator, &env.arrays);
+            var keys = ordered.elements.items;
+            if (allowed_keys) |allowed| {
+                // A replacer array defines the property order, not just a
+                // membership filter, so build the key list in that order.
+                const filtered = try Ast.ArrayObject.init(env.allocator);
+                try env.arrays.append(env.allocator, filtered);
+                for (allowed.keys()) |k| {
+                    if (obj.properties.contains(k)) {
+                        try filtered.elements.append(env.allocator, .{ .string = k });
+                    }
+                }
+                keys = filtered.elements.items;
+            }
             try buf.append(allocator, '{');
             // Count printable keys (considering allowed_keys filter)
             var printable_count: usize = 0;
-            {
-                var it = obj.properties.iterator();
-                while (it.next()) |entry| {
-                    if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
-                    switch (entry.value_ptr.*) {
-                        .function, .symbol, .void => continue,
-                        else => {},
-                    }
-                    if (allowed_keys) |keys| {
-                        if (!keys.contains(entry.key_ptr.*)) continue;
-                    }
-                    printable_count += 1;
+            for (keys) |key_val| {
+                const key = key_val.string;
+                const v = obj.properties.get(key) orelse continue;
+                switch (v) {
+                    .function, .symbol, .void => continue,
+                    else => {},
                 }
+                if (allowed_keys) |allowed| {
+                    if (!allowed.contains(key)) continue;
+                }
+                printable_count += 1;
             }
             // Helper to write a property if its effective value (after replacer) is not void
             const pp_indent = indent;
             if (pp_indent != null and printable_count > 0) {
                 try buf.append(allocator, '\n');
-                var it = obj.properties.iterator();
                 var idx: usize = 0;
-                while (it.next()) |entry| {
-                    if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
-                    const v = entry.value_ptr.*;
+                for (keys) |key_val| {
+                    const key = key_val.string;
+                    const v = obj.properties.get(key) orelse continue;
                     switch (v) {
                         .function, .symbol, .void => continue,
                         else => {},
                     }
-                    if (allowed_keys) |keys| {
-                        if (!keys.contains(entry.key_ptr.*)) continue;
+                    if (allowed_keys) |allowed| {
+                        if (!allowed.contains(key)) continue;
                     }
                     // Apply replacer FIRST to check if this property should be excluded
-                    const prop_val = try applyReplacer(replacer_fn, entry.key_ptr.*, v, env);
+                    const prop_val = try applyReplacer(replacer_fn, key, v, env);
                     if (prop_val == .void) continue;
                     if (idx > 0) {
                         try buf.appendSlice(allocator, ",\n");
                     }
                     try appendIndent(buf, pp_indent.?, depth + 1, allocator);
-                    try escapeString(buf, entry.key_ptr.*, allocator);
+                    try escapeString(buf, key, allocator);
                     try buf.appendSlice(allocator, ": ");
-                    try valueToJson(buf, prop_val, entry.key_ptr.*, allocator, depth + 1, pp_indent, replacer_fn, allowed_keys, env);
+                    try valueToJson(buf, prop_val, key, allocator, depth + 1, pp_indent, replacer_fn, allowed_keys, env);
                     idx += 1;
                 }
                 try buf.append(allocator, '\n');
                 try appendIndent(buf, pp_indent.?, depth, allocator);
             } else {
                 var first = true;
-                var it = obj.properties.iterator();
-                while (it.next()) |entry| {
-                    if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
-                    const v = entry.value_ptr.*;
+                for (keys) |key_val| {
+                    const key = key_val.string;
+                    const v = obj.properties.get(key) orelse continue;
                     switch (v) {
                         .function, .symbol, .void => continue,
                         else => {},
                     }
-                    if (allowed_keys) |keys| {
-                        if (!keys.contains(entry.key_ptr.*)) continue;
+                    if (allowed_keys) |allowed| {
+                        if (!allowed.contains(key)) continue;
                     }
                     // Apply replacer FIRST to check if this property should be excluded
-                    const prop_val = try applyReplacer(replacer_fn, entry.key_ptr.*, v, env);
+                    const prop_val = try applyReplacer(replacer_fn, key, v, env);
                     if (prop_val == .void) continue;
                     if (!first) try buf.append(allocator, ',');
                     first = false;
-                    try escapeString(buf, entry.key_ptr.*, allocator);
+                    try escapeString(buf, key, allocator);
                     try buf.append(allocator, ':');
-                    try valueToJson(buf, prop_val, entry.key_ptr.*, allocator, depth + 1, indent, replacer_fn, allowed_keys, env);
+                    try valueToJson(buf, prop_val, key, allocator, depth + 1, indent, replacer_fn, allowed_keys, env);
                 }
             }
             try buf.append(allocator, '}');
@@ -314,44 +324,44 @@ fn getFunctionNode(val: Types.Value, env: *Types.Environment) ?*Ast.Node {
 /// All keys in the returned HashMap are owned copies and must be freed by
 /// calling freeAllowedKeys() after deinit.
 /// Returns null if the array is empty or no valid keys.
-fn buildAllowedKeys(arr: *Ast.ArrayObject, allocator: std.mem.Allocator) !?std.StringHashMap(void) {
+fn buildAllowedKeys(arr: *Ast.ArrayObject, allocator: std.mem.Allocator) !?std.StringArrayHashMapUnmanaged(void) {
     if (arr.elements.items.len == 0) return null;
-    var set = std.StringHashMap(void).init(allocator);
-    errdefer set.deinit();
+    var set = std.StringArrayHashMapUnmanaged(void){};
+    errdefer set.deinit(allocator);
 
     for (arr.elements.items) |elem| {
         switch (elem) {
             .string => |s| {
                 if (s.len == 0) continue;
                 const owned = try allocator.dupe(u8, s);
-                try set.put(owned, {});
+                try set.put(allocator, owned, {});
             },
             .integer => |n| {
                 var buf: [32]u8 = undefined;
                 const str = std.fmt.bufPrint(&buf, "{d}", .{n}) catch continue;
                 const owned = try allocator.dupe(u8, str);
-                try set.put(owned, {});
+                try set.put(allocator, owned, {});
             },
             .float => |f| {
                 if (std.math.isNan(f) or std.math.isInf(f)) continue;
                 var buf: [64]u8 = undefined;
                 const str = std.fmt.bufPrint(&buf, "{d}", .{f}) catch continue;
                 const owned = try allocator.dupe(u8, str);
-                try set.put(owned, {});
+                try set.put(allocator, owned, {});
             },
             else => continue,
         }
     }
 
     if (set.count() == 0) {
-        set.deinit();
+        set.deinit(allocator);
         return null;
     }
     return set;
 }
 
 /// Free all keys in a StringHashMap that were allocated by buildAllowedKeys.
-fn freeAllowedKeys(set: *const std.StringHashMap(void), allocator: std.mem.Allocator) void {
+fn freeAllowedKeys(set: *const std.StringArrayHashMapUnmanaged(void), allocator: std.mem.Allocator) void {
     var it = set.iterator();
     while (it.next()) |entry| {
         allocator.free(entry.key_ptr.*);
@@ -367,7 +377,7 @@ pub fn Stringify(args: []const Types.Value, env: *Types.Environment) Types.Built
     const replacer_fn: ?*Ast.Node = if (args.len >= 2) getFunctionNode(args[1], env) else null;
 
     // If args[1] is present and is NOT a function, try to use it as an array whitelist
-    var allowed_keys: ?std.StringHashMap(void) = if (args.len >= 2 and replacer_fn == null) blk: {
+    var allowed_keys: ?std.StringArrayHashMapUnmanaged(void) = if (args.len >= 2 and replacer_fn == null) blk: {
         if (args[1] == .array) {
             const maybe_set = buildAllowedKeys(args[1].array, env.allocator) catch null;
             break :blk maybe_set;
@@ -387,7 +397,7 @@ pub fn Stringify(args: []const Types.Value, env: *Types.Environment) Types.Built
         if (indent) |s| env.allocator.free(s);
         if (allowed_keys) |*keys| {
             freeAllowedKeys(keys, env.allocator);
-            keys.deinit();
+            keys.deinit(env.allocator);
         }
         return .{ .value = .{ .void = {} } };
     }
@@ -396,20 +406,20 @@ pub fn Stringify(args: []const Types.Value, env: *Types.Environment) Types.Built
         if (indent) |s| env.allocator.free(s);
         if (allowed_keys) |*keys| {
             freeAllowedKeys(keys, env.allocator);
-            keys.deinit();
+            keys.deinit(env.allocator);
         }
         return .{ .value = .{ .void = {} } };
     };
     defer buf.deinit(env.allocator);
 
     // Pass allowed_keys as optional pointer
-    const keys_ptr: ?*const std.StringHashMap(void) = if (allowed_keys) |*k| k else null;
+    const keys_ptr: ?*const std.StringArrayHashMapUnmanaged(void) = if (allowed_keys) |*k| k else null;
 
     valueToJson(&buf, root_val, "", env.allocator, 0, indent, replacer_fn, keys_ptr, env) catch {
         if (indent) |s| env.allocator.free(s);
         if (allowed_keys) |*keys| {
             freeAllowedKeys(keys, env.allocator);
-            keys.deinit();
+            keys.deinit(env.allocator);
         }
         return .{ .value = .{ .void = {} } };
     };
@@ -417,7 +427,7 @@ pub fn Stringify(args: []const Types.Value, env: *Types.Environment) Types.Built
     if (indent) |s| env.allocator.free(s);
     if (allowed_keys) |*keys| {
         freeAllowedKeys(keys, env.allocator);
-        keys.deinit();
+        keys.deinit(env.allocator);
     }
 
     const result = buf.toOwnedSlice(env.allocator) catch {

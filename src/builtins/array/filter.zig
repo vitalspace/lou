@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const callbackThrow = @import("../callbacks.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
 
@@ -63,6 +64,7 @@ pub fn Filter(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
         const ret = evaluate(func_body, &func_env) catch {
             return .{ .value = .{ .void = {} } };
         };
+        if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
 
         if (truthy(ret)) {
             result.elements.appendAssumeCapacity(element);

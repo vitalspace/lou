@@ -149,6 +149,7 @@ pub const Node = union(NodeType) {
     },
     BlockStatement: struct {
         statements: []*Node,
+        is_scope: bool = true,
     },
     ForLoop: struct {
         init: ?*Node,

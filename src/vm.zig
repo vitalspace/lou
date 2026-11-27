@@ -256,6 +256,10 @@ pub const Compiler = struct {
             .ConstantDeclaration, .VariableDeclaration, .LetDeclaration => self.decl(n),
             .BlockStatement => {
                 const stmts = n.BlockStatement.statements;
+                if (!n.BlockStatement.is_scope) {
+                    for (stmts) |s| self.stmt(s);
+                    return;
+                }
                 var save_buf: [64][]const u8 = undefined;
                 var save_count: usize = 0;
                 for (stmts) |s| {

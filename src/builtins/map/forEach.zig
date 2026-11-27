@@ -3,15 +3,19 @@ const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const map_utils = @import("map_utils.zig");
+const callbackThrow = @import("../callbacks.zig");
 
 pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 2) return .{ .value = .{ .void = {} } };
     const map_val = map_utils.getMap(args) orelse return .{ .value = .{ .void = {} } };
     const entries = map_utils.getEntries(map_val) orelse return .{ .value = .{ .void = {} } };
     const callback = args[1];
-    if (callback != .function) return .{ .value = .{ .void = {} } };
-
-    const func_node: *Ast.Node = @ptrCast(@alignCast(callback.function));
+    const func_node: *Ast.Node = switch (callback) {
+        .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        .closure => |cl| @as(*Ast.Node, @ptrCast(@alignCast(cl.func_node))),
+        .string => |name| env.getFunction(name) orelse return .{ .value = .{ .void = {} } },
+        else => return .{ .value = .{ .void = {} } },
+    };
     const func_params: []const []const u8 = switch (func_node.*) {
         .FunctionDeclaration => |f| f.parameters,
         .ArrowFunction => |f| f.parameters,
@@ -23,7 +27,7 @@ pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         else => return .{ .value = .{ .void = {} } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .void = {} } };
     };
     defer func_env.deinit();
@@ -39,6 +43,7 @@ pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
             if (func_params.len > 1) func_env.setVar(func_params[1], key) catch {};
             if (func_params.len > 2) func_env.setVar(func_params[2], map_val) catch {};
             _ = evaluate(func_body, &func_env) catch {};
+            if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
         }
         i += 1;
     }

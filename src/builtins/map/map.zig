@@ -327,6 +327,7 @@ pub fn MapForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
             if (func_params.len > 1) func_env.setVar(func_params[1], key) catch {};
             if (func_params.len > 2) func_env.setVar(func_params[2], map_val) catch {};
             _ = evaluate(func_body, &func_env) catch {};
+            if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
         }
         i += 1;
     }
@@ -471,6 +472,7 @@ pub fn MapToString(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
 }
 
 const evaluate = @import("../../evaluator.zig").evaluate;
+const callbackThrow = @import("../callbacks.zig");
 
 const MAP_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "set", .func = MapSet },

@@ -280,6 +280,7 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         if (func_params.len > 0) func_env.setVar(func_params[0], val) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], val) catch {};
         _ = evaluate(func_body, &func_env) catch {};
+        if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
         i += 1;
     }
 
@@ -316,6 +317,7 @@ pub fn SetToString(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
 }
 
 const evaluate = @import("../../evaluator.zig").evaluate;
+const callbackThrow = @import("../callbacks.zig");
 
 const SET_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "add", .func = SetAdd },

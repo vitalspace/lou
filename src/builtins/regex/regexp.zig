@@ -692,9 +692,7 @@ pub fn RegExpSplit(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
     if (re.pattern.len == 0) {
         // Empty regex: split into characters
         if (input.len == 0) {
-            const owned = env.allocator.dupe(u8, "") catch return .{ .value = .{ .array = arr } };
-            env.owned_strings.append(env.allocator, owned) catch {};
-            arr.elements.append(env.allocator, .{ .string = owned }) catch {};
+            return .{ .value = .{ .array = arr } };
         } else {
             for (input, 0..) |_, i| {
                 if (limit) |lim| { if (arr.elements.items.len >= lim) break; }
@@ -708,30 +706,29 @@ pub fn RegExpSplit(args: []Types.Value, env: *Types.Environment) Types.BuiltinRe
     }
 
     var start: usize = 0;
-    var found_any = false;
     while (start <= input.len) {
         if (limit) |lim| { if (arr.elements.items.len >= lim) break; }
-        if (findMatch(input, start, re)) |match| {
-            found_any = true;
-            if (match.idx != start) {
-                const segment = input[start .. match.idx];
-                const owned = env.allocator.dupe(u8, segment) catch return .{ .value = .{ .array = arr } };
-                env.owned_strings.append(env.allocator, owned) catch {};
-                arr.elements.append(env.allocator, .{ .string = owned }) catch {};
-                start = match.idx + match.len;
-            } else {
-                break;
-            }
-        } else {
-            const segment = input[start..];
+        const match = findMatch(input, start, re) orelse break;
+        if (match.len == 0) {
+            // Zero-width match: emit the segment including one byte and
+            // advance so the loop always makes progress.
+            if (match.idx >= input.len) break;
+            const segment = input[start .. match.idx + 1];
             const owned = env.allocator.dupe(u8, segment) catch return .{ .value = .{ .array = arr } };
             env.owned_strings.append(env.allocator, owned) catch {};
             arr.elements.append(env.allocator, .{ .string = owned }) catch {};
-            break;
+            start = match.idx + 1;
+            continue;
         }
+        const segment = input[start..match.idx];
+        const owned = env.allocator.dupe(u8, segment) catch return .{ .value = .{ .array = arr } };
+        env.owned_strings.append(env.allocator, owned) catch {};
+        arr.elements.append(env.allocator, .{ .string = owned }) catch {};
+        start = match.idx + match.len;
     }
-    if (!found_any and re.pattern.len > 0) {
-        const owned = env.allocator.dupe(u8, input) catch return .{ .value = .{ .array = arr } };
+    if (limit == null or arr.elements.items.len < limit.?) {
+        const segment = input[start..];
+        const owned = env.allocator.dupe(u8, segment) catch return .{ .value = .{ .array = arr } };
         env.owned_strings.append(env.allocator, owned) catch {};
         arr.elements.append(env.allocator, .{ .string = owned }) catch {};
     }

@@ -2,10 +2,7 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
-
-El test `tests/compat/finalization-registry.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
-
+**completada** — `FinalizationRegistry` y `WeakRef` están implementados en el runtime. `tests/compat/finalization-registry.lou` PASS (baseline 90 PASS / 0 FAIL / 0 SKIP, 2026-11-27). El resto del documento queda como contexto histórico.
 ## Problema
 El objeto `FinalizationRegistry` no está implementado.
 ## Contexto

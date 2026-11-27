@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const regexpMod = @import("../regex/regexp.zig");
 
 pub fn Split(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 1) return .{ .value = .{ .void = {} } };
@@ -8,6 +9,18 @@ pub fn Split(args: []const Types.Value, env: *Types.Environment) Types.BuiltinRe
         .string => |ss| ss,
         else => return .{ .value = .{ .void = {} } },
     };
+
+    // Regex separators are delegated to the RegExp engine (`@@split`).
+    if (args.len >= 2 and args[1] == .regexp) {
+        var re_args: [3]Types.Value = undefined;
+        re_args[0] = args[1];
+        re_args[1] = args[0];
+        if (args.len >= 3) {
+            re_args[2] = args[2];
+            return regexpMod.RegExpSplit(re_args[0..3], env);
+        }
+        return regexpMod.RegExpSplit(re_args[0..2], env);
+    }
 
     const separator: ?[]const u8 = if (args.len < 2) null else switch (args[1]) {
         .string => |sep| sep,

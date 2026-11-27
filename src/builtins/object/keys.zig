@@ -23,20 +23,11 @@ pub fn Keys(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
         return .{ .value = .{ .array = arr } };
     }
 
-    const result = Ast.ArrayObject.init(env.allocator) catch return .{ .value = .{ .void = {} } };
-    env.arrays.append(env.allocator, result) catch {
-        result.deinit();
+    const keys = obj.js_object.getForInKeys(env.allocator, &env.arrays) catch {
         return .{ .value = .{ .void = {} } };
     };
 
-    var it = obj.js_object.properties.iterator();
-    while (it.next()) |entry| {
-        // Skip internal @@ properties
-        if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
-        result.elements.append(env.allocator, Types.Value{ .string = entry.key_ptr.* }) catch {};
-    }
-
-    return .{ .value = .{ .array = result } };
+    return .{ .value = .{ .array = keys } };
 }
 
 const testing = std.testing;
@@ -57,4 +48,23 @@ test "Object.keys - basic object" {
     try testing.expect(result == .value);
     try testing.expect(result.value == .array);
     try testing.expectEqual(@as(usize, 2), result.value.array.elements.items.len);
+}
+test "Object.keys follows integer-first order" {
+    const allocator = testing.allocator;
+    var env = try Environment.init(allocator, null);
+    defer env.deinit();
+
+    const obj = Ast.ObjectValue.init(allocator) catch return;
+    defer obj.deinit();
+    obj.properties.put("b", Types.Value{ .integer = 1 }) catch {};
+    obj.properties.put("0", Types.Value{ .integer = 2 }) catch {};
+
+    var args = [_]Types.Value{.{ .js_object = obj }};
+    const result = Keys(&args, &env);
+
+    try testing.expect(result == .value);
+    try testing.expect(result.value == .array);
+    try testing.expectEqual(@as(usize, 2), result.value.array.elements.items.len);
+    try testing.expectEqualStrings("0", result.value.array.elements.items[0].string);
+    try testing.expectEqualStrings("b", result.value.array.elements.items[1].string);
 }

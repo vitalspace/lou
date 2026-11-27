@@ -1781,10 +1781,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         },
         .BlockStatement => |b| {
             var has_block_scope = false;
-            for (b.statements) |stmt| {
-                if (stmt.* == .LetDeclaration or stmt.* == .ConstantDeclaration) {
-                    has_block_scope = true;
-                    break;
+            if (b.is_scope) {
+                for (b.statements) |stmt| {
+                    if (stmt.* == .LetDeclaration or stmt.* == .ConstantDeclaration) {
+                        has_block_scope = true;
+                        break;
+                    }
                 }
             }
 
@@ -3443,6 +3445,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                             const result = method_fn(ma.items, env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .void,
@@ -3466,6 +3469,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                             const result = method_fn(stack_buf[0..total], env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .void,
@@ -3489,6 +3493,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                         const result2 = method_fn2(method_args.items, env);
+                        if (env.throw_hit) return error.Thrown;
                         return switch (result2) {
                             .value => |val| val,
                             .void => .void,
@@ -3510,6 +3515,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                             const result = method_fn(ma.items, env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .void,
@@ -3533,6 +3539,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                             const result = method_fn(stack_buf[0..total], env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .void,
@@ -3556,6 +3563,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                         const result2 = method_fn2(method_args.items, env);
+                        if (env.throw_hit) return error.Thrown;
                         return switch (result2) {
                             .value => |val| val,
                             .void => .void,
@@ -3577,6 +3585,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                 return error.Thrown;
                             };
                             const result = method_fn(ma.items, env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result) {
                                 .value => |val| val,
                                 .void => .{ .void = {} },
@@ -3600,6 +3609,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                 return error.Thrown;
                             };
                             const result2 = method_fn2(stack_buf[0..total], env);
+                            if (env.throw_hit) return error.Thrown;
                             return switch (result2) {
                                 .value => |val| val,
                                 .void => .{ .void = {} },
@@ -3623,6 +3633,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             return error.Thrown;
                         };
                         const result3 = method_fn3(method_args.items, env);
+                        if (env.throw_hit) return error.Thrown;
                         return switch (result3) {
                             .value => |val| val,
                             .void => .{ .void = {} },
@@ -3678,6 +3689,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                     try ma.append(env.allocator, value);
                                     try ma.appendSlice(env.allocator, ema.items);
                                     const result = method_fn(ma.items, env);
+                                    if (env.throw_hit) return error.Thrown;
                                     return switch (result) {
                                         .value => |val| val,
                                         .void => .void,
@@ -3691,6 +3703,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                         stack_buf[idx + 1] = try evaluate(arg, env);
                                     }
                                     const result = method_fn(stack_buf[0..total], env);
+                                    if (env.throw_hit) return error.Thrown;
                                     return switch (result) {
                                         .value => |val| val,
                                         .void => .void,
@@ -3704,6 +3717,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                                     try method_args.append(env.allocator, val);
                                 }
                                 const result = method_fn(method_args.items, env);
+                                if (env.throw_hit) return error.Thrown;
                                 return switch (result) {
                                     .value => |val| val,
                                     .void => .void,
@@ -3728,6 +3742,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
                 if (expanded_method_args) |ema| {
                     const result = method(ema.items, env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .void,
@@ -3740,6 +3755,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         stack_buf2[idx] = try evaluate(arg, env);
                     }
                     const result = method(stack_buf2[0..total2], env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .void,
@@ -3753,6 +3769,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 const result = method(args.items, env);
                 args.clearAndFree(env.allocator);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result) {
                     .value => |val| val,
                     .void => .void,
@@ -3777,6 +3794,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                     const result = method_fn(ma.items, env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .void,
@@ -3800,6 +3818,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                     const result3 = method_fn3(stack_buf3[0..total3], env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result3) {
                         .value => |val| val,
                         .void => .void,
@@ -3823,6 +3842,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                 const result4 = method_fn4(method_args.items, env);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result4) {
                     .value => |val| val,
                     .void => .void,
@@ -3905,6 +3925,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     }
                 }
                 const result4 = method(args4, env);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result4) {
                     .value => |val| val,
                     .void => .void,
@@ -3926,6 +3947,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                     const result = method_fn(ma.items, env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result) {
                         .value => |val| val,
                         .void => .void,
@@ -3949,6 +3971,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                     const result5 = method_fn(stack_buf5[0..total5], env);
+                    if (env.throw_hit) return error.Thrown;
                     return switch (result5) {
                         .value => |val| val,
                         .void => .void,
@@ -3972,6 +3995,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
     return error.Thrown;
 };
                 const result5 = method_fn2(method_args.items, env);
+                if (env.throw_hit) return error.Thrown;
                 return switch (result5) {
                     .value => |val| val,
                     .void => .void,
@@ -5793,4 +5817,54 @@ test "WeakRef rejects primitives and deref returns the target" {
 
     const none = try parseAndEvaluate("(() => { try { new WeakRef(); return \"no\"; } catch (e) { return e instanceof TypeError ? \"yes\" : \"other\"; } })()", &env_);
     try std.testing.expectEqualStrings("yes", none.string);
+}
+test "multiple declarators share the enclosing scope" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const a = 10, b = 2; return a / b; })()", &env_);
+    try std.testing.expectEqual(@as(f64, 5.0), r.float);
+
+    const r2 = try parseAndEvaluate("(() => { let x = 3, y = 4; return x * y; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 12), r2.integer);
+
+    const r3 = try parseAndEvaluate("(() => { { let i = 7, j = 8; return i + j; } })()", &env_);
+    try std.testing.expectEqual(@as(i64, 15), r3.integer);
+}
+
+test "regex patterns work in replace and split" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const rep = try parseAndEvaluate("\"a1b2\".replace(/[0-9]/g, \"x\")", &env_);
+    try std.testing.expectEqualStrings("axbx", rep.string);
+
+    const cap = try parseAndEvaluate("\"2024-11\".replace(/(\\d+)/, \"<$1>\")", &env_);
+    try std.testing.expectEqualStrings("<2024>-11", cap.string);
+
+    const sp = try parseAndEvaluate("\"a,b\".split(/,/)", &env_);
+    try std.testing.expect(sp == .array);
+    try std.testing.expectEqual(@as(usize, 2), sp.array.elements.items.len);
+    try std.testing.expectEqualStrings("a", sp.array.elements.items[0].string);
+    try std.testing.expectEqualStrings("b", sp.array.elements.items[1].string);
+}
+
+test "throws inside iteration callbacks reach the outer catch" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { try { [1].forEach(function () { throw new Error(\"cb\"); }); return \"no\"; } catch (e) { return e.message; } })()", &env_);
+    try std.testing.expectEqualStrings("cb", r.string);
+}
+
+test "JSON.stringify orders integer keys first" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("JSON.stringify({b: 1, 0: 2})", &env_);
+    try std.testing.expectEqualStrings("{\"0\":2,\"b\":1}", r.string);
 }

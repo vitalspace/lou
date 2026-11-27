@@ -3,6 +3,7 @@ const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
+const callbackThrow = @import("../callbacks.zig");
 
 fn getFuncNode(arg: Types.Value, env: *Types.Environment) ?*Ast.Node {
     return switch (arg) {
@@ -113,6 +114,7 @@ pub fn ToSorted(args: []Types.Value, env: *Types.Environment) Types.BuiltinResul
                     const cmp_result = evaluate(body, ce) catch {
                         return .{ .value = .{ .void = {} } };
                     };
+                    if (callbackThrow.propagateThrow(ce, env)) return .{ .value = .{ .void = {} } };
 
                     cmp = switch (cmp_result) {
                         .integer => |iv| iv,

@@ -145,7 +145,7 @@ pub const Parser = struct {
                         try stmts.append(this.allocator, n);
                     }
                     const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator), .is_scope = false } };
                     break :stmt node;
                 },
                 .Var => {
@@ -165,7 +165,7 @@ pub const Parser = struct {
                         try stmts.append(this.allocator, n);
                     }
                     const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator), .is_scope = false } };
                     break :stmt node;
                 },
                 .Let => {
@@ -185,7 +185,7 @@ pub const Parser = struct {
                         try stmts.append(this.allocator, n);
                     }
                     const node = try this.allocator.create(ast.Node);
-                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator) } };
+                    node.* = .{ .BlockStatement = .{ .statements = try stmts.toOwnedSlice(this.allocator), .is_scope = false } };
                     break :stmt node;
                 },
                 .For => break :stmt try this.parseForLoop(),

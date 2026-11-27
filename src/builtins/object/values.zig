@@ -29,12 +29,13 @@ pub fn Values(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
         return .{ .value = .{ .void = {} } };
     };
 
-    var it = obj.js_object.properties.iterator();
-    while (it.next()) |entry| {
-        // Skip internal @@ properties
-        if (entry.key_ptr.*.len > 2 and std.mem.eql(u8, entry.key_ptr.*[0..2], "@@")) continue;
-
-        result.elements.append(env.allocator, entry.value_ptr.*) catch {};
+    const ordered = obj.js_object.getForInKeys(env.allocator, &env.arrays) catch {
+        return .{ .value = .{ .void = {} } };
+    };
+    for (ordered.elements.items) |key_val| {
+        const key = key_val.string;
+        const v = obj.js_object.properties.get(key) orelse continue;
+        result.elements.append(env.allocator, v) catch {};
     }
 
     return .{ .value = .{ .array = result } };

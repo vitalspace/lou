@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const callbackThrow = @import("../callbacks.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const getSet = @import("set_utils.zig").getSet;
 const getValues = @import("set_utils.zig").getValues;
@@ -11,9 +12,12 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
     const set_val = getSet(args) orelse return .{ .value = .{ .void = {} } };
     const values = getValues(set_val) orelse return .{ .value = .{ .void = {} } };
     const callback = args[1];
-    if (callback != .function) return .{ .value = .{ .void = {} } };
-
-    const func_node: *Ast.Node = @ptrCast(@alignCast(callback.function));
+    const func_node: *Ast.Node = switch (callback) {
+        .function => |f| @as(*Ast.Node, @ptrCast(@alignCast(f))),
+        .closure => |cl| @as(*Ast.Node, @ptrCast(@alignCast(cl.func_node))),
+        .string => |name| env.getFunction(name) orelse return .{ .value = .{ .void = {} } },
+        else => return .{ .value = .{ .void = {} } },
+    };
     const func_params: []const []const u8 = switch (func_node.*) {
         .FunctionDeclaration => |f| f.parameters,
         .ArrowFunction => |f| f.parameters,
@@ -25,7 +29,7 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         else => return .{ .value = .{ .void = {} } },
     };
 
-    var func_env = Environment.init(env.allocator, env) catch {
+    var func_env = Environment.initCallable(env.allocator, env, callback) catch {
         return .{ .value = .{ .void = {} } };
     };
     defer func_env.deinit();
@@ -37,6 +41,7 @@ pub fn SetForEach(args: []Types.Value, env: *Types.Environment) Types.BuiltinRes
         if (func_params.len > 0) func_env.setVar(func_params[0], val) catch {};
         if (func_params.len > 1) func_env.setVar(func_params[1], val) catch {};
         _ = evaluate(func_body, &func_env) catch {};
+        if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
         i += 1;
     }
 

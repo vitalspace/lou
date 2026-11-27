@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const callbackThrow = @import("../callbacks.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
 
@@ -52,6 +53,7 @@ pub fn FindIndex(args: []Types.Value, env: *Types.Environment) Types.BuiltinResu
         const result = evaluate(func_body, &func_env) catch {
             return .{ .value = .{ .integer = -1 } };
         };
+        if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
 
         if (truthy(result)) return .{ .value = .{ .integer = @intCast(i) } };
     }

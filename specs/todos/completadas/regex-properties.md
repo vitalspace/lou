@@ -41,6 +41,5 @@ La infraestructura de `RegExpValue` ya existía (constructor, motor, `test`,
 
 ## Limitaciones conocidas
 
-- `String.prototype.replace/split` con un regex literal como primer
-  argumento todavía no usa el motor: tratan el valor como string. Es un gap
-  separado.
+- `String.prototype.replace/split` con regex ya están soportados; ver
+  `string-regex-methods.md`.

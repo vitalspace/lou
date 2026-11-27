@@ -2,19 +2,7 @@
 
 ## status
 
-**pendiente (coerción resuelta)** — reverificado 2026-11-26 (compat: 57 PASS / 27 FAIL / 1 SKIP)
-
-La parte de coerción ya coincide: `undefined < 3` es `false`, así que `for (var i; i < 3; i++)` no itera y las líneas 1–3 de salida son idénticas a Node.
-
-Queda el caso 5 (línea de salida 4):
-
-```text
-Lou : const-no-init: false
-Node: const-no-init: true
-```
-
-`eval("for (const c;;) {}")` no lanza nada: el parser acepta `const` sin inicializador. Aunque lo rechazara, `e instanceof SyntaxError` seguiría fallando porque `SyntaxError` es un object y no un constructor (ver `error-objects.md`). Bloqueado por los objetos Error.
-
+**completada** — `for (var i; ...)` sin inicializador funciona y el caso `for (const c;;)` lanza `SyntaxError`; el fixture `tests/compat/for-var-no-init.lou` PASS (baseline 90 PASS / 0 FAIL / 0 SKIP, 2026-11-27). El resto del documento queda como contexto histórico.
 ## Problema
 
 El parser crashea con `ExpectedAssign` cuando un `for` loop tiene una declaración `var`/`let`/`const` sin inicializador. ECMAScript permite `for (var i; i < 10; i++)`.

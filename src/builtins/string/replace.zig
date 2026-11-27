@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Environment = @import("../../evaluator.zig").Environment;
+const regexpMod = @import("../regex/regexp.zig");
 
 pub fn Replace(args: []const Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len < 1) return .{ .value = .{ .string = "" } };
@@ -8,6 +9,13 @@ pub fn Replace(args: []const Types.Value, env: *Types.Environment) Types.Builtin
         .string => |ss| ss,
         else => return .{ .value = .{ .string = "" } },
     };
+
+    // Regex patterns are delegated to the RegExp engine (`@@replace`).
+    if (args.len >= 2 and args[1] == .regexp) {
+        const repl: Types.Value = if (args.len >= 3) args[2] else .{ .string = "undefined" };
+        var re_args = [_]Types.Value{ args[1], args[0], repl };
+        return regexpMod.RegExpReplace(re_args[0..], env);
+    }
 
     if (args.len < 2) {
         const result = env.allocator.dupe(u8, s) catch {
@@ -31,7 +39,7 @@ pub fn Replace(args: []const Types.Value, env: *Types.Environment) Types.Builtin
     const replacement = if (args.len >= 3) switch (args[2]) {
         .string => |r| r,
         else => "",
-    } else "";
+    } else "undefined";
 
     if (pattern.len == 0) {
         const result = env.allocator.dupe(u8, s) catch {
@@ -135,11 +143,11 @@ test "replace non-string this returns empty" {
     try testing.expectEqualStrings("", result.value.string);
 }
 
-test "replace without replacement treats replacement as empty" {
+test "replace without replacement uses the undefined string" {
     var env = try Environment.init(testing.allocator, null);
     defer env.deinit();
 
     var args = [_]Types.Value{ .{ .string = "hello" }, .{ .string = "ell" } };
     const result = Replace(&args, &env);
-    try testing.expectEqualStrings("ho", result.value.string);
+    try testing.expectEqualStrings("hundefinedo", result.value.string);
 }

@@ -2,10 +2,7 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
-
-El test `tests/compat/error-objects.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
-
+**completada** — los constructores `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `EvalError` y `URIError` funcionan, y `throw`/`catch` transportan el objeto. `tests/compat/error-objects.lou` PASS (baseline 90 PASS / 0 FAIL / 0 SKIP, 2026-11-27). El resto del documento queda como contexto histórico.
 ## Problema
 Los objetos `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `EvalError`, `URIError` no están implementados como constructores.
 ## Contexto

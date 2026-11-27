@@ -186,9 +186,9 @@ zig build test
 
 Current status:
 
-- **1,073** Zig tests pass.
-- **86** JavaScript compatibility fixtures.
-- **85** produce byte-identical output to Node and **1** is skipped.
+- **1,078** Zig tests pass.
+- **90** JavaScript compatibility fixtures.
+- **90** produce byte-identical output to Node.
 - `console-output` and `console-inspection` match Node exactly, including ANSI output on a TTY.
 
 The compatibility runner strips ANSI before diffing, so color behavior is also

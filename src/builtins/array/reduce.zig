@@ -1,6 +1,7 @@
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
+const callbackThrow = @import("../callbacks.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
 
@@ -77,6 +78,7 @@ pub fn Reduce(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult 
         accumulator = evaluate(func_body, &func_env) catch {
             return .{ .value = .{ .void = {} } };
         };
+        if (callbackThrow.propagateThrow(&func_env, env)) return .{ .value = .{ .void = {} } };
     }
 
     return .{ .value = accumulator };
