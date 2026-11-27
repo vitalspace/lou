@@ -4804,7 +4804,6 @@ pub fn evalFn(args: []ast.Value, env: *builtinsTypes.Environment) builtinsTypes.
 
     var lexer = Lexer.init(source);
     var parser = Parser.init(&lexer, env.allocator) catch return .{ .value = .{ .void = {} } };
-    errdefer parser.deinit();
 
     const program = parser.parseProgram() catch {
         parser.deinit();
@@ -4812,20 +4811,62 @@ pub fn evalFn(args: []ast.Value, env: *builtinsTypes.Environment) builtinsTypes.
         return .{ .void = {} };
     };
 
-    // Note: AST nodes are owned by the parser's arena and will be freed
-    // when parser.deinit() is called. Do NOT append to synthetic_asts.
+    // Functions created by eval outlive the call, so the parser arena (and
+    // therefore every AST node) must stay alive until the program ends.
+    // eval() writes into a throwaway lexical scope: `var` and function
+    // declarations hoist to the caller, while `let`/`const` stay local.
+    const caller = @as(*Environment, @ptrCast(env));
+    const root_env = caller.root();
+    root_env.module_arenas.append(root_env.allocator, parser.arena) catch {};
+
+    var eval_env = Environment.initBlock(caller.allocator, caller) catch {
+        return .{ .value = .{ .void = {} } };
+    };
+    defer eval_env.deinit();
 
     var result: ast.Value = .{ .void = {} };
     @setEvalBranchQuota(2000);
     for (program) |stmt| {
-        result = evaluate(stmt, @as(*Environment, @ptrCast(env))) catch {
-            parser.deinit();
+        result = evaluate(stmt, &eval_env) catch {
+            if (eval_env.throw_hit) {
+                caller.throw_hit = true;
+                caller.throw_value = eval_env.throw_value;
+                eval_env.throw_hit = false;
+            }
             return .{ .value = .{ .void = {} } };
         };
     }
+    if (eval_env.throw_hit) {
+        caller.throw_hit = true;
+        caller.throw_value = eval_env.throw_value;
+        eval_env.throw_hit = false;
+    }
 
-    parser.deinit();
     return .{ .value = result };
+}
+
+test "evalFn scopes let but keeps var in caller" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    var args = [_]ast.Value{.{ .string = "var a = 1; let b = 2; b" }};
+    const result = evalFn(&args, &env_);
+    try std.testing.expect(result == .value);
+    try std.testing.expectEqual(@as(i64, 2), result.value.integer);
+    try std.testing.expect(env_.get("a") != null);
+    try std.testing.expect(env_.get("b") == null);
+}
+
+test "evalFn propagates thrown errors" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    var args = [_]ast.Value{.{ .string = "throw new Error(\"boom\")" }};
+    _ = evalFn(&args, &env_);
+    try std.testing.expect(env_.throw_hit);
+    try std.testing.expect(env_.throw_value == .js_object);
 }
 
 // --- Environment tests ---
