@@ -1633,6 +1633,7 @@ pub const VM = struct {
                 self.push(.{ .void = {} });
                 return;
             };
+            self.env.generators.append(self.env.allocator, gen_obj) catch {};
             self.push(.{ .generator = gen_obj });
             return;
         }
