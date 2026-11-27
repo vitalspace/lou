@@ -2,7 +2,7 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**completada** — implementada (compat: 78 PASS / 7 FAIL / 1 SKIP)
 
 El test `tests/compat/default-parameters.lou` sigue FAIL. La primera divergencia exacta está en `living-tracker.md`, sección 2.
 

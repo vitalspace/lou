@@ -1621,9 +1621,9 @@ pub const VM = struct {
             return;
         }
         // Shared: create function environment with parameters bound
-        const params, const body, const fn_name, const rest_param = switch (funcNode.*) {
-            .FunctionDeclaration => |f| .{ f.parameters, f.body, f.name, f.rest_param },
-            .ArrowFunction => |f| .{ f.parameters, f.body, "", f.rest_param },
+        const params, const body, const fn_name, const rest_param, const param_defaults = switch (funcNode.*) {
+            .FunctionDeclaration => |f| .{ f.parameters, f.body, f.name, f.rest_param, f.param_defaults },
+            .ArrowFunction => |f| .{ f.parameters, f.body, "", f.rest_param, f.param_defaults },
             else => return self.push(.{ .void = {} }),
         };
 
@@ -1637,7 +1637,17 @@ pub const VM = struct {
                 var func_env = try Environment.init(self.env.allocator, self.env);
                 defer func_env.deinit();
                 for (params, 0..) |p, j| {
-                    if (j < args.items.len) try func_env.setVar(p, args.items[j]) else try func_env.setVar(p, .{ .void = {} });
+                    if (j < args.items.len and args.items[j] != .void) {
+                        try func_env.setVar(p, args.items[j]);
+                    } else if (j < param_defaults.len) {
+                        if (param_defaults[j]) |d| {
+                            try func_env.setVar(p, try evaluate(d, &func_env));
+                        } else {
+                            try func_env.setVar(p, .{ .void = {} });
+                        }
+                    } else {
+                        try func_env.setVar(p, .{ .void = {} });
+                    }
                 }
                 try bindRestParam(&func_env, rest_param, params, args);
                 var sub_vm = VM.init(&func_env);
@@ -1666,7 +1676,17 @@ pub const VM = struct {
         var func_env = try Environment.init(self.env.allocator, self.env);
         defer func_env.deinit();
         for (params, 0..) |p, j| {
-            if (j < args.items.len) try func_env.setVar(p, args.items[j]) else try func_env.setVar(p, .{ .void = {} });
+            if (j < args.items.len and args.items[j] != .void) {
+                try func_env.setVar(p, args.items[j]);
+            } else if (j < param_defaults.len) {
+                if (param_defaults[j]) |d| {
+                    try func_env.setVar(p, try evaluate(d, &func_env));
+                } else {
+                    try func_env.setVar(p, .{ .void = {} });
+                }
+            } else {
+                try func_env.setVar(p, .{ .void = {} });
+            }
         }
         try bindRestParam(&func_env, rest_param, params, args);
         const r = try evaluate(body, &func_env);

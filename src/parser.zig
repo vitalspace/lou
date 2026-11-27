@@ -2084,9 +2084,12 @@ pub const Parser = struct {
         names: [][]const u8,
         rest_param: ?[]const u8,
         destructured_preamble: ?*ast.Node,
+        defaults: []?*ast.Node,
     } {
         var parameters = try std.ArrayList([]const u8).initCapacity(this.allocator, 4);
         defer parameters.deinit(this.allocator);
+        var defaults = try std.ArrayList(?*ast.Node).initCapacity(this.allocator, 4);
+        defer defaults.deinit(this.allocator);
         var rest_param: ?[]const u8 = null;
         var preamble_stmts = std.ArrayList(*ast.Node).initCapacity(this.allocator, 4) catch {
             return error.OutOfMemory;
@@ -2145,11 +2148,22 @@ pub const Parser = struct {
                         return err;
                     };
                 }
+                try defaults.append(this.allocator, null);
             }
             // Plain identifier parameter
             else if (this.current_token.type == .Identifier or this.current_token.type == .Fn) {
                 try parameters.append(this.allocator, this.current_token.literal);
                 this.nextToken(); // consume parameter name
+                if (this.current_token.type == .Assign) {
+                    this.nextToken(); // consume '='
+                    const default_expr = this.parseExpression() catch |err| {
+                        preamble_stmts.deinit(this.allocator);
+                        return err;
+                    };
+                    try defaults.append(this.allocator, default_expr);
+                } else {
+                    try defaults.append(this.allocator, null);
+                }
             } else {
                 preamble_stmts.deinit(this.allocator);
                 return error.ExpectedIdentifier;
@@ -2177,6 +2191,7 @@ pub const Parser = struct {
             .names = try parameters.toOwnedSlice(this.allocator),
             .rest_param = rest_param,
             .destructured_preamble = destructured_preamble,
+            .defaults = try defaults.toOwnedSlice(this.allocator),
         };
     }
 
@@ -2237,6 +2252,7 @@ pub const Parser = struct {
                 .parameters = params.names,
                 .body = final_body,
                 .rest_param = params.rest_param,
+                .param_defaults = params.defaults,
             } };
             return node;
         }
@@ -2247,6 +2263,7 @@ pub const Parser = struct {
             .parameters = params.names,
             .body = final_body,
             .rest_param = params.rest_param,
+            .param_defaults = params.defaults,
         } };
         return node;
     }
@@ -2293,6 +2310,7 @@ pub const Parser = struct {
             .parameters = params.names,
             .body = final_body,
             .rest_param = params.rest_param,
+            .param_defaults = params.defaults,
         } };
         return node;
     }

@@ -4079,6 +4079,19 @@ fn parseAndEvaluateProgram(source: []const u8, env_: *Environment) !ast.Value {
     return result;
 }
 
+pub fn resolveArgumentIn(
+    idx: usize,
+    args: []ast.Value,
+    param_defaults: []?*ast.Node,
+    func_env: *Environment,
+) anyerror!ast.Value {
+    if (idx < args.len and args[idx] != .void) return args[idx];
+    if (idx < param_defaults.len) {
+        if (param_defaults[idx]) |expr| return try evaluate(expr, func_env);
+    }
+    return .{ .void = {} };
+}
+
 fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
         if (func_node.* == .GeneratorDeclaration) {
             const gen_decl = func_node.GeneratorDeclaration;
@@ -4086,11 +4099,11 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             errdefer gen_obj.deinit();
             var gen_env = try Environment.init(env.allocator, env);
             errdefer gen_env.deinit();
-            for (gen_decl.parameters, 0..) |param, idx| {
-                try gen_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
-            }
             if (this_val) |tv| {
                 try gen_env.set("this", tv);
+            }
+            for (gen_decl.parameters, 0..) |param, idx| {
+                try gen_env.set(param, try resolveArgumentIn(idx, args, gen_decl.param_defaults, &gen_env));
             }
         gen_obj.gen_env = @ptrCast(try env.allocator.create(Environment));
         const stored_env: *Environment = @alignCast(@ptrCast(gen_obj.gen_env.?));
@@ -4116,11 +4129,11 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
                 func_env.deinit();
                 env.allocator.destroy(func_env);
             };
-            for (func.parameters, 0..) |param, idx| {
-                try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
-            }
             if (this_val) |tv| {
                 try func_env.set("this", tv);
+            }
+            for (func.parameters, 0..) |param, idx| {
+                try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
             return try evaluate(func.body, func_env);
         }
@@ -4135,7 +4148,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             const lexical_this = env.get("this") orelse (ast.Value){ .void = {} };
             try func_env.set("this", lexical_this);
             for (func.parameters, 0..) |param, idx| {
-                try func_env.set(param, if (idx < args.len) args[idx] else .{ .void = {} });
+                try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
             return try evaluate(func.body, func_env);
         }
@@ -5437,4 +5450,20 @@ test "object literal getters and setters" {
     , &env_);
     try std.testing.expect(result == .integer);
     try std.testing.expectEqual(@as(i64, 10), result.integer);
+}
+
+test "default parameter values" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    // Missing argument falls back to the default expression.
+    const r1 = try parseAndEvaluate("(function add(a, b = 5) { return a + b; })(3)", &env_);
+    try std.testing.expectEqual(@as(i64, 8), r1.integer);
+
+    // Explicit undefined still uses the default; earlier params are visible.
+    const r2 = try parseAndEvaluate(
+        \\(function f(x = 1, y = x * 2) { return y; })(undefined)
+    , &env_);
+    try std.testing.expectEqual(@as(i64, 2), r2.integer);
 }

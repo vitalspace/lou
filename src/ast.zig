@@ -190,6 +190,7 @@ pub const Node = union(NodeType) {
         body: *Node,
         closure_env: ?*anyopaque = null,
         rest_param: ?[]const u8 = null,
+        param_defaults: []?*Node = &[_]?*Node{},
     },
     FunctionCall: struct {
         name: []const u8,
@@ -200,6 +201,7 @@ pub const Node = union(NodeType) {
         body: *Node,
         closure_env: ?*anyopaque = null,
         rest_param: ?[]const u8 = null,
+        param_defaults: []?*Node = &[_]?*Node{},
     },
     MemberAccess: struct {
         object: *Node, // Nodo del objeto (ej: Identifier "console")
@@ -227,6 +229,7 @@ GeneratorDeclaration: struct {
     body: *Node,
     closure_env: ?*anyopaque = null,
     rest_param: ?[]const u8 = null,
+    param_defaults: []?*Node = &[_]?*Node{},
 },
     YieldExpression: struct {
         value: ?*Node, // null for bare yield

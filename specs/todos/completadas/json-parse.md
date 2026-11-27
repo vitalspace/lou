@@ -2,7 +2,7 @@
 
 ## status
 
-**pendiente** — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SKIP)
+**completada** — implementada (compat: 78 PASS / 7 FAIL / 1 SKIP)
 
 `tests/compat/json-parse.lou` sigue FAIL. Primera divergencia (línea 17), Lou vs Node:
 
