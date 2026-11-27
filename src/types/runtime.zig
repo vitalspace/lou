@@ -53,6 +53,13 @@ pub const ObjectValue = struct {
      /// or the chain terminal at Object.prototype).
      prototype: ?*ObjectValue = null,
 
+     /// Object integrity state used by Object.freeze/seal/preventExtensions.
+     /// Lou does not yet block writes to frozen objects; the flags power the
+     /// introspection helpers (isFrozen/isSealed/isExtensible).
+     extensible: bool = true,
+     sealed: bool = false,
+     frozen: bool = false,
+
 
      pub const StringHashMap = struct {
          map: std.StringArrayHashMapUnmanaged(Value),

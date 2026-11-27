@@ -1,8 +1,8 @@
 # Object Static Methods (completos)
 
 ## status
-pendiente
 
+**completada** — `Object.is`, `fromEntries`, `getOwnPropertyNames`, `getOwnPropertyDescriptor(s)`, `getOwnPropertySymbols`, `defineProperty`, `freeze`, `seal`, `preventExtensions`, `isExtensible`, `isSealed` e `isFrozen` en `src/builtins/object/static.zig`, con flags de integridad en `ObjectValue`. `tests/compat/object-static-methods.lou` PASS (baseline 92 PASS / 0 FAIL / 0 SKIP, 2026-11-27). El resto del documento queda como contexto histórico.
 ## Problema
 Faltan varios métodos estáticos de `Object`: `fromEntries`, `is`, `groupBy`, `getOwnPropertyDescriptors`, `getOwnPropertySymbols`, `preventExtensions`, `seal`, `freeze`, `isExtensible`, `isSealed`, `isFrozen`.
 ## Contexto
@@ -167,49 +167,3 @@ console.log(Object.getOwnPropertySymbols(obj2).length); // 1
 ### Comparar salida raw (sin interpretar ANSI)
 ./zig-out/bin/lou run js/tests/object-methods.js 2>&1 | od -c
 node js/tests/object-methods.js 2>&1 | od -c
-
-### pendiente
-- Implementar todos los Object static methods faltantes
-
-## Edge cases encontrados durante implementación
-
-Listar aquí los bugs, comportamientos inesperados o requisitos descubiertos
-mientras se implementaba este spec. Cada edge case debe ser promovido a su
-propio spec (usando esta misma plantilla) si requiere cambios de diseño
-propios, o documentado inline si es un fix puntual.
-
-Ejemplos de edge cases típicos:
-- Comportamiento cuando se mezcla el tipo con primitivos incompatibles
-  (TypeError vs coerción silenciosa).
-- Formato de impresión / `toString` — sufijo, base, mayúsculas.
-- Comparación loose vs strict.
-- Conversión a otros tipos (string concat, Number, BigInt).
-- División por cero, exponente negativo, overflow.
-- Capturabilidad del error por `try/catch` JS (no abortar el proceso).
-
-Plantilla para promover un edge case a spec:
-1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
-2. Enlazar desde este spec principal con un enlace relativo.
-3. Verificar que el test correspondiente cubre el caso.
-
-
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `date-object.lou` (FUZZY — object)
-- Test status: `FAIL`
-
-- Diff excerpt:
-
-```
-1,19c1,21
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-```
-
-- Disposition: stays in pendientes/ — fuzzy-matched test currently FAILS, see diff excerpt below.
-

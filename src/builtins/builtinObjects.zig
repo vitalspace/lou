@@ -19,6 +19,8 @@ const EVAL_ERROR_OBJECT = @import("./error.zig").EVAL_ERROR_OBJECT;
 const URI_ERROR_OBJECT = @import("./error.zig").URI_ERROR_OBJECT;
 const FINALIZATION_REGISTRY_OBJECT = @import("./finalization-registry.zig").FINALIZATION_REGISTRY_OBJECT;
 const WEAKREF_OBJECT = @import("./weakref.zig").WEAKREF_OBJECT;
+const WEAKMAP_OBJECT = @import("./weak/weakmap.zig").WEAKMAP_OBJECT;
+const WEAKSET_OBJECT = @import("./weak/weakset.zig").WEAKSET_OBJECT;
 const PROMISE_OBJECT = @import("./promise/promise.zig").PROMISE_OBJECT;
 const JSON_OBJECT = @import("./json/json.zig").JSON_OBJECT;
 const intl = @import("./intl/intl.zig");
@@ -46,6 +48,8 @@ pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &URI_ERROR_OBJECT,
     &FINALIZATION_REGISTRY_OBJECT,
     &WEAKREF_OBJECT,
+    &WEAKMAP_OBJECT,
+    &WEAKSET_OBJECT,
     &PROMISE_OBJECT,
     &JSON_OBJECT,
     &intl.INTL_OBJECT,

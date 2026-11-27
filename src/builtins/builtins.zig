@@ -20,6 +20,8 @@ const EvalErrorConstructor = @import("./error.zig").EvalErrorConstructor;
 const URIErrorConstructor = @import("./error.zig").URIErrorConstructor;
 const FinalizationRegistryConstructor = @import("./finalization-registry.zig").FinalizationRegistryConstructor;
 const WeakRefConstructor = @import("./weakref.zig").WeakRefConstructor;
+const WeakMapConstructor = @import("./weak/weakmap.zig").WeakMapConstructor;
+const WeakSetConstructor = @import("./weak/weakset.zig").WeakSetConstructor;
 const NumberConstructorFn = @import("./number/number.zig").NumberConstructor;
 const StringConstructorFn = @import("./string/string.zig").StringConstructor;
 const isFiniteFn = @import("./isfinite-isnan.zig").isFinite;
@@ -86,6 +88,8 @@ const BUILTIN_FUNCTIONS = [_]struct { name: []const u8, func: Types.BuiltinFn }{
     .{ .name = "URIError", .func = URIErrorConstructor },
     .{ .name = "FinalizationRegistry", .func = FinalizationRegistryConstructor },
     .{ .name = "WeakRef", .func = WeakRefConstructor },
+    .{ .name = "WeakMap", .func = WeakMapConstructor },
+    .{ .name = "WeakSet", .func = WeakSetConstructor },
     .{ .name = "Number", .func = NumberConstructorFn },
     .{ .name = "String", .func = StringConstructorFn },
     .{ .name = "isFinite", .func = isFiniteFn },

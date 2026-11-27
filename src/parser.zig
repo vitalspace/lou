@@ -73,8 +73,10 @@ pub const Parser = struct {
         return switch (tok_type) {
             .Identifier => true,
             .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn,
-            .Return, .If, .Else, .For, .While, .In, .Break, .Continue,
-            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf => true,
+            .Return, .If, .Else, .For, .While, .Do, .In, .Of, .Break, .Continue,
+            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf,
+            .Yield, .New, .Delete, .InstanceOf, .Void, .Try, .Catch, .Finally,
+            .Throw, .Using, .Await => true,
             else => false,
         };
     }

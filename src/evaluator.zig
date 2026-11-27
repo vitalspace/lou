@@ -5868,3 +5868,12 @@ test "JSON.stringify orders integer keys first" {
     const r = try parseAndEvaluate("JSON.stringify({b: 1, 0: 2})", &env_);
     try std.testing.expectEqualStrings("{\"0\":2,\"b\":1}", r.string);
 }
+
+test "reserved words are valid property names after a dot" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const o = { x: 1 }; o.delete = 2; o.new = 3; return o.delete + o.new; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 5), r.integer);
+}
