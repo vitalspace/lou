@@ -97,6 +97,30 @@ fn valueToString(env: *Types.Environment, v: Types.Value) Types.Value {
     }
 }
 
+
+test "String constructor coerces primitives" {
+    var env = try Types.Environment.init(testing.allocator, null);
+    defer env.deinit();
+
+    var int_args = [_]Types.Value{.{ .integer = 42 }};
+    const int_res = StringConstructor(&int_args, &env);
+    try testing.expectEqualStrings("42", int_res.value.string);
+
+    var null_args = [_]Types.Value{.{ .null = {} }};
+    const null_res = StringConstructor(&null_args, &env);
+    try testing.expectEqualStrings("null", null_res.value.string);
+}
+
+test "String constructor renders symbols without throwing" {
+    var env = try Types.Environment.init(testing.allocator, null);
+    defer env.deinit();
+
+    const sym = try Types.SymbolValue.init(testing.allocator, 1, "x");
+    defer sym.deinit();
+    var args = [_]Types.Value{.{ .symbol = sym }};
+    const res = StringConstructor(&args, &env);
+    try testing.expectEqualStrings("Symbol(x)", res.value.string);
+}
 pub const STRING_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "toUpperCase", .func = ToUpper },
     .{ .name = "toLocaleUpperCase", .func = ToLocaleUpper },
@@ -134,6 +158,8 @@ pub const STRING_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "split", .func = Split },
     .{ .name = "startsWith", .func = StartsWith },
 };
+
+const testing = std.testing;
 
 pub const STRING_OBJECT = Types.BuiltinObjectImpl{
     .name = "String",

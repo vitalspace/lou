@@ -1,8 +1,8 @@
 # `String(value)` constructor — coerción explícita a string
 
 ## status
-pendiente
 
+**completada** — el constructor `String(value)` ya estaba registrado en `BUILTIN_FUNCTIONS` y delegaba en `valueToString`; se verificó con primitivos, BigInt (sin sufijo `n`), `NaN`/`Infinity`, `null`, `undefined`, sin argumentos y `Symbol` (`String(Symbol("x"))` → `Symbol(x)`). Se añadió `tests/compat/string-constructor.lou` PASS, dos unit tests y se corrigió el spec (la afirmación de que `String(símbolo)` lanza `TypeError` era incorrecta: solo la coerción implícita lanza). Baseline 94 PASS / 0 FAIL / 0 SKIP, 2026-11-27.
 ## Problema
 `String(value)` no existe como callable builtin en Lou. Solo está
 registrado como `STRING_OBJECT` para despacho de métodos (`"foo".toUpperCase()`).
@@ -265,43 +265,3 @@ diff <(./zig-out/bin/lou run tests/compat/string-constructor.js 2>&1) \
 ./zig-out/bin/lou run tests/compat/<nombre>.lou 2>&1 | od -c
 node tests/compat/<nombre>.js 2>&1 | od -c
 ```
-
-### pendiente
-- [ ] Implementar `StringConstructor` en `src/builtins/string/string.zig`
-- [ ] Decidir estrategia de acoplamiento (A: pub valToStr / B: módulo
-      neutro / C: duplicar lógica) — recomendada **B**
-- [ ] Si B: consolidar copia inline de `evaluator.zig:2138-2152`
-- [ ] Registrar `String` en `BUILTIN_FUNCTIONS` (`src/builtins/builtins.zig`)
-- [ ] Tests unitarios en `string.zig`
-- [ ] `tests/compat/string-constructor.{js,lou}` — compat test
-- [ ] Documentar comportamiento en `README.md` si se listan builtins
-
-## Edge cases encontrados durante implementación
-
-Listar aquí los bugs, comportamientos inesperados o requisitos descubiertos
-mientras se implementaba este spec. Cada edge case debe ser promovido a su
-propio spec (usando esta misma plantilla) si requiere cambios de diseño
-propios, o documentado inline si es un fix puntual.
-
-Ejemplos de edge cases típicos:
-- Comportamiento cuando se mezcla el tipo con primitivos incompatibles
-  (TypeError vs coerción silenciosa).
-- Formato de impresión / `toString` — sufijo, base, mayúsculas.
-- Comparación loose vs strict.
-- Conversión a otros tipos (string concat, Number, BigInt).
-- División por cero, exponente negativo, overflow.
-- Capturabilidad del error por `try/catch` JS (no abortar el proceso).
-
-Plantilla para promover un edge case a spec:
-1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
-2. Enlazar desde este spec principal con un enlace relativo.
-3. Verificar que el test correspondiente cubre el caso.
-
-
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `bigint-prototype.lou` (FUZZY — bigint)
-- Test status: `PASS`
-
-- Disposition: test PASSES — but stays in pendientes/ because match is FUZZY on tokens; verify spec scope matches the test (manual confirmation required before move).
-
