@@ -1,0 +1,17 @@
+const re1 = /[\p{ASCII}&&\p{Letter}]/v;
+console.log(re1.test("a"), re1.test("1"), re1.test("α"));
+const re2 = /[\p{Letter}--\p{ASCII}]/v;
+console.log(re2.test("a"), re2.test("α"));
+const re3 = /[a\p{Nd}]/v;
+console.log(re3.test("a"), re3.test("7"), re3.test("z"));
+const re4 = /[[\p{ASCII}&&\p{Letter}]\p{Nd}]/v;
+console.log(re4.test("a"), re4.test("1"), re4.test(" "));
+const re5 = /[\q{a|b}]/v;
+console.log(re5.test("a"), re5.test("b"), re5.test("c"));
+const re6 = /[^a]/v;
+console.log(re6.test("b"), re6.test("a"));
+const re7 = /[\d&&[0-5]]/v;
+console.log(re7.test("3"), re7.test("8"));
+const re8 = /[[a-z]&&[^aeiou]]/v;
+console.log(re8.test("b"), re8.test("a"));
+console.log(/x/v.unicode, /x/v.unicodeSets, /x/v.flags);

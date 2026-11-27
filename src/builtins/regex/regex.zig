@@ -14,8 +14,9 @@ pub const Regex = struct {
     vm: vm.Vm,
     named_groups: ?[]ast_mod.NamedGroupEntry,
 
-    pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, _: vm.Flags) !Regex {
+    pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: vm.Flags) !Regex {
         var parser = Parser.init(allocator, pattern);
+        parser.unicode_sets = flags.unicode_sets;
         var ast = Ast.init(allocator);
         defer ast.deinit();
 

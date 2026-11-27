@@ -570,6 +570,7 @@ pub const Flags = struct {
     multiline: bool = false,
     dot_all: bool = false,
     unicode: bool = false,
+    unicode_sets: bool = false,
     sticky: bool = false,
     has_indices: bool = false,
 };

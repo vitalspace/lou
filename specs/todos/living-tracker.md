@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 15:51:52 |
-| Commit | `b980c56` |
+| Snapshot | 2026-11-27 16:11:18 |
+| Commit | `3972667` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 95 |
-| PASS | 95 |
+| Fixtures | 96 |
+| PASS | 96 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 95 |
-| **PASS** | 95 |
+| Test files total | 96 |
+| **PASS** | 96 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 16 |
+| Specs pendientes | 15 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -40,7 +40,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `object-method-call-edge-zero-arg-arrow.md` | pendiente | — | sin test |
 | `promise-withresolvers.md` | pendiente | `promise-withresolvers` | sin test |
 | `proxy.md` | pendiente | `proxy` | sin test |
-| `regex-v-flag.md` | pendiente | — | sin test |
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `string-unicode-case.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |

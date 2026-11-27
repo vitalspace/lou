@@ -21,6 +21,7 @@ fn getOrCompile(regexp: *Types.RegExpValue) !*RegexEngine.Regex {
         .multiline = regexp.multiline,
         .dot_all = regexp.dot_all,
         .unicode = regexp.unicode,
+        .unicode_sets = regexp.unicode_sets,
         .sticky = regexp.sticky,
         .has_indices = regexp.has_indices,
     });
@@ -68,7 +69,8 @@ fn vmFlagsFrom(f: RegexEngine.Flags) RegexEngine.VmFlags {
         .ignore_case = f.ignore_case,
         .multiline = f.multiline,
         .dot_all = f.dot_all,
-        .unicode = f.unicode,
+        .unicode = f.unicode or f.unicode_sets,
+        .unicode_sets = f.unicode_sets,
         .sticky = f.sticky,
         .has_indices = f.has_indices,
     };
@@ -85,6 +87,7 @@ pub fn findMatch(input: []const u8, start: usize, regexp: *Types.RegExpValue) ?s
         .multiline = regexp.multiline,
         .dot_all = regexp.dot_all,
         .unicode = regexp.unicode,
+        .unicode_sets = regexp.unicode_sets,
         .sticky = regexp.sticky,
     };
     const vm_flags = vmFlagsFrom(flags);
@@ -108,6 +111,7 @@ pub fn execMatchAt(input: []const u8, start: usize, regexp: *Types.RegExpValue) 
         .multiline = regexp.multiline,
         .dot_all = regexp.dot_all,
         .unicode = regexp.unicode,
+        .unicode_sets = regexp.unicode_sets,
         .sticky = regexp.sticky,
         .has_indices = regexp.has_indices,
     };
@@ -197,7 +201,8 @@ pub fn testMatch(input: []const u8, regexp: *Types.RegExpValue) ?usize {
         .ignore_case = regexp.ignore_case,
         .multiline = regexp.multiline,
         .dot_all = regexp.dot_all,
-        .unicode = regexp.unicode,
+        .unicode = regexp.unicode or regexp.unicode_sets,
+        .unicode_sets = regexp.unicode_sets,
         .sticky = regexp.sticky,
         .has_indices = regexp.has_indices,
     };
@@ -232,6 +237,9 @@ pub fn getProperty(regexp: *Types.RegExpValue, prop: []const u8) Types.Value {
     }
     if (std.mem.eql(u8, prop, "unicode")) {
         return .{ .boolean = regexp.unicode };
+    }
+    if (std.mem.eql(u8, prop, "unicodeSets")) {
+        return .{ .boolean = regexp.unicode_sets };
     }
     if (std.mem.eql(u8, prop, "sticky")) {
         return .{ .boolean = regexp.sticky };
@@ -790,3 +798,38 @@ pub const REGEXP_OBJECT = Types.BuiltinObjectImpl{
     .name = "RegExp",
     .methods = &REGEXP_METHODS,
 };
+
+const testing = std.testing;
+
+test "unicode sets intersection and unicodeSets property" {
+    const re = try Types.RegExpValue.init(testing.allocator, "[\\p{ASCII}&&\\p{Letter}]", "v");
+    defer re.deinit();
+
+    try testing.expect(re.unicode_sets);
+    try testing.expect(!re.unicode);
+    try testing.expect(testMatch("a", re) != null);
+    try testing.expect(testMatch("1", re) == null);
+    try testing.expect(testMatch("α", re) == null);
+}
+
+test "unicode sets difference and q strings" {
+    const diff = try Types.RegExpValue.init(testing.allocator, "[\\p{Letter}--\\p{ASCII}]", "v");
+    defer diff.deinit();
+    try testing.expect(testMatch("a", diff) == null);
+    try testing.expect(testMatch("α", diff) != null);
+
+    const q = try Types.RegExpValue.init(testing.allocator, "[\\q{a|b}]", "v");
+    defer q.deinit();
+    try testing.expect(testMatch("a", q) != null);
+    try testing.expect(testMatch("b", q) != null);
+    try testing.expect(testMatch("c", q) == null);
+}
+
+test "unicode sets nested union" {
+    const re = try Types.RegExpValue.init(testing.allocator, "[[\\p{ASCII}&&\\p{Letter}]\\p{Nd}]", "v");
+    defer re.deinit();
+    try testing.expect(testMatch("a", re) != null);
+    try testing.expect(testMatch("1", re) != null);
+    try testing.expect(testMatch(" ", re) == null);
+}
+

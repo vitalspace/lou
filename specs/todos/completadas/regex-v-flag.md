@@ -1,8 +1,8 @@
 # RegExp v Flag (Unicode Sets)
 
 ## status
-pendiente
 
+**completada** — el flag `v` activa el modo Unicode Sets. El lexer ya aceptaba `v`; el parser recibe `unicode_sets` y compila cada `[...]` a un bitset de 0x110000 puntos para aplicar unión implícita, `&&` (intersección) y `--` (diferencia), con clases anidadas, `\p{...}`/`\P{...}`, `\d`/`\w`/`\s` y `\q{a|b}` (alternativas de un solo punto de código). `v` fija `unicodeSets === true` y `unicode === false` como en Node, pero el motor aplica semántica unicode. Fixture `tests/compat/regex-v-flag.lou` PASS y 3 unit tests. Limitaciones documentadas: `\q{...}` multi-carácter no se expande (devuelve `UnsupportedFeature`), y los literales UTF-8 fuera de `\p` se leen byte a byte como el resto del engine. Baseline 96 PASS / 0 FAIL / 0 SKIP, 2026-11-27.
 ## Problema
 El flag `v` de RegExp (Unicode Sets, ES2024) no está implementado.
 ## Contexto
@@ -135,51 +135,3 @@ const re6 = /[\p{Script_Extensions: Greek}&&\p{Letter}]/v;
 ### Comparar salida raw (sin interpretar ANSI)
 ./zig-out/bin/lou run js/tests/regex-v.js 2>&1 | od -c
 node js/tests/regex-v.js 2>&1 | od -c
-
-### pendiente
-- Implementar flag v en el regex engine
-- Implementar operaciones de conjuntos (&&, --)
-- Implementar \q{...} para strings literales
-
-## Edge cases encontrados durante implementación
-
-Listar aquí los bugs, comportamientos inesperados o requisitos descubiertos
-mientras se implementaba este spec. Cada edge case debe ser promovido a su
-propio spec (usando esta misma plantilla) si requiere cambios de diseño
-propios, o documentado inline si es un fix puntual.
-
-Ejemplos de edge cases típicos:
-- Comportamiento cuando se mezcla el tipo con primitivos incompatibles
-  (TypeError vs coerción silenciosa).
-- Formato de impresión / `toString` — sufijo, base, mayúsculas.
-- Comparación loose vs strict.
-- Conversión a otros tipos (string concat, Number, BigInt).
-- División por cero, exponente negativo, overflow.
-- Capturabilidad del error por `try/catch` JS (no abortar el proceso).
-
-Plantilla para promover un edge case a spec:
-1. Crear `specs/todos/pendientes/<spec>-edge-<caso>.md` siguiendo esta plantilla.
-2. Enlazar desde este spec principal con un enlace relativo.
-3. Verificar que el test correspondiente cubre el caso.
-
-
-## Estado del test (auto 2026-06-22)
-
-- Compat test match: `regex-properties.lou` (FUZZY — regex)
-- Test status: `FAIL`
-
-- Diff excerpt:
-
-```
-1,19c1,19
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-< undefined
-```
-
-- Disposition: stays in pendientes/ — fuzzy-matched test currently FAILS, see diff excerpt below.
-

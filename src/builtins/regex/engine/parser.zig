@@ -20,11 +20,109 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
+const SET_BITS: u32 = 0x110000;
+const SET_BYTES: usize = (SET_BITS + 7) / 8;
+
+fn newBitSet(allocator: std.mem.Allocator) ParseError![]u8 {
+    const bits = allocator.alloc(u8, SET_BYTES) catch return error.OutOfMemory;
+    @memset(bits, 0);
+    return bits;
+}
+
+fn bitSetAddRange(bits: []u8, range: ast.Range) void {
+    var cp: u32 = range.start;
+    const end: u32 = range.end;
+    while (cp <= end) : (cp += 1) {
+        if (cp >= SET_BITS) break;
+        const idx: usize = @intCast(cp);
+        bits[idx / 8] |= @as(u8, 1) << @as(u3, @intCast(idx % 8));
+    }
+}
+
+fn bitSetAddRanges(bits: []u8, ranges: []const ast.Range) void {
+    for (ranges) |r| bitSetAddRange(bits, r);
+}
+
+fn bitSetUnion(dst: []u8, src: []const u8) void {
+    for (dst, src) |*d, s| d.* |= s;
+}
+
+fn bitSetIntersect(dst: []u8, src: []const u8) void {
+    for (dst, src) |*d, s| d.* &= s;
+}
+
+fn bitSetDifference(dst: []u8, src: []const u8) void {
+    for (dst, src) |*d, s| d.* &= ~s;
+}
+
+fn bitSetComplement(bits: []u8) void {
+    for (bits) |*b| b.* = ~b.*;
+}
+
+fn bitSetToRanges(allocator: std.mem.Allocator, bits: []const u8) ParseError![]ast.Range {
+    var ranges = std.ArrayList(ast.Range).initCapacity(allocator, 0) catch return error.OutOfMemory;
+    errdefer ranges.deinit(allocator);
+
+    var cp: u32 = 0;
+    while (cp < SET_BITS) {
+        const idx: usize = @intCast(cp);
+        if ((bits[idx / 8] & (@as(u8, 1) << @as(u3, @intCast(idx % 8)))) == 0) {
+            cp += 1;
+            continue;
+        }
+        const start = cp;
+        while (cp + 1 < SET_BITS) {
+            const next_idx: usize = @intCast(cp + 1);
+            if ((bits[next_idx / 8] & (@as(u8, 1) << @as(u3, @intCast(next_idx % 8)))) == 0) break;
+            cp += 1;
+        }
+        ranges.append(allocator, .{ .start = @intCast(start), .end = @intCast(cp) }) catch return error.OutOfMemory;
+        cp += 1;
+    }
+    return ranges.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+fn decodeQUnit(alt: []const u8) ParseError!u21 {
+    if (alt.len == 0) return error.InvalidEscape;
+    var i: usize = 0;
+    var cp: ?u21 = null;
+    while (i < alt.len) {
+        var c = alt[i];
+        var decoded: u21 = undefined;
+        if (c == '\\') {
+            i += 1;
+            if (i >= alt.len) return error.InvalidEscape;
+            c = alt[i];
+            decoded = switch (c) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'f' => 0x0C,
+                'v' => 0x0B,
+                '0' => 0,
+                else => @as(u21, c),
+            };
+            i += 1;
+        } else if (c < 0x80) {
+            decoded = c;
+            i += 1;
+        } else {
+            const len = std.unicode.utf8ByteSequenceLength(c) catch return error.InvalidEscape;
+            if (i + len > alt.len) return error.InvalidEscape;
+            decoded = std.unicode.utf8Decode(alt[i..][0..len]) catch return error.InvalidEscape;
+            i += len;
+        }
+        if (cp != null) return error.UnsupportedFeature;
+        cp = decoded;
+    }
+    return cp orelse error.InvalidEscape;
+}
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     pattern: []const u8,
     pos: u32,
     group_count: u32,
+    unicode_sets: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, pattern: []const u8) Parser {
         return .{
@@ -287,7 +385,150 @@ pub const Parser = struct {
         return self.maybeQuantify(id, resulting_ast);
     }
 
+    fn peekAt(self: *Parser, offset: u32) ?u8 {
+        const idx = self.pos + offset;
+        if (idx >= self.pattern.len) return null;
+        return self.pattern[idx];
+    }
+
+    fn parseCharClassV(self: *Parser, resulting_ast: *Ast) ParseError!u32 {
+        const bits = try self.parseClassBitsV(resulting_ast);
+        defer self.allocator.free(bits);
+        const ranges = try bitSetToRanges(self.allocator, bits);
+        const id = try resulting_ast.addNode(.char_class, .{
+            .char_class = .{ .negated = false, .ranges = ranges },
+        });
+        return self.maybeQuantify(id, resulting_ast);
+    }
+
+    /// Parse one `[...]` in Unicode Sets mode and return its bitset.
+    fn parseClassBitsV(self: *Parser, resulting_ast: *Ast) ParseError![]u8 {
+        _ = self.advance(); // [
+        var negated = false;
+        if (self.peek()) |ch| {
+            if (ch == '^') {
+                negated = true;
+                _ = self.advance();
+            }
+        }
+
+        const acc = try newBitSet(self.allocator);
+        errdefer self.allocator.free(acc);
+
+        var first = true;
+        while (true) {
+            const ch = self.peek() orelse return error.UnclosedClass;
+            if (ch == ']') {
+                _ = self.advance();
+                break;
+            }
+            if (!first and ch == '&' and self.peekAt(1) == '&') {
+                self.pos += 2;
+                const rhs = try self.parseClassOperandV(resulting_ast);
+                defer self.allocator.free(rhs);
+                bitSetIntersect(acc, rhs);
+            } else if (!first and ch == '-' and self.peekAt(1) == '-') {
+                self.pos += 2;
+                const rhs = try self.parseClassOperandV(resulting_ast);
+                defer self.allocator.free(rhs);
+                bitSetDifference(acc, rhs);
+            } else {
+                const rhs = try self.parseClassOperandV(resulting_ast);
+                defer self.allocator.free(rhs);
+                bitSetUnion(acc, rhs);
+            }
+            first = false;
+        }
+
+        if (negated) bitSetComplement(acc);
+        return acc;
+    }
+
+    fn parseClassOperandV(self: *Parser, resulting_ast: *Ast) ParseError![]u8 {
+        const bits = try newBitSet(self.allocator);
+        errdefer self.allocator.free(bits);
+
+        if (self.peek() == '[') {
+            const nested = try self.parseClassBitsV(resulting_ast);
+            defer self.allocator.free(nested);
+            bitSetUnion(bits, nested);
+            return bits;
+        }
+
+        if (self.peek() == '\\') {
+            _ = self.advance();
+            const esc = self.peek() orelse return error.UnexpectedEnd;
+            switch (esc) {
+                'p', 'P' => {
+                    _ = self.advance();
+                    try self.expect('{');
+                    const end = std.mem.indexOfScalar(u8, self.pattern[self.pos..], '}') orelse return error.InvalidEscape;
+                    const name = self.pattern[self.pos .. self.pos + end];
+                    self.pos += @as(u32, @intCast(end)) + 1;
+                    const prop_ranges = try unicode.getRanges(self.allocator, name) orelse return error.InvalidEscape;
+                    defer self.allocator.free(std.mem.sliceAsBytes(prop_ranges));
+                    bitSetAddRanges(bits, prop_ranges);
+                    if (esc == 'P') bitSetComplement(bits);
+                },
+                'd', 'D' => {
+                    _ = self.advance();
+                    bitSetAddRange(bits, .{ .start = '0', .end = '9' });
+                    if (esc == 'D') bitSetComplement(bits);
+                },
+                'w', 'W' => {
+                    _ = self.advance();
+                    bitSetAddRange(bits, .{ .start = '0', .end = '9' });
+                    bitSetAddRange(bits, .{ .start = 'A', .end = 'Z' });
+                    bitSetAddRange(bits, .{ .start = 'a', .end = 'z' });
+                    bitSetAddRange(bits, .{ .start = '_', .end = '_' });
+                    if (esc == 'W') bitSetComplement(bits);
+                },
+                's', 'S' => {
+                    _ = self.advance();
+                    bitSetAddRange(bits, .{ .start = ' ', .end = ' ' });
+                    bitSetAddRange(bits, .{ .start = '\t', .end = '\t' });
+                    bitSetAddRange(bits, .{ .start = '\n', .end = '\n' });
+                    bitSetAddRange(bits, .{ .start = '\r', .end = '\r' });
+                    bitSetAddRange(bits, .{ .start = 0x0B, .end = 0x0B });
+                    bitSetAddRange(bits, .{ .start = 0x0C, .end = 0x0C });
+                    if (esc == 'S') bitSetComplement(bits);
+                },
+                'q' => {
+                    _ = self.advance();
+                    try self.expect('{');
+                    const end = std.mem.indexOfScalar(u8, self.pattern[self.pos..], '}') orelse return error.InvalidEscape;
+                    const content = self.pattern[self.pos .. self.pos + end];
+                    self.pos += @as(u32, @intCast(end)) + 1;
+                    var it = std.mem.splitScalar(u8, content, '|');
+                    while (it.next()) |alt| {
+                        const cp = try decodeQUnit(alt);
+                        bitSetAddRange(bits, .{ .start = cp, .end = cp });
+                    }
+                },
+                else => {
+                    const cp = try self.readClassEscape();
+                    bitSetAddRange(bits, .{ .start = cp, .end = cp });
+                },
+            }
+            return bits;
+        }
+
+        const cp = try self.readClassChar();
+        if (self.peek()) |dash| {
+            const next = self.peekAt(1);
+            if (dash == '-' and next != null and next.? != '-' and next.? != ']') {
+                _ = self.advance();
+                const end_cp = try self.readClassChar();
+                if (end_cp < cp) return error.InvalidRange;
+                bitSetAddRange(bits, .{ .start = cp, .end = end_cp });
+                return bits;
+            }
+        }
+        bitSetAddRange(bits, .{ .start = cp, .end = cp });
+        return bits;
+    }
     fn parseCharClass(self: *Parser, resulting_ast: *Ast) ParseError!u32 {
+        if (self.unicode_sets) return self.parseCharClassV(resulting_ast);
         const start_pos = self.pos;
         _ = self.advance();
         var negated = false;
