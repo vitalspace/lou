@@ -1269,6 +1269,18 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .array, .js_object, .function, .closure, .generator, .iterator => {},
                     else => return .{ .boolean = false },
                 }
+                // Class constructors: walk the instance prototype chain.
+                if (right == .js_object and right.js_object.properties.get("prototype") != null) {
+                    const target = classPrototypeOf(right) orelse return .{ .boolean = false };
+                    if (left == .js_object) {
+                        var cur = left.js_object.prototype;
+                        while (cur) |o| {
+                            if (o == target) return .{ .boolean = true };
+                            cur = o.prototype;
+                        }
+                    }
+                    return .{ .boolean = false };
+                }
                 // Get the constructor name from the right operand.
                 const constructor_name: ?[]const u8 = switch (right) {
                     .object => |obj_ptr| blk: {
@@ -2992,6 +3004,14 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             try env.setFunction(g.name, node);
             return .{ .function = @ptrCast(node) };
         },
+        .ClassDeclaration => |c| {
+            const class_val = try createClassValue(env, node, c.name, c.superclass, c.methods, c.fields);
+            try env.setLet(c.name, class_val);
+            return class_val;
+        },
+        .ClassExpression => |c| {
+            return try createClassValue(env, node, c.name, c.superclass, c.methods, c.fields);
+        },
         .FunctionDeclaration => |f| {
             if (f.name.len > 0) try env.setFunction(f.name, node);
             // Capture the defining scope so calls keep reading/writing the
@@ -3000,6 +3020,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return .{ .closure = try ast.ClosureValue.init(env.allocator, @ptrCast(@as(*anyopaque, node)), @ptrCast(scope)) };
         },
         .FunctionCall => |f| {
+            if (std.mem.eql(u8, f.name, "super")) {
+                var super_args = try evaluateArgs(f.arguments, env);
+                defer super_args.deinit(env.allocator);
+                return try invokeSuperConstructor(env, super_args.items);
+            }
             const has_spread_args = blk: {
                 var found = false;
                 for (f.arguments) |arg| {
@@ -3114,6 +3139,14 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .Identifier => |id| id.name,
                 else => return error.InvalidCallee,
             };
+
+            if (env.get(func_name)) |callee_val| {
+                if (callee_val == .js_object and callee_val.js_object.properties.get("@@class") != null) {
+                    var class_args = try evaluateArgs(ne.arguments, env);
+                    defer class_args.deinit(env.allocator);
+                    return try constructClass(env, callee_val, class_args.items);
+                }
+            }
 
             const has_spread_args = blk: {
                 var found = false;
@@ -3397,6 +3430,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             return current;
         },
         .MemberAccess => |m| {
+            if (m.object.* == .Identifier and std.mem.eql(u8, m.object.Identifier.name, "super")) {
+                return try getSuperProperty(env, m.property);
+            }
             const value = try evaluate(m.object, env);
 
             if (value == .array) {
@@ -3445,6 +3481,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
         },
         .MethodCall => |m| {
+            if (m.object.* == .Identifier and std.mem.eql(u8, m.object.Identifier.name, "super")) {
+                var super_args = try evaluateArgs(m.arguments, env);
+                defer super_args.deinit(env.allocator);
+                return try callSuperMethod(env, m.method, super_args.items);
+            }
             const has_spread_args = blk: {
                 var found = false;
                 for (m.arguments) |arg| {
@@ -3716,7 +3757,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         }
                         return .{ .void = {} };
                     } else if (value == .js_object) {
-                        if (value.js_object.properties.get(m.method)) |method_val| {
+                        if (findPropertyInChain(value.js_object, m.method)) |method_val| {
+                            if (accessorPart(method_val, "get")) |getter| {
+                                return try callFunctionValue(getter, &[_]ast.Value{}, env, value);
+                            }
+                            if (isAccessorValue(method_val)) return .{ .void = {} };
                             var js_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
                             defer js_args.deinit(env.allocator);
                             for (m.arguments) |arg| {
@@ -3927,7 +3972,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 return .{ .void = {} };
             } else if (value == .js_object) {
-                if (value.js_object.properties.get(m.method)) |method_val| {
+                if (findPropertyInChain(value.js_object, m.method)) |method_val| {
+                    if (accessorPart(method_val, "get")) |getter| {
+                        return try callFunctionValue(getter, &[_]ast.Value{}, env, value);
+                    }
+                    if (isAccessorValue(method_val)) return .{ .void = {} };
                     var js_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
                     defer js_args.deinit(env.allocator);
                     for (m.arguments) |arg| {
@@ -4321,6 +4370,264 @@ pub fn resolveArgumentIn(
     return .{ .void = {} };
 }
 
+fn getSuperProperty(env: *Environment, key: []const u8) anyerror!ast.Value {
+    const parent = env.get("@@super") orelse return .{ .void = {} };
+    const this_val: ast.Value = env.get("this") orelse .{ .void = {} };
+    var target = classPrototypeOf(parent) orelse return .{ .void = {} };
+    if (this_val == .js_object and this_val.js_object.properties.get("@@class") != null) {
+        target = parent.js_object;
+    }
+    var cur: ?*ast.ObjectValue = target;
+    while (cur) |o| {
+        if (o.properties.get(key)) |v| {
+            if (accessorPart(v, "get")) |getter| {
+                return try callFunctionValue(getter, &[_]ast.Value{}, env, this_val);
+            }
+            if (isAccessorValue(v)) return .{ .void = {} };
+            return v;
+        }
+        cur = o.prototype;
+    }
+    return .{ .void = {} };
+}
+
+fn findPropertyInChain(obj: *ast.ObjectValue, key: []const u8) ?ast.Value {
+    var cur: ?*ast.ObjectValue = obj;
+    while (cur) |o| {
+        if (o.properties.get(key)) |v| return v;
+        cur = o.prototype;
+    }
+    return null;
+}
+
+fn classPrototypeOf(class_val: ast.Value) ?*ast.ObjectValue {
+    if (class_val != .js_object) return null;
+    const proto = class_val.js_object.properties.get("prototype") orelse return null;
+    if (proto != .js_object) return null;
+    return proto.js_object;
+}
+
+fn classConstructorOf(class_val: ast.Value) ?ast.Value {
+    if (class_val != .js_object) return null;
+    return class_val.js_object.properties.get("@@ctor");
+}
+
+fn classNodeOf(class_val: ast.Value) ?*ast.Node {
+    if (class_val != .js_object) return null;
+    const node_val = class_val.js_object.properties.get("@@class_node") orelse return null;
+    if (node_val != .function) return null;
+    return @ptrCast(@alignCast(node_val.function));
+}
+
+fn classScopeOf(class_val: ast.Value) ?*Environment {
+    if (class_val != .js_object) return null;
+    const scope_val = class_val.js_object.properties.get("@@scope") orelse return null;
+    if (scope_val != .function) return null;
+    return @ptrCast(@alignCast(scope_val.function));
+}
+
+fn initClassFields(env: *Environment, class_val: ast.Value, instance: ast.Value) anyerror!void {
+    const node = classNodeOf(class_val) orelse return;
+    if (node.* != .ClassDeclaration and node.* != .ClassExpression) return;
+    const fields = switch (node.*) {
+        .ClassDeclaration => |c| c.fields,
+        .ClassExpression => |c| c.fields,
+        else => unreachable,
+    };
+    if (fields.len == 0) return;
+    const scope = classScopeOf(class_val) orelse env;
+    var field_env = try Environment.initBlock(env.allocator, scope);
+    defer field_env.deinit();
+    try field_env.set("this", instance);
+    for (fields) |field| {
+        if (field.is_static) continue;
+        const value: ast.Value = if (field.value) |expr| try evaluate(expr, &field_env) else .{ .void = {} };
+        try instance.js_object.properties.put(field.name, value);
+    }
+}
+
+fn invokeClassConstructor(ctor: ast.Value, args: []ast.Value, env: *Environment, instance: ast.Value) anyerror!ast.Value {
+    if (ctor != .closure) return callFunctionValue(ctor, args, env, instance);
+    const scope: *Environment = @alignCast(@ptrCast(ctor.closure.env));
+    const node: *ast.Node = @alignCast(@ptrCast(ctor.closure.func_node));
+    if (node.* != .FunctionDeclaration) return callFunctionValue(ctor, args, env, instance);
+    const func = node.FunctionDeclaration;
+    const func_env = try Environment.initHeap(env.allocator, scope);
+    defer if (!func_env.captured) {
+        func_env.deinit();
+        env.allocator.destroy(func_env);
+    };
+    try func_env.set("this", instance);
+    for (func.parameters, 0..) |param, idx| {
+        try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
+    }
+    try bindRestArguments(func_env, func.parameters, func.rest_param, args);
+    if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
+    const result = evaluate(func.body, func_env) catch |err| {
+        if (func_env.throw_hit) {
+            env.throw_hit = true;
+            env.throw_value = func_env.throw_value;
+        }
+        return err;
+    };
+    if (!func_env.return_hit) return instance;
+    return switch (result) {
+        .js_object, .array, .function, .closure, .generator, .regexp, .iterator, .array_iterator, .symbol, .object => result,
+        else => instance,
+    };
+}
+
+fn constructClass(env: *Environment, class_val: ast.Value, args: []ast.Value) anyerror!ast.Value {
+    const proto = classPrototypeOf(class_val) orelse return error.NotAConstructor;
+    const instance_obj = try ast.ObjectValue.init(env.allocator);
+    instance_obj.prototype = proto;
+    try env.objects.append(env.allocator, instance_obj);
+    const instance = ast.Value{ .js_object = instance_obj };
+
+    const parent = class_val.js_object.properties.get("@@super");
+    if (parent) |parent_val| {
+        if (parent_val == .js_object) try initClassFields(env, parent_val, instance);
+    }
+    try initClassFields(env, class_val, instance);
+
+    if (classConstructorOf(class_val)) |ctor| {
+        return try invokeClassConstructor(ctor, args, env, instance);
+    }
+
+    if (parent) |parent_val| {
+        if (classConstructorOf(parent_val)) |parent_ctor| {
+            _ = try callFunctionValue(parent_ctor, args, env, instance);
+        }
+    }
+    return instance;
+}
+
+fn putClassAccessor(env: *Environment, target: *ast.ObjectValue, name: []const u8, kind: ast.ClassMethodKind, method: ast.Value) !void {
+    var accessor: *ast.ObjectValue = undefined;
+    if (target.properties.get(name)) |existing| {
+        if (isAccessorValue(existing)) {
+            accessor = existing.js_object;
+        } else {
+            accessor = try ast.ObjectValue.init(env.allocator);
+            try env.objects.append(env.allocator, accessor);
+            try accessor.properties.put("@@native", .{ .string = "Accessor" });
+            try target.properties.put(name, .{ .js_object = accessor });
+        }
+    } else {
+        accessor = try ast.ObjectValue.init(env.allocator);
+        try env.objects.append(env.allocator, accessor);
+        try accessor.properties.put("@@native", .{ .string = "Accessor" });
+        try target.properties.put(name, .{ .js_object = accessor });
+    }
+    const key = if (kind == .get) "get" else "set";
+    try accessor.properties.put(key, method);
+}
+
+fn createClassValue(
+    env: *Environment,
+    node: *ast.Node,
+    name: []const u8,
+    superclass: ?*ast.Node,
+    methods: []ast.ClassMethod,
+    fields: []ast.ClassField,
+) anyerror!ast.Value {
+    var parent_val: ?ast.Value = null;
+    if (superclass) |sc| {
+        const val = try evaluate(sc, env);
+        if (classPrototypeOf(val) == null) {
+            _ = throwError(env, "TypeError", .{ .string = "Class extends value is not a constructor" });
+            return error.Thrown;
+        }
+        parent_val = val;
+    }
+
+    const parent_proto = if (parent_val) |pv| classPrototypeOf(pv) else null;
+    const proto = try ast.ObjectValue.init(env.allocator);
+    proto.prototype = parent_proto;
+    try env.objects.append(env.allocator, proto);
+
+    const class_obj = try ast.ObjectValue.init(env.allocator);
+    class_obj.prototype = if (parent_val) |pv| pv.js_object else env.object_prototype;
+    try env.objects.append(env.allocator, class_obj);
+    const class_val = ast.Value{ .js_object = class_obj };
+    try class_obj.properties.put("prototype", .{ .js_object = proto });
+    try class_obj.properties.put("name", .{ .string = name });
+    try class_obj.properties.put("@@class", .{ .boolean = true });
+    try class_obj.properties.put("@@class_node", .{ .function = @ptrCast(node) });
+    if (parent_val) |pv| try class_obj.properties.put("@@super", pv);
+
+    if (methods.len > 0 or fields.len > 0) {
+        const scope = try Environment.initClosureHeap(env.allocator, try env.captureEnv());
+        try scope.set("@@class", class_val);
+        try scope.set("@@class_node", .{ .function = @ptrCast(node) });
+        if (parent_val) |pv| try scope.set("@@super", pv);
+        try class_obj.properties.put("@@scope", .{ .function = @ptrCast(scope) });
+        if (name.len > 0) try scope.set(name, class_val);
+
+        var ctor_val: ?ast.Value = null;
+        for (methods) |method| {
+            const closure = ast.Value{ .closure = try ast.ClosureValue.init(env.allocator, @ptrCast(method.function), @ptrCast(scope)) };
+            if (method.kind == .constructor and !method.is_static) {
+                ctor_val = closure;
+            } else if (method.kind == .get or method.kind == .set) {
+                const target = if (method.is_static) class_obj else proto;
+                try putClassAccessor(env, target, method.name, method.kind, closure);
+            } else {
+                const target = if (method.is_static) class_obj else proto;
+                try target.properties.put(method.name, closure);
+            }
+        }
+        if (ctor_val) |cv| try class_obj.properties.put("@@ctor", cv);
+
+        for (fields) |field| {
+            if (!field.is_static) continue;
+            const value: ast.Value = if (field.value) |expr| try evaluate(expr, scope) else .{ .void = {} };
+            try class_obj.properties.put(field.name, value);
+        }
+    }
+
+    return class_val;
+}
+
+fn invokeSuperConstructor(env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    const parent = env.get("@@super") orelse return error.NotAConstructor;
+    const parent_ctor = classConstructorOf(parent) orelse return error.NotAConstructor;
+    const this_val = env.get("this") orelse return error.NotAConstructor;
+    try initClassFields(env, parent, this_val);
+    return try invokeClassConstructor(parent_ctor, args, env, this_val);
+}
+
+fn callSuperMethod(env: *Environment, method: []const u8, args: []ast.Value) anyerror!ast.Value {
+    const parent = env.get("@@super") orelse return error.NotAFunction;
+    const this_val: ast.Value = env.get("this") orelse .{ .void = {} };
+    var cur = if (this_val == .js_object and this_val.js_object.properties.get("@@class") != null)
+        parent.js_object
+    else
+        classPrototypeOf(parent) orelse return error.NotAFunction;
+    var found: ?ast.Value = null;
+    while (true) {
+        if (cur.properties.get(method)) |v| {
+            found = v;
+            break;
+        }
+        cur = cur.prototype orelse break;
+    }
+    const method_val = found orelse return error.NotAFunction;
+    if (accessorPart(method_val, "get")) |getter| {
+        return try callFunctionValue(getter, &[_]ast.Value{}, env, this_val);
+    }
+    return try callFunctionValue(method_val, args, env, this_val);
+}
+fn bindRestArguments(dest: *Environment, parameters: []const []const u8, rest_param: ?[]const u8, args: []ast.Value) !void {
+    const name = rest_param orelse return;
+    const restrict = try ast.ArrayObject.init(dest.allocator);
+    var idx = parameters.len;
+    while (idx < args.len) : (idx += 1) {
+        try restrict.elements.append(dest.allocator, args[idx]);
+    }
+    try dest.arrays.append(dest.allocator, restrict);
+    try dest.set(name, .{ .array = restrict });
+}
 fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
         if (func_node.* == .GeneratorDeclaration) {
             const gen_decl = func_node.GeneratorDeclaration;
@@ -4334,6 +4641,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             for (gen_decl.parameters, 0..) |param, idx| {
                 try gen_env.set(param, try resolveArgumentIn(idx, args, gen_decl.param_defaults, &gen_env));
             }
+            try bindRestArguments(&gen_env, gen_decl.parameters, gen_decl.rest_param, args);
         gen_obj.gen_env = @ptrCast(try env.allocator.create(Environment));
         const stored_env: *Environment = @alignCast(@ptrCast(gen_obj.gen_env.?));
         stored_env.* = gen_env;
@@ -4369,6 +4677,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
+            try bindRestArguments(func_env, func.parameters, func.rest_param, args);
             if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
             return evaluate(func.body, func_env) catch |err| {
                 if (func_env.throw_hit) {
@@ -4391,6 +4700,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             for (func.parameters, 0..) |param, idx| {
                 try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
             }
+            try bindRestArguments(func_env, func.parameters, func.rest_param, args);
             if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
             return evaluate(func.body, func_env) catch |err| {
                 if (func_env.throw_hit) {
@@ -6164,6 +6474,32 @@ test "reserved words are valid property names after a dot" {
     try std.testing.expectEqual(@as(i64, 5), r.integer);
 }
 
+test "class methods bind rest parameters and return arrays safely" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { class C { constructor(first, ...rest) { this.first = first; this.rest = rest; } } const c = new C(1, 2, 3); return c.rest.length + c.first; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 3), r.integer);
+}
+
+test "class inheritance calls super and dispatches overridden methods" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { class A { constructor(x) { this.x = x; } label() { return \"A\" + this.x; } } class B extends A { constructor(x) { super(x); } label() { return super.label() + \"B\"; } } const b = new B(7); return b.label() + b.x; })()", &env_);
+    try std.testing.expectEqualStrings("A7B7", r.string);
+}
+
+test "class getters and static members resolve through the prototype chain" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { class C { #n = 2; static twice(x) { return x * 2; } get value() { return this.#n; } set value(v) { this.#n = v; } } const c = new C(); c.value = 5; return C.twice(c.value); })()", &env_);
+    try std.testing.expectEqual(@as(i64, 10), r.integer);
+}
 test "optional chaining short-circuits and preserves method this" {
     const allocator = std.testing.allocator;
     var env_ = try Environment.init(allocator, null);

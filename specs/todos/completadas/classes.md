@@ -1,7 +1,7 @@
 # Classes
 
 ## status
-pendiente
+✅ COMPLETADO
 
 ## Problema
 No existe soporte para declaraciones de clases (`class`), herencia (`extends`/`super`), métodos estáticos, campos privados (`#`), ni getters/setters en objetos literales.
@@ -209,10 +209,32 @@ Plantilla para promover un edge case a spec:
 3. Verificar que el test correspondiente cubre el caso.
 
 
-## Estado del test (auto 2026-06-22)
+## Implementación (2026-06-22)
 
-- Compat test match: `-` (NO-MATCH)
-- Test status: `-`
+- **Lexer:** tokens `Class`, `Extends`, `Super`, `Static`, `Get`, `Set`, `Hash`; `#` produce token propio.
+- **AST:** `ClassDeclaration` / `ClassExpression` con `superclass`, `methods` (`ClassMethod`) y `fields` (`ClassField`); `ClassMethodKind` = `method` / `constructor` / `get` / `set`.
+- **Parser:** `parseClass()` para declaraciones y expresiones, miembros estáticos, `get`/`set`, campos públicos y privados (`#x`), parámetros por defecto y rest. `super` se parsea como identificador especial.
+- **Evaluator:**
+  - el constructor se guarda como closure en `@@ctor` del objeto clase;
+  - el prototipo de instancia queda en `"prototype"` y la cadena de herencia enlaza `class.prototype -> parent.prototype`;
+  - los métodos de instancia viven en el prototipo, los estáticos y campos estáticos en el objeto clase;
+  - getters/setters se combinan en un objeto `Accessor`;
+  - los campos de instancia se inicializan antes del cuerpo del constructor;
+  - `super(...)` y `super.metodo()` resuelven contra la clase padre / su prototipo;
+  - `instanceof` recorre la cadena de prototipos contra `Class.prototype`;
+  - un constructor que no ejecuta `return` devuelve la instancia aunque su última expresión sea un array u objeto;
+  - un `return` explícito de objeto reemplaza la instancia.
+- **VM:** `ClassDeclaration` / `ClassExpression` se delegan a `eval_node`; los bloques guardan y restauran el binding de la clase para conservar el alcance de bloque. La llamada a métodos de objetos en el evaluator ahora recorre la cadena de prototipos y ejecuta getters.
+- **Rest params:** `bindRestArguments()` completa el binding de rest en funciones, arrows, generadores y métodos de clase evaluados por el intérprete.
 
-- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/classes.lou + tests/compat/classes.js to enable automatic PASS/FAIL tracking.
+## Verificación
 
+```bash
+bash tests/compat/run.sh
+# PASS=100  FAIL=0  SKIP=0
+
+zig test src/main.zig
+# All 1105 tests passed.
+```
+
+El fixture `tests/compat/classes.lou` / `classes.js` cubre constructores, herencia multinivel, `super()`, `super.metodo()`, métodos estáticos y getters estáticos, campos privados, getters/setters, expresiones de clase, rest params, `instanceof`, alcance de bloque y retorno de objeto desde el constructor.

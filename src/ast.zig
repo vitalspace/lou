@@ -90,6 +90,23 @@ pub const NodeType = enum {
     SwitchCase,
     ImportMetaExpression,
     DynamicImportExpression,
+    ClassDeclaration,
+    ClassExpression,
+};
+
+pub const ClassMethodKind = enum { method, constructor, get, set };
+
+pub const ClassMethod = struct {
+    name: []const u8,
+    function: *Node,
+    is_static: bool = false,
+    kind: ClassMethodKind = .method,
+};
+
+pub const ClassField = struct {
+    name: []const u8,
+    value: ?*Node = null,
+    is_static: bool = false,
 };
 
 pub const Node = union(NodeType) {
@@ -138,7 +155,7 @@ pub const Node = union(NodeType) {
         value: *Node,
     },
     UpdateExpression: struct {
-        operand: *Node,   // Identifier, MemberAccess, or ArrayIndex
+        operand: *Node, // Identifier, MemberAccess, or ArrayIndex
         prefix: bool,
         operator: TokenType, // .Increment or .Decrement
     },
@@ -239,14 +256,14 @@ pub const Node = union(NodeType) {
         declaration: *Node,
         is_default: bool,
     },
-GeneratorDeclaration: struct {
-    name: []const u8,
-    parameters: [][]const u8,
-    body: *Node,
-    closure_env: ?*anyopaque = null,
-    rest_param: ?[]const u8 = null,
-    param_defaults: []?*Node = &[_]?*Node{},
-},
+    GeneratorDeclaration: struct {
+        name: []const u8,
+        parameters: [][]const u8,
+        body: *Node,
+        closure_env: ?*anyopaque = null,
+        rest_param: ?[]const u8 = null,
+        param_defaults: []?*Node = &[_]?*Node{},
+    },
     YieldExpression: struct {
         value: ?*Node, // null for bare yield
         is_star: bool, // true for yield*
@@ -313,6 +330,18 @@ GeneratorDeclaration: struct {
     ImportMetaExpression: struct {},
     DynamicImportExpression: struct {
         module_path: []const u8,
+    },
+    ClassDeclaration: struct {
+        name: []const u8,
+        superclass: ?*Node = null,
+        methods: []ClassMethod = &[_]ClassMethod{},
+        fields: []ClassField = &[_]ClassField{},
+    },
+    ClassExpression: struct {
+        name: []const u8 = "",
+        superclass: ?*Node = null,
+        methods: []ClassMethod = &[_]ClassMethod{},
+        fields: []ClassField = &[_]ClassField{},
     },
 };
 
@@ -880,6 +909,16 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
         },
         .ImportMetaExpression => try writer.print("ImportMetaExpression\n", .{}),
         .DynamicImportExpression => |di| try writer.print("DynamicImportExpression: {s}\n", .{di.module_path}),
+        .ClassDeclaration => |c| {
+            try writer.print("ClassDeclaration: {s}\n", .{c.name});
+            if (c.superclass) |s| try printAst(s, depth + 1, writer);
+            for (c.methods) |m| try printAst(m.function, depth + 1, writer);
+        },
+        .ClassExpression => |c| {
+            try writer.print("ClassExpression: {s}\n", .{c.name});
+            if (c.superclass) |s| try printAst(s, depth + 1, writer);
+            for (c.methods) |m| try printAst(m.function, depth + 1, writer);
+        },
     }
 }
 
@@ -1198,6 +1237,20 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
         },
         .ImportMetaExpression => {},
         .DynamicImportExpression => {},
+        .ClassDeclaration => |c| {
+            if (c.superclass) |s| freeAst(allocator, s);
+            for (c.methods) |m| freeAst(allocator, m.function);
+            allocator.free(c.methods);
+            for (c.fields) |f| if (f.value) |v| freeAst(allocator, v);
+            allocator.free(c.fields);
+        },
+        .ClassExpression => |c| {
+            if (c.superclass) |s| freeAst(allocator, s);
+            for (c.methods) |m| freeAst(allocator, m.function);
+            allocator.free(c.methods);
+            for (c.fields) |f| if (f.value) |v| freeAst(allocator, v);
+            allocator.free(c.fields);
+        },
     }
     allocator.destroy(node);
 }

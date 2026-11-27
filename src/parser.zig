@@ -9,13 +9,10 @@ const TokenType = @import("lexer.zig").TokenType;
 /// `a = b = 1` means `a = (b = 1)`, not `(a = b) = 1`.
 fn isRightAssociative(token: TokenType) bool {
     return switch (token) {
-        .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign,
-        .ModuloAssign, .PowerAssign, .AndAssign, .OrAssign, .NullishAssign,
-        .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign, .Exponent => true,
+        .Assign, .PlusAssign, .MinusAssign, .MultiplyAssign, .DivideAssign, .ModuloAssign, .PowerAssign, .AndAssign, .OrAssign, .NullishAssign, .LeftShiftAssign, .RightShiftAssign, .UnsignedRightShiftAssign, .Exponent => true,
         else => false,
     };
 }
-
 
 fn findTemplateExprEnd(raw: []const u8, start: usize) ?usize {
     var depth: usize = 1;
@@ -72,11 +69,7 @@ pub const Parser = struct {
     fn isPropertyName(tok_type: TokenType) bool {
         return switch (tok_type) {
             .Identifier => true,
-            .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn,
-            .Return, .If, .Else, .For, .While, .Do, .In, .Of, .Break, .Continue,
-            .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf,
-            .Yield, .New, .Delete, .InstanceOf, .Void, .Try, .Catch, .Finally,
-            .Throw, .Using, .Await => true,
+            .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn, .Return, .If, .Else, .For, .While, .Do, .In, .Of, .Break, .Continue, .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf, .Yield, .New, .Delete, .InstanceOf, .Void, .Try, .Catch, .Finally, .Throw, .Using, .Await, .Class, .Extends, .Super, .Static, .Get, .Set => true,
             else => false,
         };
     }
@@ -201,6 +194,7 @@ pub const Parser = struct {
                 .Try => break :stmt try this.parseTryStatement(),
                 .Throw => break :stmt try this.parseThrowStatement(),
                 .Fn => break :stmt try this.parseFunctionDeclaration(),
+                .Class => break :stmt try this.parseClass(true),
                 .Import => break :stmt try this.parseImportStatement(),
                 .Export => break :stmt try this.parseExportStatement(),
                 .Semicolon => {
@@ -815,14 +809,14 @@ pub const Parser = struct {
     fn parsePrecedece(this: *Parser, precedence: ast.Precedence) !*ast.Node {
         var left = try this.parsePrimary();
 
-        while (@intFromEnum(precedence) < @intFromEnum(ast.getTokenPrecedence(this.current_token.type))) {
+        while (@backingInt(precedence) < @backingInt(ast.getTokenPrecedence(this.current_token.type))) {
             const op = this.current_token.type;
             this.nextToken();
             var next_precedence = ast.getTokenPrecedence(op);
             // Right-associative operators take their right-hand side one
             // precedence level lower, so the recursion binds to the right.
-            if (isRightAssociative(op) and @intFromEnum(next_precedence) > 0) {
-                next_precedence = @enumFromInt(@intFromEnum(next_precedence) - 1);
+            if (isRightAssociative(op) and @backingInt(next_precedence) > 0) {
+                next_precedence = @fromBackingInt(@intCast(@backingInt(next_precedence) - 1));
             }
             const right = try this.parsePrecedece(next_precedence);
 
@@ -844,7 +838,7 @@ pub const Parser = struct {
         // e.g. `q = (p % 2 == 0) ? q + 1 : q - 1` must parse as
         // `q = ((p % 2 == 0) ? q + 1 : q - 1)` rather than
         // `(q = (p % 2 == 0)) ? q + 1 : q - 1`.
-        if (@intFromEnum(precedence) <= @intFromEnum(ast.Precedence.Assign) and this.current_token.type == .Question) {
+        if (@backingInt(precedence) <= @backingInt(ast.Precedence.Assign) and this.current_token.type == .Question) {
             this.nextToken(); // consume '?'
             const consequent = try this.parsePrecedece(.lowest);
             if (this.current_token.type != .Colon) {
@@ -903,6 +897,13 @@ pub const Parser = struct {
                     this.peek_token = saved_peek_expr;
                     base = try this.parseArrayLiteral();
                 }
+            },
+            .Class => base = try this.parseClass(false),
+            .Super => {
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .Identifier = .{ .name = "super" } };
+                this.nextToken();
+                base = node;
             },
             .Regex => {
                 // A regex literal is sugar for the RegExp constructor: the
@@ -1332,7 +1333,9 @@ pub const Parser = struct {
     }
 
     fn processStringEscapes(this: *Parser, raw: []const u8) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(this.allocator, raw.len) catch { return raw; };
+        var buf = std.ArrayList(u8).initCapacity(this.allocator, raw.len) catch {
+            return raw;
+        };
         errdefer buf.deinit(this.allocator);
         var i: usize = 0;
         while (i < raw.len) {
@@ -2082,7 +2085,6 @@ pub const Parser = struct {
         return node;
     }
 
-
     fn parseSwitchStatement(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'switch'
         if (this.current_token.type != .LParen) {
@@ -2381,6 +2383,125 @@ pub const Parser = struct {
         };
     }
 
+    fn parseClass(this: *Parser, declaration: bool) !*ast.Node {
+        this.nextToken(); // consume class
+
+        var name: []const u8 = "";
+        if (this.current_token.type == .Identifier) {
+            name = this.current_token.literal;
+            this.nextToken();
+        }
+
+        var superclass: ?*ast.Node = null;
+        if (this.current_token.type == .Extends) {
+            this.nextToken();
+            superclass = try this.parseExpression();
+        }
+
+        if (this.current_token.type != .LBrace) return error.ExpectedLBrace;
+        this.nextToken();
+
+        var methods = try std.ArrayList(ast.ClassMethod).initCapacity(this.allocator, 8);
+        defer methods.deinit(this.allocator);
+        var fields = try std.ArrayList(ast.ClassField).initCapacity(this.allocator, 4);
+        defer fields.deinit(this.allocator);
+
+        while (this.current_token.type != .RBrace and this.current_token.type != .EOF) {
+            if (this.current_token.type == .Semicolon) {
+                this.nextToken();
+                continue;
+            }
+
+            var is_static = false;
+            if (this.current_token.type == .Static and this.peek_token.type != .LParen) {
+                is_static = true;
+                this.nextToken();
+            }
+
+            var kind: ast.ClassMethodKind = .method;
+            if ((this.current_token.type == .Get or this.current_token.type == .Set) and this.peek_token.type != .LParen) {
+                kind = if (this.current_token.type == .Get) .get else .set;
+                this.nextToken();
+            }
+
+            var method_name: []const u8 = undefined;
+            if (this.current_token.type == .Hash) {
+                this.nextToken();
+                if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+                method_name = try std.fmt.allocPrint(this.allocator, "#{s}", .{this.current_token.literal});
+                this.nextToken();
+            } else if (this.current_token.type == .Identifier or this.current_token.type == .String or this.current_token.type == .Integer) {
+                method_name = this.current_token.literal;
+                this.nextToken();
+            } else {
+                return error.ExpectedIdentifier;
+            }
+
+            if (this.current_token.type == .Assign) {
+                this.nextToken();
+                var value: ?*ast.Node = null;
+                if (this.current_token.type != .Semicolon and this.current_token.type != .RBrace) {
+                    value = try this.parseExpression();
+                }
+                if (this.current_token.type == .Semicolon) this.nextToken();
+                try fields.append(this.allocator, .{ .name = method_name, .value = value, .is_static = is_static });
+                continue;
+            }
+
+            if (this.current_token.type != .LParen) return error.ExpectedLParen;
+            this.nextToken();
+            const params = try this.parseFunctionParameters();
+            this.nextToken(); // consume )
+            const body = try this.parseFunctionBody();
+            const final_body = if (params.destructured_preamble) |preamble| blk: {
+                if (body.* == .BlockStatement) {
+                    var new_stmts = try std.ArrayList(*ast.Node).initCapacity(this.allocator, body.BlockStatement.statements.len + 1);
+                    defer new_stmts.deinit(this.allocator);
+                    try new_stmts.append(this.allocator, preamble);
+                    for (body.BlockStatement.statements) |s| try new_stmts.append(this.allocator, s);
+                    this.allocator.free(body.BlockStatement.statements);
+                    const wrapped = try this.allocator.create(ast.Node);
+                    wrapped.* = .{ .BlockStatement = .{ .statements = try new_stmts.toOwnedSlice(this.allocator) } };
+                    break :blk wrapped;
+                }
+                break :blk body;
+            } else body;
+
+            if (!is_static and std.mem.eql(u8, method_name, "constructor")) kind = .constructor;
+            const func_node = try this.allocator.create(ast.Node);
+            func_node.* = .{ .FunctionDeclaration = .{
+                .name = method_name,
+                .parameters = params.names,
+                .body = final_body,
+                .rest_param = params.rest_param,
+                .param_defaults = params.defaults,
+            } };
+            try methods.append(this.allocator, .{ .name = method_name, .function = func_node, .is_static = is_static, .kind = kind });
+        }
+
+        if (this.current_token.type != .RBrace) return error.ExpectedRBrace;
+        this.nextToken();
+        if (this.current_token.type == .Semicolon) this.nextToken();
+
+        const node = try this.allocator.create(ast.Node);
+        if (declaration) {
+            node.* = .{ .ClassDeclaration = .{
+                .name = name,
+                .superclass = superclass,
+                .methods = try methods.toOwnedSlice(this.allocator),
+                .fields = try fields.toOwnedSlice(this.allocator),
+            } };
+        } else {
+            node.* = .{ .ClassExpression = .{
+                .name = name,
+                .superclass = superclass,
+                .methods = try methods.toOwnedSlice(this.allocator),
+                .fields = try fields.toOwnedSlice(this.allocator),
+            } };
+        }
+        return node;
+    }
+
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'fn'
 
@@ -2591,11 +2712,16 @@ pub const Parser = struct {
 
         this.nextToken(); // consume '.'
 
-        if (!isPropertyName(this.current_token.type)) {
+        var property: []const u8 = undefined;
+        if (this.current_token.type == .Hash) {
+            this.nextToken();
+            if (this.current_token.type != .Identifier) return error.ExpectedIdentifier;
+            property = try std.fmt.allocPrint(this.allocator, "#{s}", .{this.current_token.literal});
+        } else if (isPropertyName(this.current_token.type)) {
+            property = this.current_token.literal;
+        } else {
             return error.ExpectedIdentifier;
         }
-
-        const property = this.current_token.literal;
         this.nextToken(); // consume property name
 
         // Si hay paréntesis, es una llamada a método
@@ -3515,4 +3641,56 @@ test "division after a number is not a regex literal" {
     const node = try parser.parseExpression();
     try std.testing.expect(node.* == .BinaryExpression);
     try std.testing.expect(node.BinaryExpression.operator == .Divide);
+}
+
+test "parse class declaration with fields, accessors and static members" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\class A extends B {
+        \\  x = 1;
+        \\  static y = 2;
+        \\  constructor(a) { this.a = a; }
+        \\  m() { return 1; }
+        \\  static s() { return 2; }
+        \\  get v() { return 3; }
+        \\  set v(next) { this.a = next; }
+        \\}
+    ;
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), program.len);
+    try std.testing.expect(program[0].* == .ClassDeclaration);
+    const cls = program[0].ClassDeclaration;
+    try std.testing.expectEqualStrings("A", cls.name);
+    try std.testing.expect(cls.superclass != null);
+    try std.testing.expectEqualStrings("B", cls.superclass.?.Identifier.name);
+    try std.testing.expectEqual(@as(usize, 2), cls.fields.len);
+    try std.testing.expectEqualStrings("x", cls.fields[0].name);
+    try std.testing.expect(!cls.fields[0].is_static);
+    try std.testing.expectEqualStrings("y", cls.fields[1].name);
+    try std.testing.expect(cls.fields[1].is_static);
+    try std.testing.expectEqual(@as(usize, 5), cls.methods.len);
+    try std.testing.expect(cls.methods[0].kind == .constructor);
+    try std.testing.expect(cls.methods[1].kind == .method);
+    try std.testing.expect(cls.methods[2].is_static);
+    try std.testing.expect(cls.methods[3].kind == .get);
+    try std.testing.expect(cls.methods[4].kind == .set);
+}
+
+test "parse class expression with private field" {
+    const allocator = std.testing.allocator;
+    const input = "const C = class { #value = 1; get value() { return this.#value; } };";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const program = try parser.parseProgram();
+    try std.testing.expectEqual(@as(usize, 1), program.len);
+    try std.testing.expect(program[0].* == .ConstantDeclaration);
+    const init = program[0].ConstantDeclaration.value.?;
+    try std.testing.expect(init.* == .ClassExpression);
+    try std.testing.expectEqualStrings("#value", init.ClassExpression.fields[0].name);
+    try std.testing.expectEqual(@as(usize, 1), init.ClassExpression.methods.len);
+    try std.testing.expect(init.ClassExpression.methods[0].kind == .get);
 }

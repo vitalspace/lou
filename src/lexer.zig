@@ -97,6 +97,13 @@ pub const TokenType = enum {
     InstanceOf,
     TypeOf,
     Void,
+    Class,
+    Extends,
+    Super,
+    Static,
+    Get,
+    Set,
+    Hash,
 
     // Module system
     Import,
@@ -340,6 +347,7 @@ pub const Lexer = struct {
                 }
             },
             ':' => .{ .type = .Colon, .literal = ":" },
+            '#' => .{ .type = .Hash, .literal = "#" },
             '(' => .{ .type = .LParen, .literal = "(" },
             ')' => .{ .type = .RParen, .literal = ")" },
             '{' => .{ .type = .LBrace, .literal = "{" },
@@ -391,9 +399,21 @@ pub const Lexer = struct {
                 }
             },
             0 => return .{ .type = .EOF, .literal = "", .line = tok_line },
-            '"' => { var t = this.readString('"'); t.line = tok_line; return t; },
-            '\'' => { var t = this.readString('\''); t.line = tok_line; return t; },
-            '`' => { var t = this.readTemplateString(); t.line = tok_line; return t; },
+            '"' => {
+                var t = this.readString('"');
+                t.line = tok_line;
+                return t;
+            },
+            '\'' => {
+                var t = this.readString('\'');
+                t.line = tok_line;
+                return t;
+            },
+            '`' => {
+                var t = this.readTemplateString();
+                t.line = tok_line;
+                return t;
+            },
             else => if (std.ascii.isDigit(this.ch)) {
                 const start = this.position;
                 var has_fraction = false;
@@ -505,7 +525,7 @@ pub const Lexer = struct {
                     // literal so downstream code only sees the digit string.
                     this.readChar();
                     this.prev_token_type = .BigInt;
-                    return .{ .type = .BigInt, .literal = this.input[start..this.position - 1], .line = tok_line };
+                    return .{ .type = .BigInt, .literal = this.input[start .. this.position - 1], .line = tok_line };
                 }
                 if (has_fraction) {
                     this.prev_token_type = .Float;
@@ -595,7 +615,7 @@ pub const Lexer = struct {
         if (this.position + 2 >= this.input.len) return false;
         return this.input[this.position + 1] == 0x80 and
             (this.input[this.position + 2] == 0xA8 or
-            this.input[this.position + 2] == 0xA9);
+                this.input[this.position + 2] == 0xA9);
     }
 
     fn skipWhitespace(this: *Lexer) void {
@@ -678,20 +698,29 @@ pub const Lexer = struct {
         return .{ .type = .TemplateString, .literal = literal };
     }
 
-fn canEndExpression(tt: TokenType) bool {
-    // Returns true if the given token type can end a JavaScript expression,
-    // meaning '/' following it should be interpreted as division, not regex.
-    return switch (tt) {
-        .Identifier,
-        .Integer, .Float, .BigInt, .String, .TemplateString,
-        .Null, .Undefined, .True, .False,
-        .RParen, .RBracket,
-        .Increment, .Decrement,
-        .Regex,
-        => true,
-        else => false,
-    };
-}
+    fn canEndExpression(tt: TokenType) bool {
+        // Returns true if the given token type can end a JavaScript expression,
+        // meaning '/' following it should be interpreted as division, not regex.
+        return switch (tt) {
+            .Identifier,
+            .Integer,
+            .Float,
+            .BigInt,
+            .String,
+            .TemplateString,
+            .Null,
+            .Undefined,
+            .True,
+            .False,
+            .RParen,
+            .RBracket,
+            .Increment,
+            .Decrement,
+            .Regex,
+            => true,
+            else => false,
+        };
+    }
 
     fn readRegexLiteral(this: *Lexer, line: u32) Token {
         const pattern_start = this.position + 1; // skip opening '/'
@@ -730,8 +759,8 @@ fn canEndExpression(tt: TokenType) bool {
         // Read flags
         const flags_start = this.position;
         while (this.ch == 'g' or this.ch == 'i' or this.ch == 'm' or
-               this.ch == 's' or this.ch == 'u' or this.ch == 'y' or
-               this.ch == 'd' or this.ch == 'v')
+            this.ch == 's' or this.ch == 'u' or this.ch == 'y' or
+            this.ch == 'd' or this.ch == 'v')
         {
             this.readChar();
         }
@@ -758,7 +787,7 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "true", .True },
         .{ "false", .False },
         .{ "function", .Fn },
-                .{ "return", .Return },
+        .{ "return", .Return },
         .{ "if", .If },
         .{ "else", .Else },
         .{ "for", .For },
@@ -788,6 +817,12 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "throw", .Throw },
         .{ "using", .Using },
         .{ "await", .Await },
+        .{ "class", .Class },
+        .{ "extends", .Extends },
+        .{ "super", .Super },
+        .{ "static", .Static },
+        .{ "get", .Get },
+        .{ "set", .Set },
     });
     return map.get(literal) orelse .Identifier;
 }
@@ -2140,6 +2175,26 @@ test "numeric separators: exponential" {
     }
 }
 
+test "class keywords and private hash token" {
+    const input = "class extends super static get set #name";
+    var lexer = Lexer.init(input);
+    const expected = [_]struct { type: TokenType, literal: []const u8 }{
+        .{ .type = .Class, .literal = "class" },
+        .{ .type = .Extends, .literal = "extends" },
+        .{ .type = .Super, .literal = "super" },
+        .{ .type = .Static, .literal = "static" },
+        .{ .type = .Get, .literal = "get" },
+        .{ .type = .Set, .literal = "set" },
+        .{ .type = .Hash, .literal = "#" },
+        .{ .type = .Identifier, .literal = "name" },
+        .{ .type = .EOF, .literal = "" },
+    };
+    for (expected) |exp| {
+        const tok = lexer.nextToken();
+        try std.testing.expectEqual(exp.type, tok.type);
+        try std.testing.expectEqualSlices(u8, exp.literal, tok.literal);
+    }
+}
 test "numeric separators: leading-dot float" {
     const input = ".5_0 .1_2_5 .0_0_1";
     var lexer = Lexer.init(input);

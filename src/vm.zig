@@ -267,6 +267,7 @@ pub const Compiler = struct {
                     const name = switch (s.*) {
                         .LetDeclaration => |v| v.name,
                         .ConstantDeclaration => |v| v.name,
+                        .ClassDeclaration => |c| c.name,
                         else => continue,
                     };
                     self.c.op2w(.try_get_global, self.c.emitS(name));
@@ -441,6 +442,10 @@ pub const Compiler = struct {
             },
             .SwitchStatement => self.switchStmt(n),
             .FunctionDeclaration => self.fnDecl(n),
+            .ClassDeclaration => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+                self.c.op(.pop);
+            },
             .GeneratorDeclaration => self.genDecl(n),
             .ImportStatement => {
                 _ = evaluate(n, self.env) catch {};
@@ -462,7 +467,6 @@ pub const Compiler = struct {
             },
         }
     }
-
 
     fn switchStmt(self: *Compiler, n: *ast.Node) void {
         const s = n.SwitchStatement;
@@ -1323,6 +1327,9 @@ pub const Compiler = struct {
                 }
                 self.c.op2w(.make_closure, self.c.addC(.{ .function = @ptrCast(n) }));
             },
+            .ClassExpression => {
+                self.c.op2w(.eval_node, self.c.addC(.{ .function = @ptrCast(n) }));
+            },
             .Elision => {
                 self.c.emitC(.{ .hole = {} });
             },
@@ -1425,11 +1432,10 @@ pub const VM = struct {
         }
     }
 
-
     /// Create a closure value that captures the current lexical scope.
     fn makeClosure(self: *VM) !void {
         const ci = self.readU16();
-        const node: *ast.Node = @alignCast(@ptrCast(self.c.consts.items[ci].function));
+        const node: *ast.Node = @ptrCast(@alignCast(self.c.consts.items[ci].function));
         const scope = try self.env.captureEnv();
         const cl = try ast.ClosureValue.init(self.env.allocator, @ptrCast(@as(*anyopaque, node)), @ptrCast(scope));
         self.push(.{ .closure = cl });
@@ -1949,7 +1955,6 @@ pub const VM = struct {
                     const v = self.peek(0);
                     self.sp -= 1;
                     self.env.setVar(n, v) catch {};
-
                 },
                 .get_global => {
                     const ci = self.readU16();

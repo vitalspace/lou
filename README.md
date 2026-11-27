@@ -19,7 +19,7 @@ that follows Node's `util.inspect` output.
 
 ## Highlights
 
-- **JavaScript/TypeScript syntax** — closures, arrow functions, default and rest parameters, destructuring, spread, computed properties, getters/setters, and generators (`function*`, `yield`).
+- **JavaScript/TypeScript syntax** — classes (inheritance, `super`, static members, private fields, getters/setters), closures, arrow functions, default and rest parameters, destructuring, spread, computed properties, and generators (`function*`, `yield`).
 - **Promises** — a built-in `Promise` object and promise chaining.
 - **Modern data types** — `BigInt`, `Symbol`, `Map`, `Set`, `WeakRef`, `FinalizationRegistry`, and `DisposableStack`.
 - **Node-compatible console** — `dir`, `table`, `trace`, groups, counters, timers, assertion messages, and ANSI colors on real terminals.
@@ -186,9 +186,9 @@ zig build test
 
 Current status:
 
-- **1,099** Zig tests pass.
-- **99** JavaScript compatibility fixtures.
-- **99** produce byte-identical output to Node.
+- **1,105** Zig tests pass.
+- **100** JavaScript compatibility fixtures.
+- **100** produce byte-identical output to Node.
 - `console-output` and `console-inspection` match Node exactly, including ANSI output on a TTY.
 
 The compatibility runner strips ANSI before diffing, so color behavior is also
