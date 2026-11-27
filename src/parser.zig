@@ -902,6 +902,23 @@ pub const Parser = struct {
                     base = try this.parseArrayLiteral();
                 }
             },
+            .Regex => {
+                // A regex literal is sugar for the RegExp constructor: the
+                // pattern and flags are passed as raw strings so backslashes
+                // keep their literal meaning.
+                const pattern_token = this.current_token;
+                this.nextToken(); // consume the regex literal
+                const callee = try this.allocator.create(ast.Node);
+                callee.* = .{ .Identifier = .{ .name = "RegExp" } };
+                const args = try this.allocator.alloc(*ast.Node, 2);
+                args[0] = try this.allocator.create(ast.Node);
+                args[0].* = .{ .StringLiteral = .{ .value = pattern_token.literal } };
+                args[1] = try this.allocator.create(ast.Node);
+                args[1].* = .{ .StringLiteral = .{ .value = pattern_token.regex_flags } };
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .NewExpression = .{ .callee = callee, .arguments = args } };
+                base = node;
+            },
             .Identifier => {
                 base = try this.parseIdentifier();
                 // Detect single-param arrow: identifier followed immediately by `=>`.
@@ -3376,4 +3393,32 @@ test "parse object literal - non-block function expression as value" {
         try std.testing.expect(node.FunctionDeclaration.body.* == .IntegerLiteral);
         try std.testing.expect(parser.current_token.type == .Comma);
     }
+}
+test "regex literal parses to a RegExp constructor call" {
+    const allocator = std.testing.allocator;
+    const input = "/ab+c/gi";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .NewExpression);
+    try std.testing.expect(node.NewExpression.callee.* == .Identifier);
+    try std.testing.expectEqualStrings("RegExp", node.NewExpression.callee.Identifier.name);
+    try std.testing.expectEqual(@as(usize, 2), node.NewExpression.arguments.len);
+    try std.testing.expect(node.NewExpression.arguments[0].* == .StringLiteral);
+    try std.testing.expectEqualStrings("ab+c", node.NewExpression.arguments[0].StringLiteral.value);
+    try std.testing.expect(node.NewExpression.arguments[1].* == .StringLiteral);
+    try std.testing.expectEqualStrings("gi", node.NewExpression.arguments[1].StringLiteral.value);
+}
+
+test "division after a number is not a regex literal" {
+    const allocator = std.testing.allocator;
+    const input = "6 / 3";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+    try std.testing.expect(node.* == .BinaryExpression);
+    try std.testing.expect(node.BinaryExpression.operator == .Divide);
 }

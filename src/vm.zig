@@ -15,6 +15,7 @@ const throwError = @import("./builtins/error.zig").throwError;
 const runtime = @import("./types/runtime.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
 const coercion = @import("coercion.zig");
+const regexpMod = @import("./builtins/regex/regexp.zig");
 
 pub const Op = enum(u8) {
     constant,
@@ -2132,6 +2133,8 @@ pub const VM = struct {
                         } else {
                             try self.pushProperty(obj, p);
                         }
+                    } else if (obj == .regexp) {
+                        self.push(regexpMod.getProperty(obj.regexp, p));
                     } else if (obj == .object) {
                         const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj.object));
                         if (bObjPtr.getProperty(p)) |prop_val| {
@@ -2160,7 +2163,10 @@ pub const VM = struct {
                     const p = self.c.consts.items[ci].string;
                     const val = self.pop();
                     const obj = self.pop();
-                    if (obj == .js_object) {
+                    if (obj == .regexp) {
+                        regexpMod.setProperty(obj.regexp, p, val) catch {};
+                        self.push(val);
+                    } else if (obj == .js_object) {
                         if (self.findAccessorValue(obj.js_object, p)) |acc| {
                             if (self.accessorPart(acc, "set")) |setter| {
                                 var setter_args = [_]Value{val};
@@ -2235,7 +2241,24 @@ pub const VM = struct {
                             args.insert(self.env.allocator, 0, self.pop()) catch {};
                         }
                         const obj = self.pop();
-                        if (obj == .array) {
+                        if (obj == .regexp) {
+                            args.insert(self.env.allocator, 0, obj) catch {};
+                            const rObj = self.env.getBuiltinObject("RegExp") orelse {
+                                self.push(.{ .void = {} });
+                                break;
+                            };
+                            const md = rObj.getMethod(m) orelse {
+                                self.push(.{ .void = {} });
+                                break;
+                            };
+                            self.env.throw_hit = false;
+                            const r = md(args.items, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
+                            switch (r) {
+                                .value => |v| self.push(v),
+                                .void => self.push(.{ .void = {} }),
+                            }
+                        } else if (obj == .array) {
                             args.insert(self.env.allocator, 0, obj) catch {};
                             const bObj = self.env.getBuiltinObject("Array") orelse return error.UndefinedObject;
                             const md = bObj.getMethod(m) orelse {
@@ -2476,7 +2499,23 @@ pub const VM = struct {
                         }
                     } else {
                         const obj = self.pop();
-                        if (obj == .generator) {
+                        if (obj == .regexp) {
+                            const rObj = self.env.getBuiltinObject("RegExp") orelse {
+                                self.push(.{ .void = {} });
+                                break;
+                            };
+                            const md = rObj.getMethod(m) orelse {
+                                self.push(.{ .void = {} });
+                                break;
+                            };
+                            self.env.throw_hit = false;
+                            const r = md(&.{}, self.env);
+                            if (try self.deliverBuiltinThrow()) continue;
+                            switch (r) {
+                                .value => |v| self.push(v),
+                                .void => self.push(.{ .void = {} }),
+                            }
+                        } else if (obj == .generator) {
                             if (std.mem.eql(u8, m, "next")) {
                                 const r: Value = evaluateGeneratorNext(obj.generator, self.env) catch .{ .void = {} };
                                 self.push(r);

@@ -204,18 +204,10 @@ pub fn testMatch(input: []const u8, regexp: *Types.RegExpValue) ?usize {
     return if (re.testMatch(input, flags) catch false) 1 else null;
 }
 
-/// Returns the RegExp flags string (e.g. "gi" for /pattern/gi)
+/// Returns the RegExp flags string (e.g. "gi" for /pattern/gi).
+/// The slice points into the owned flags buffer, not a stack local.
 fn flagsString(re: *Types.RegExpValue) []const u8 {
-    var buf: [8]u8 = undefined;
-    var i: usize = 0;
-    if (re.global) { buf[i] = 'g'; i += 1; }
-    if (re.ignore_case) { buf[i] = 'i'; i += 1; }
-    if (re.multiline) { buf[i] = 'm'; i += 1; }
-    if (re.dot_all) { buf[i] = 's'; i += 1; }
-    if (re.unicode) { buf[i] = 'u'; i += 1; }
-    if (re.sticky) { buf[i] = 'y'; i += 1; }
-    if (re.has_indices) { buf[i] = 'd'; i += 1; }
-    return buf[0..i];
+    return re.flags;
 }
 
 /// Get a RegExp property value (source, flags, global, lastIndex, etc.)

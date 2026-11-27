@@ -6,12 +6,12 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 12:50:50 |
-| Commit | `0d12912` |
+| Snapshot | 2026-11-27 13:21:26 |
+| Commit | `2ee4d6f` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 86 |
-| PASS | 82 |
-| FAIL | 3 |
+| PASS | 84 |
+| FAIL | 1 |
 | SKIP | 1 |
 
 ## Section 1 — Headline Counts
@@ -19,29 +19,15 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | Estado | Count |
 |---|---|
 | Test files total | 86 |
-| **PASS** | 82 |
-| **FAIL** | 3 |
+| **PASS** | 84 |
+| **FAIL** | 1 |
 | SKIP (sin .js) | 1 |
 | Specs pendientes | 30 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
 
-### 1. `regex-literal.lou` - FAIL
-
-- exit: Lou 1 / Node 0
-- Primera divergencia (línea 1, 1 vs 5 líneas):
-  - Lou : `error: UnexpectedToken`
-  - Node: `--- regex literal syntax ---`
-
-### 2. `regex-properties.lou` - FAIL
-
-- exit: Lou 0 / Node 0
-- Primera divergencia (línea 1, 19 vs 19 líneas):
-  - Lou : `undefined`
-  - Node: `hello`
-
-### 3. `weakref.lou` - FAIL
+### 1. `weakref.lou` - FAIL
 
 - exit: Lou 0 / Node 0
 - Primera divergencia (línea 5, 12 vs 12 líneas):
@@ -61,7 +47,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `eval-func.md` | pendiente | `eval-func` | sin test |
 | `finalization-registry.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `finalization-registry` | PASS |
 | `for-var-no-init.md` | pendiente (coerción resuelta) — reverificado 2026-11-26 (compat: 57 P… | `for-var-no-init` | PASS |
-| `lexer-regex-literals.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-literal` | FAIL (regex-literal) |
+| `lexer-regex-literals.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-literal` | PASS |
 | `object-key-order.md` | pendiente — detectado 2026-11-26 mientras se arreglaba `for-in-order` | — | sin test |
 | `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |
@@ -71,7 +57,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `promise-withresolvers.md` | pendiente | `promise-withresolvers` | sin test |
 | `proxy.md` | pendiente | `proxy` | sin test |
 | `reflect.md` | pendiente | `reflect` | sin test |
-| `regex-properties.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-properties` | FAIL (regex-properties) |
+| `regex-properties.md` | pendiente — reverificado 2026-11-26 (compat: 54 PASS / 30 FAIL / 1 SK… | `regex-properties` | PASS |
 | `regex-v-flag.md` | pendiente | — | sin test |
 | `string-constructor-bigint.md` | pendiente | `string-constructor` | sin test |
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |

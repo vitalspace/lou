@@ -10,6 +10,7 @@ const coercion = @import("coercion.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
 const booleanMod = @import("./builtins/boolean/boolean.zig");
 const functionMod = @import("./builtins/function/function.zig");
+const regexpMod = @import("./builtins/regex/regexp.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -748,6 +749,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             if (b.operator == .Assign) {
                 if (b.left.* == .MemberAccess) {
                     const obj_val = try evaluate(b.left.MemberAccess.object, env);
+                    if (obj_val == .regexp) {
+                        const val = try evaluate(b.right, env);
+                        regexpMod.setProperty(obj_val.regexp, b.left.MemberAccess.property, val) catch {};
+                        return val;
+                    }
                     if (obj_val != .js_object) return error.InvalidAssignment;
                     const val = try evaluate(b.right, env);
                     if (!try setAccessorProperty(env, obj_val.js_object, b.left.MemberAccess.property, val)) {
@@ -3352,6 +3358,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
             } else if (value == .iterator) {
                 return .{ .void = {} };
+            } else if (value == .regexp) {
+                return regexpMod.getProperty(value.regexp, m.property);
             } else if (value == .js_object) {
                 var cur: ?*ast.ObjectValue = value.js_object;
                 while (cur) |o| {
@@ -3397,6 +3405,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     if ((recv == .function or recv == .closure or recv == .generator or (recv == .js_object and functionMod.isBoundFunction(recv.js_object)))) {
                         return try evaluateFunctionPrototypeMethod(m.method, recv, m.arguments, env);
                     }
+                }
+            }
+
+            if (m.object.* == .Identifier) {
+                if (env.get(m.object.Identifier.name)) |recv| {
+                    if (recv == .regexp) return try callRegExpMethod(recv, m.method, m.arguments, env);
                 }
             }
 
@@ -3810,6 +3824,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     return value.iterator.next(env.allocator, &env.arrays, &env.objects);
                 }
                 return .{ .void = {} };
+            } else if (value == .regexp) {
+                return try callRegExpMethod(value, m.method, m.arguments, env);
             } else if (value == .generator) {
                 if (std.mem.eql(u8, m.method, "next")) {
                     return try evaluateGeneratorNext(value.generator, env);
@@ -4170,6 +4186,22 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
 const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
+
+fn callRegExpMethod(recv: ast.Value, method: []const u8, arg_nodes: []*ast.Node, env: *Environment) anyerror!ast.Value {
+    const builtin_obj = env.getBuiltinObject("RegExp") orelse return .{ .void = {} };
+    const method_fn = builtin_obj.getMethod(method) orelse return .{ .void = {} };
+    var args = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + arg_nodes.len);
+    defer args.deinit(env.allocator);
+    try args.append(env.allocator, recv);
+    for (arg_nodes) |arg| {
+        try args.append(env.allocator, try evaluate(arg, env));
+    }
+    const result = method_fn(args.items, env);
+    return switch (result) {
+        .value => |val| val,
+        .void => .{ .void = {} },
+    };
+}
 
 fn parseAndEvaluate(source: []const u8, env_: *Environment) !ast.Value {
     var lexer = Lexer.init(source);
@@ -5709,4 +5741,34 @@ test "closures keep the function scope alive when created inside a block" {
 
     const r = try parseAndEvaluate("(() => { function make() { let i = 0; return { n() { if (i < 3) { return { value: i, done: false }; } return { done: true }; } }; } const it = make(); return it.n().value; })()", &env_);
     try std.testing.expectEqual(@as(i64, 0), r.integer);
+}
+
+test "regex literals evaluate to RegExp values" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const t = try parseAndEvaluate("typeof /hello/gi", &env_);
+    try std.testing.expectEqualStrings("object", t.string);
+
+    const hit = try parseAndEvaluate("/hello/gi.test(\"HELLO\")", &env_);
+    try std.testing.expect(hit.boolean);
+
+    const src = try parseAndEvaluate("/ab+c/.source", &env_);
+    try std.testing.expectEqualStrings("ab+c", src.string);
+
+    const flags = try parseAndEvaluate("/(?:)/gimsuy.flags", &env_);
+    try std.testing.expectEqualStrings("gimsuy", flags.string);
+}
+
+test "regexp lastIndex is writable and division still divides" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const r = try parseAndEvaluate("(() => { const re = /a/g; re.lastIndex = 2; return re.lastIndex; })()", &env_);
+    try std.testing.expectEqual(@as(i64, 2), r.integer);
+
+    const d = try parseAndEvaluate("6 / 3", &env_);
+    try std.testing.expectEqual(@as(f64, 2.0), d.float);
 }
