@@ -13,6 +13,7 @@ pub const WellKnownSymbolNames = struct {
     pub const species = "species";
     pub const dispose = "dispose";
     pub const asyncDispose = "asyncDispose";
+    pub const asyncIterator = "asyncIterator";
 };
 
 pub fn initSimboloObject(env: *Types.Environment) !void {
@@ -75,6 +76,11 @@ pub fn initSimboloObject(env: *Types.Environment) !void {
         const sym = try Types.SymbolValue.init(allocator, @intFromEnum(Types.WellKnownSymbol.asyncDispose), "asyncDispose");
         try env.symbols.append(allocator, sym);
         try simbolo_obj.properties.put("asyncDispose", .{ .symbol = sym });
+    }
+    {
+        const sym = try Types.SymbolValue.init(allocator, @intFromEnum(Types.WellKnownSymbol.asyncIterator), "asyncIterator");
+        try env.symbols.append(allocator, sym);
+        try simbolo_obj.properties.put("asyncIterator", .{ .symbol = sym });
     }
 
     try env.setConstant("Simbolo", .{ .js_object = simbolo_obj });

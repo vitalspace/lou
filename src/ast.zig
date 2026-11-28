@@ -191,6 +191,7 @@ pub const Node = union(NodeType) {
         variable: []const u8,
         iterable: *Node,
         body: *Node,
+        is_await: bool = false,
     },
     ForInLoop: struct {
         kind: ForOfKind,
@@ -266,6 +267,7 @@ pub const Node = union(NodeType) {
         closure_env: ?*anyopaque = null,
         rest_param: ?[]const u8 = null,
         param_defaults: []?*Node = &[_]?*Node{},
+        is_async: bool = false,
     },
     YieldExpression: struct {
         value: ?*Node, // null for bare yield
@@ -571,6 +573,10 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("ForOfLoop:\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Kind: {s}\n", .{@tagName(f.kind)});
+            if (f.is_await) {
+                try printIdent(writer, depth + 1);
+                try writer.print("Await: true\n", .{});
+            }
             try printIdent(writer, depth + 1);
             try writer.print("Variable: {s}\n", .{f.variable});
             try printIdent(writer, depth + 1);
@@ -744,6 +750,8 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
             try writer.print("GeneratorDeclaration:\n", .{});
             try printIdent(writer, depth + 1);
             try writer.print("Name: {s}\n", .{g.name});
+            try printIdent(writer, depth + 1);
+            try writer.print("Async: {s}\n", .{if (g.is_async) "true" else "false"});
             try printIdent(writer, depth + 1);
             try writer.print("Parameters: ", .{});
             for (g.parameters, 0..) |param, i| {

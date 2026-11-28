@@ -157,6 +157,10 @@ pub const Environment = struct {
     /// This environment exists only as a captured lexical scope (it is not a
     /// call frame and is freed at program exit together with closure_envs).
     is_closure_env: bool = false,
+    /// Set on the persistent environment of a running generator.
+    is_generator: bool = false,
+    /// Set when the running generator was declared with `async`.
+    is_async_generator: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, outer: ?*Environment) !Environment {
         return initWithIo(allocator, outer, if (outer) |o| o.io else null);

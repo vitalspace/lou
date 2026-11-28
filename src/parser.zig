@@ -1744,6 +1744,11 @@ pub const Parser = struct {
 
     fn parseForLoop(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'for'
+        var is_await = false;
+        if (this.current_token.type == .Await) {
+            is_await = true;
+            this.nextToken(); // consume 'await'
+        }
         if (this.current_token.type != .LParen) {
             return error.ExpectedLParen;
         }
@@ -1785,11 +1790,13 @@ pub const Parser = struct {
                         .variable = variable,
                         .iterable = iterable,
                         .body = body,
+                        .is_await = is_await,
                     } };
                     return node;
                 }
 
                 if (this.current_token.type == .In) {
+                    if (is_await) return error.UnexpectedToken;
                     this.nextToken(); // consume 'in'
                     const object = try this.parseExpression();
 
@@ -1864,11 +1871,13 @@ pub const Parser = struct {
                             .variable = temp_name,
                             .iterable = iterable,
                             .body = new_body,
+                            .is_await = is_await,
                         } };
                         return node;
                     }
 
                     if (this.current_token.type == .In) {
+                        if (is_await) return error.UnexpectedToken;
                         this.nextToken(); // consume 'in'
                         const object = try this.parseExpression();
 
@@ -1918,6 +1927,9 @@ pub const Parser = struct {
             this.current_token = saved_current;
             this.peek_token = saved_peek;
         }
+
+        // `for await` only supports the `of` form.
+        if (is_await) return error.UnexpectedToken;
 
         // Parse initialization (optional) — supports comma-separated initializers.
         // For `var` and `let`, each binding may be initialized with `=` OR
@@ -2573,12 +2585,12 @@ pub const Parser = struct {
 
         if (this.current_token.type == .Fn) {
             const node = try this.parseFunctionDeclaration();
-            if (node.* == .FunctionDeclaration) {
-                node.FunctionDeclaration.is_async = true;
-                return node;
+            switch (node.*) {
+                .FunctionDeclaration => node.FunctionDeclaration.is_async = true,
+                .GeneratorDeclaration => node.GeneratorDeclaration.is_async = true,
+                else => return error.UnexpectedToken,
             }
-            // `async function*` is handled by the async-generators spec.
-            return error.UnexpectedToken;
+            return node;
         }
 
         if (this.current_token.type == .LParen) {
@@ -3834,4 +3846,51 @@ test "async remains a valid identifier" {
     const node = try parser.parseStatement();
     try std.testing.expect(node.* == .ConstantDeclaration);
     try std.testing.expectEqualStrings("async", node.ConstantDeclaration.name);
+}
+
+test "async generator declarations are marked async" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("async function* count() { yield 1; }");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+    try std.testing.expect(node.* == .GeneratorDeclaration);
+    try std.testing.expect(node.GeneratorDeclaration.is_async);
+    try std.testing.expectEqualStrings("count", node.GeneratorDeclaration.name);
+}
+
+test "for await loops are marked await" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("for await (const value of values) { console.log(value); }");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+    try std.testing.expect(node.* == .ForOfLoop);
+    try std.testing.expect(node.ForOfLoop.is_await);
+}
+
+test "for await rejects the in form" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("for await (const value in values) {}");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    try std.testing.expectError(error.UnexpectedToken, parser.parseStatement());
+}
+
+test "for await rejects the c-style form" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("for await (;;) {}");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    try std.testing.expectError(error.UnexpectedToken, parser.parseStatement());
+}
+
+test "plain for-of loops are not marked await" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("for (const value of values) { console.log(value); }");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+    try std.testing.expect(node.* == .ForOfLoop);
+    try std.testing.expect(!node.ForOfLoop.is_await);
 }

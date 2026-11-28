@@ -339,7 +339,7 @@ fn printValueCtx(out: anytype, value: Types.Value, ctx: Ctx) void {
         .iterator => out.print("{s}[object Array Iterator]{s}", .{ C, R }) catch {},
         .generator => out.print("{s}[generator]{s}", .{ C, R }) catch {},
         .symbol => |sym| {
-            if (sym.id <= @backingInt(Types.WellKnownSymbol.asyncDispose)) {
+            if (sym.id <= @backingInt(Types.WellKnownSymbol.asyncIterator)) {
                 out.print("{s}Symbol(Symbol.{s}){s}", .{ G, sym.description, R }) catch {};
             } else {
                 out.print("{s}Symbol({s}){s}", .{ G, sym.description, R }) catch {};

@@ -1632,7 +1632,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             env.yield_star_iterator = it;
                         },
                         .js_object => |obj| {
-                            if (obj.properties.get("@@iterator")) |iterator_fn| {
+                            if (obj.properties.get("@@asyncIterator")) |iterator_fn| {
+                                const iterator_val = try callFunctionValue(iterator_fn, &.{}, env, .{ .js_object = obj });
+                                if (iterator_val == .js_object) {
+                                    env.yield_star_js_iterator = iterator_val.js_object;
+                                }
+                            } else if (obj.properties.get("@@iterator")) |iterator_fn| {
                                 const iterator_val = try callFunctionValue(iterator_fn, &.{}, env, .{ .js_object = obj });
                                 if (iterator_val == .js_object) {
                                     env.yield_star_js_iterator = iterator_val.js_object;
@@ -1646,14 +1651,16 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 // Handle generator delegation (cached or fresh)
                 if (env.yield_star_gen) |delegate| {
                     while (true) {
-                        const next_val = try evaluateGeneratorNext(delegate, env);
+                        const next_raw = try evaluateGeneratorNext(delegate, env);
+                        const next_val = if (env.is_async_generator) try awaitValue(env, next_raw) else next_raw;
                         if (next_val != .js_object) break;
                         const done_val = next_val.js_object.properties.get("done") orelse @as(ast.Value, .{ .boolean = true });
                         const is_done = switch (done_val) {
                             .boolean => |b| b,
                             else => true,
                         };
-                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        const raw_val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        const val = if (env.is_async_generator) try awaitValue(env, raw_val) else raw_val;
                         if (is_done) {
                             env.yield_star_gen = null;
                             return val;
@@ -1724,7 +1731,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             env.yield_star_js_iterator = null;
                             return .{ .void = {} };
                         };
-                        const next_val = try callFunctionValue(next_fn, &.{}, env, .{ .js_object = delegate });
+                        const next_raw = try callFunctionValue(next_fn, &.{}, env, .{ .js_object = delegate });
+                        const next_val = if (env.is_async_generator) try awaitValue(env, next_raw) else next_raw;
                         if (next_val != .js_object) {
                             env.yield_star_js_iterator = null;
                             return .{ .void = {} };
@@ -1734,7 +1742,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             .boolean => |b| b,
                             else => true,
                         };
-                        const val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        const raw_val = next_val.js_object.properties.get("value") orelse @as(ast.Value, .{ .void = {} });
+                        const val = if (env.is_async_generator) try awaitValue(env, raw_val) else raw_val;
                         if (is_done) {
                             env.yield_star_js_iterator = null;
                             return val;
@@ -1750,7 +1759,8 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 
                 return .{ .void = {} };
             } else {
-                const val: ast.Value = if (y.value) |v| try evaluate(v, env) else .{ .void = {} };
+                const raw_val: ast.Value = if (y.value) |v| try evaluate(v, env) else .{ .void = {} };
+                const val = if (env.is_async_generator) try awaitValue(env, raw_val) else raw_val;
                 env.yield_hit = true;
                 env.yield_value = val;
                 return val;
@@ -1894,7 +1904,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             } else false;
             // A for-let loop whose body creates a closure needs a fresh
             // binding per iteration so each closure sees its own copy.
-            const per_iter = is_let_init and ast.containsClosure(f.body);
+            const per_iter = is_let_init and (ast.containsClosure(f.body) or env.is_generator);
             if (!per_iter) {
                 debugPrint("[OPTIMIZATION] Trying optimizeSimpleForLoop, pre_limit={?}\n", .{pre_limit});
                 if (try optimizations.optimizeSimpleForLoop(f, env, pre_limit)) |result| {
@@ -1944,6 +1954,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             defer if (is_let_init and !per_iter) loop_env_buf.deinit();
 
             var result: ast.Value = .{ .float = 0.0 };
+            var loop_yielded = false;
 
             // Run init on first entry; skip on generator yield re-entry
             if (f.init) |init| {
@@ -1995,12 +2006,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
                 result = try evaluate(f.body, eval_env);
                 if (eval_env.yield_hit) {
+                    const yielded_value = eval_env.yield_value;
                     // Track which for-loop node yielded so init is skipped on re-entry
                     env.for_yield_node = @ptrCast(node);
+                    loop_yielded = true;
                     // If yield came from an active yield*, don't advance the loop variable.
                     // yield* spans multiple generator.next() calls — the loop should not
                     // advance until yield* completes and the body finishes normally.
-                    env.for_yield_iter_env = @ptrCast(eval_env);
                     if (eval_env.yield_star_gen == null and eval_env.yield_star_array == null) {
                         if (per_iter) {
                             const next_scope = try Environment.initIterHeap(env.allocator, env);
@@ -2013,8 +2025,16 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             _ = try evaluate(inc, eval_env);
                         }
                     }
+                    // Persist the scope AFTER advancing the loop variable so the
+                    // next next() re-enters with the incremented value.
+                    env.for_yield_iter_env = @ptrCast(eval_env);
                     eval_env.yield_caught_by_loop = true;
-                    result = eval_env.yield_value;
+                    result = yielded_value;
+                    if (eval_env != env) {
+                        env.yield_hit = true;
+                        env.yield_value = yielded_value;
+                        env.yield_caught_by_loop = true;
+                    }
                     eval_env.yield_hit = false; // Consume so outer loops don't also catch it
                     break;
                 }
@@ -2061,7 +2081,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
 
             // For-loop completed without yielding — clear for_yield_node
-            if (env.for_yield_node == @as(?*const anyopaque, @ptrCast(node))) {
+            if (!loop_yielded and env.for_yield_node == @as(?*const anyopaque, @ptrCast(node))) {
                 env.for_yield_node = null;
                 env.for_yield_iter_env = null;
             }
@@ -2071,6 +2091,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             var result: ast.Value = .{ .float = 0.0 };
             const fo_my_label = env.pending_loop_label;
             env.pending_loop_label = null;
+
+            // `for await` eagerly awaits the iterable into an array, then reuses
+            // the cache-friendly array loop below. This keeps yield/break/continue
+            // re-entry working inside async generators.
+            if (f.is_await and env.for_of_array == null and env.for_of_gen == null) {
+                const awaited_iterable = try evaluate(f.iterable, env);
+                env.for_of_array = try collectForAwaitValues(env, awaited_iterable);
+                env.for_of_array_index = 0;
+            }
 
             // On re-entry after yield, check for cached iteration state first
             // (these fields persist in the generator's environment)
@@ -4938,6 +4967,7 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             const gen_decl = func_node.GeneratorDeclaration;
             const gen_obj = try GeneratorObject.init(env.allocator, @ptrCast(func_node), gen_decl.parameters);
             errdefer gen_obj.deinit();
+            gen_obj.is_async = gen_decl.is_async;
             var gen_env = try Environment.init(env.allocator, env);
             errdefer gen_env.deinit();
             if (this_val) |tv| {
@@ -5283,7 +5313,116 @@ fn parseProgramNoFree(source: []const u8, env_: *Environment) !struct { statemen
     return .{ .statements = statements, .parser = parser };
 }
 
+fn collectForAwaitValues(env: *Environment, iterable: ast.Value) !*ast.ArrayObject {
+    const values = try ast.ArrayObject.init(env.allocator);
+    errdefer values.deinit();
+
+    switch (iterable) {
+        .array => |arr| {
+            for (arr.elements.items) |item| {
+                try values.elements.append(env.allocator, try awaitValue(env, item));
+            }
+        },
+        .string => |s| {
+            var i: usize = 0;
+            while (i < s.len) {
+                const cp_len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+                try values.elements.append(env.allocator, .{ .string = s[i .. i + cp_len] });
+                i += cp_len;
+            }
+        },
+        .generator => |gen| {
+            while (true) {
+                const next_raw = try evaluateGeneratorNext(gen, env);
+                const next_res = try awaitValue(env, next_raw);
+                if (next_res != .js_object) break;
+                const done = next_res.js_object.properties.get("done") orelse ast.Value{ .boolean = true };
+                if (done == .boolean and done.boolean) break;
+                const value = next_res.js_object.properties.get("value") orelse ast.Value{ .void = {} };
+                try values.elements.append(env.allocator, try awaitValue(env, value));
+            }
+        },
+        .iterator => |iter| {
+            while (true) {
+                const next_res = iter.next(env.allocator, &env.arrays, &env.objects);
+                if (next_res != .js_object) break;
+                const done = next_res.js_object.properties.get("done") orelse ast.Value{ .boolean = true };
+                if (done == .boolean and done.boolean) break;
+                const value = next_res.js_object.properties.get("value") orelse ast.Value{ .void = {} };
+                try values.elements.append(env.allocator, try awaitValue(env, value));
+            }
+        },
+        .js_object => |obj| {
+            if (obj.properties.get("@@asyncIterator")) |iter_fn| {
+                const iterator = try callFunctionValue(iter_fn, &[_]ast.Value{}, env, .{ .js_object = obj });
+                if (iterator != .js_object) return error.TypeError;
+                try collectForAwaitIterator(env, values, iterator.js_object);
+            } else if (obj.properties.get("@@iterator")) |iter_fn| {
+                const iterator = try callFunctionValue(iter_fn, &[_]ast.Value{}, env, .{ .js_object = obj });
+                if (iterator != .js_object) return error.TypeError;
+                try collectForAwaitIterator(env, values, iterator.js_object);
+            } else {
+                return error.TypeError;
+            }
+        },
+        else => return error.TypeError,
+    }
+    try env.arrays.append(env.allocator, values);
+    return values;
+}
+
+fn collectForAwaitIterator(env: *Environment, values: *ast.ArrayObject, iterator: *ast.ObjectValue) !void {
+    while (true) {
+        const next_fn = iterator.properties.get("next") orelse break;
+        const next_raw = try callFunctionValue(next_fn, &[_]ast.Value{}, env, .{ .js_object = iterator });
+        const next_res = try awaitValue(env, next_raw);
+        if (next_res != .js_object) break;
+        const done = next_res.js_object.properties.get("done") orelse ast.Value{ .boolean = true };
+        if (done == .boolean and done.boolean) break;
+        const value = next_res.js_object.properties.get("value") orelse ast.Value{ .void = {} };
+        try values.elements.append(env.allocator, try awaitValue(env, value));
+    }
+}
+
+fn wrapAsyncGeneratorResult(gen: *GeneratorObject, env: *Environment, value: ast.Value) !ast.Value {
+    if (!gen.is_async) return value;
+    return promiseMod.createResolved(env, value);
+}
+
 pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) anyerror!ast.Value {
+    const result = evaluateGeneratorNextSync(gen, caller_env) catch |err| {
+        if (!gen.is_async) return err;
+        const reason = blk: {
+            if (caller_env.throw_hit) {
+                const value = caller_env.throw_value;
+                caller_env.throw_hit = false;
+                caller_env.throw_value = .{ .void = {} };
+                break :blk value;
+            }
+            if (gen.gen_env) |env_ptr| {
+                const gen_env: *Environment = @alignCast(@ptrCast(env_ptr));
+                if (gen_env.throw_hit) {
+                    const value = gen_env.throw_value;
+                    gen_env.throw_hit = false;
+                    gen_env.throw_value = .{ .void = {} };
+                    break :blk value;
+                }
+            }
+            break :blk ast.Value{ .string = "Error" };
+        };
+        gen.done = true;
+        if (gen.gen_env) |done_env_ptr| {
+            const done_env: *Environment = @alignCast(@ptrCast(done_env_ptr));
+            done_env.deinit();
+            gen.allocator.destroy(done_env);
+            gen.gen_env = null;
+        }
+        return promiseMod.createRejected(caller_env, reason);
+    };
+    return wrapAsyncGeneratorResult(gen, caller_env, result);
+}
+
+fn evaluateGeneratorNextSync(gen: *GeneratorObject, caller_env: *Environment) anyerror!ast.Value {
     if (gen.done) {
         // Return {value: undefined, done: true}
         var result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
@@ -5302,9 +5441,13 @@ pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) an
     var gen_env: *Environment = undefined;
     if (gen.gen_env) |existing_env| {
         gen_env = @alignCast(@ptrCast(existing_env));
+        gen_env.is_generator = true;
+        gen_env.is_async_generator = gen.is_async;
     } else {
         // First call: create and store the environment
         var new_env = try Environment.init(caller_env.allocator, caller_env);
+        new_env.is_generator = true;
+        new_env.is_async_generator = gen.is_async;
         for (gen_decl.parameters, 0..) |param, idx| {
             _ = idx;
             try new_env.set(param, .{ .void = {} });
@@ -5326,6 +5469,7 @@ pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) an
     };
 
     var result: ast.Value = .{ .void = {} };
+    var returned_value = false;
 
     // Evaluate statements starting from current IP.
     while (gen.ip < statements.len) {
@@ -5338,7 +5482,9 @@ pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) an
             } else {
                 result = .{ .void = {} };
             }
+            if (gen.is_async) result = try awaitValue(gen_env, result);
             gen.done = true;
+            returned_value = true;
             break;
         }
 
@@ -5379,6 +5525,7 @@ pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) an
         if (gen_env.return_hit) {
             // A return occurred inside the generator — generator is done.
             // result holds the return value.
+            if (gen.is_async) result = try awaitValue(gen_env, result);
             gen.done = true;
             // Free gen_env immediately when generator completes
             if (gen.gen_env) |done_env_ptr| {
@@ -5412,13 +5559,18 @@ pub fn evaluateGeneratorNext(gen: *GeneratorObject, caller_env: *Environment) an
     // Return {value: result, done: true} — result holds the return value if a ReturnStatement was hit
     var done_result = ast.ObjectValue.init(caller_env.allocator) catch return .{ .void = {} };
     errdefer done_result.deinit();
-    done_result.properties.put("value", result) catch {};
+    done_result.properties.put("value", if (returned_value) result else .{ .void = {} }) catch {};
     done_result.properties.put("done", .{ .boolean = true }) catch {};
     caller_env.objects.append(caller_env.allocator, done_result) catch { done_result.deinit(); return .{ .void = {} }; };
     return .{ .js_object = done_result };
 }
 
 pub fn evaluateGeneratorReturn(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    const result = try evaluateGeneratorReturnSync(gen, caller_env, args);
+    return wrapAsyncGeneratorResult(gen, caller_env, result);
+}
+
+fn evaluateGeneratorReturnSync(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
     const value = if (args.len > 0) args[0] else @as(ast.Value, .{ .void = {} });
 
     if (gen.done) {
@@ -5447,6 +5599,22 @@ pub fn evaluateGeneratorReturn(gen: *GeneratorObject, caller_env: *Environment, 
 }
 
 pub fn evaluateGeneratorThrow(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    const result = evaluateGeneratorThrowSync(gen, caller_env, args) catch |err| {
+        if (!gen.is_async) return err;
+        const reason = if (caller_env.throw_hit)
+            caller_env.throw_value
+        else if (args.len > 0)
+            args[0]
+        else
+            ast.Value{ .string = "Error" };
+        caller_env.throw_hit = false;
+        caller_env.throw_value = .{ .void = {} };
+        return promiseMod.createRejected(caller_env, reason);
+    };
+    return wrapAsyncGeneratorResult(gen, caller_env, result);
+}
+
+fn evaluateGeneratorThrowSync(gen: *GeneratorObject, caller_env: *Environment, args: []ast.Value) anyerror!ast.Value {
     _ = caller_env;
     _ = args;
 
@@ -6885,4 +7053,77 @@ test "Promise.all waits for deferred resolutions" {
         &env_,
     );
     try std.testing.expectEqual(@as(i64, 8), (try parseAndEvaluate("out", &env_)).integer);
+}
+
+test "async generator next returns a Promise" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var value = 0; var wasPromise = false; async function* g() { yield 1; yield 2; } const p = g().next(); wasPromise = p instanceof Promise; p.then(r => { value = r.value; });",
+        &env_,
+    );
+    try std.testing.expect((try parseAndEvaluate("wasPromise", &env_)).boolean);
+    try std.testing.expectEqual(@as(i64, 1), (try parseAndEvaluate("value", &env_)).integer);
+}
+
+test "for await consumes async generators" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = ''; async function* g() { yield 'a'; yield 'b'; } async function main() { for await (const value of g()) { out += value; } } main();",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("ab", (try parseAndEvaluate("out", &env_)).string);
+}
+
+test "async generators return undefined after natural completion" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = 'bad'; async function* g() { yield 1; } async function main() { const it = g(); await it.next(); const r = await it.next(); if (r.done && r.value === undefined) out = 'ok'; } main();",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("ok", (try parseAndEvaluate("out", &env_)).string);
+}
+
+test "async generators await return values" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = 'bad'; async function* g() { return Promise.resolve('done'); } async function main() { const r = await g().next(); if (r.done && r.value === 'done') out = 'ok'; } main();",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("ok", (try parseAndEvaluate("out", &env_)).string);
+}
+
+test "async generator rejected yield rejects next" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = 'bad'; async function* g() { yield Promise.reject('boom'); } async function main() { try { await g().next(); } catch (error) { out = error; } } main();",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("boom", (try parseAndEvaluate("out", &env_)).string);
+}
+
+test "generator for-let loops resume with the advanced binding" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    const result = try parseAndEvaluate(
+        "(() => { function* g() { for (let i = 1; i <= 3; i++) yield i; } let out = ''; for (const n of g()) out += n; return out; })()",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("123", result.string);
 }

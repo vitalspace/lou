@@ -298,6 +298,7 @@ pub const WellKnownSymbol = enum(u64) {
     species = 8,
     dispose = 9,
     asyncDispose = 10,
+    asyncIterator = 11,
 };
 
 pub fn symbolPropertyName(allocator: std.mem.Allocator, description: []const u8) ![]const u8 {
@@ -473,6 +474,7 @@ pub const GeneratorObject = struct {
     gen_env: ?*anyopaque, // Opaque pointer to the generator's persistent environment
     ip: usize, // Instruction pointer (index into body statements)
     done: bool,
+    is_async: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, func_node: *AstNode, params: []const []const u8) !*GeneratorObject {
         const obj = try allocator.create(GeneratorObject);

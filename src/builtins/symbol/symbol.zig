@@ -25,6 +25,7 @@ const WELL_KNOWN = [_]Types.WellKnownSymbol{
     .species,
     .dispose,
     .asyncDispose,
+    .asyncIterator,
 };
 
 /// Populate `env` with the `Symbol` namespace and its well-known symbols.
