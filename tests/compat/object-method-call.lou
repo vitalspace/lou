@@ -2,16 +2,11 @@
 // Covers the object-method-call spec: function(){} and arrow functions as
 // object property values, including this-binding and recursion.
 //
-// Excluded (known parser gaps — tracked in spec followups):
-//   - Zero-arg arrow with simple literal body followed by another property:
-//       { f: () => 99, g: ... }      // ExpectedCommaOrRBrace
-//   - Multi-word parenthesized single-arg arrow followed by another prop:
-//       { singleArrow: (x) => x * 3, twoArgArrow: ... }  // ExpectedCommaOrRBrace
-//       { greet: name => "Hello, " + name }  // when adjacent to another prop
-//   - Function + arrow combo in same literal:
-//       { fn: function(a,b){...}, arrow: (a,b) => a+b }   // ExpectedPropertyName
-//     The Arrow expression interfering with property-list parsing — bug in
-//     parser.zig parseObjectLiteral at line 806 plus parseArrowFunction.
+// Parser edge cases (zero-arg/parenthesized arrows, function+arrow in the
+// same literal, keyword-like keys) are covered by
+// tests/compat/object-method-call-edge-cases.{js,lou} and parser unit tests.
+// Canonical fix record:
+// specs/todos/completadas/object-method-call-edge-parser-fixes.md.
 
 const o1 = { f: function() { return 42; } };
 console.log(o1.f());

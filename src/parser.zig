@@ -3729,6 +3729,33 @@ test "parse object literal - non-block function expression as value" {
         try std.testing.expect(parser.current_token.type == .Comma);
     }
 }
+test "parse object literal - function expression block followed by arrow property" {
+    // Regression guard for the closed function-and-arrow edge case:
+    // a block-bodied function expression and a parenthesized arrow must
+    // coexist as separate properties without either parser consuming the
+    // comma between them or the next property key.
+    const allocator = std.testing.allocator;
+    const input = "{ fn: function(a, b) { return a + b; }, arrow: (a, b) => a + b }";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+
+    try std.testing.expect(node.* == .ObjectLiteral);
+    try std.testing.expectEqual(@as(usize, 2), node.ObjectLiteral.properties.len);
+
+    try std.testing.expectEqualStrings("fn", node.ObjectLiteral.properties[0].key);
+    try std.testing.expect(node.ObjectLiteral.properties[0].value.* == .FunctionDeclaration);
+    try std.testing.expect(node.ObjectLiteral.properties[0].value.FunctionDeclaration.body.* == .BlockStatement);
+    try std.testing.expectEqual(@as(usize, 2), node.ObjectLiteral.properties[0].value.FunctionDeclaration.parameters.len);
+
+    try std.testing.expectEqualStrings("arrow", node.ObjectLiteral.properties[1].key);
+    try std.testing.expect(node.ObjectLiteral.properties[1].value.* == .ArrowFunction);
+    try std.testing.expect(node.ObjectLiteral.properties[1].value.ArrowFunction.body.* == .BinaryExpression);
+    try std.testing.expectEqual(@as(usize, 2), node.ObjectLiteral.properties[1].value.ArrowFunction.parameters.len);
+
+    try std.testing.expect(parser.current_token.type == .EOF);
+}
 test "regex literal parses to a RegExp constructor call" {
     const allocator = std.testing.allocator;
     const input = "/ab+c/gi";

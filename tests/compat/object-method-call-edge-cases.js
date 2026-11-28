@@ -1,26 +1,33 @@
-// Regression guard for the closed object-method-call edge cases in
-// parser.zig (parseArrowFunction body parser).
-//
-// Each block reproduces one of the closed bugs from the consolidated spec
-// specs/todos/pendientes/object-method-call-edge-parser-fixes.md:
+// Regression guard for the closed object-method-call parser edge cases.
 //
 //   A. zero-arg arrow + follow-up property
 //      { f: () => 99, g: 1 }
 //
-//   B. parens single-arg arrow + follow-up property
+//   B. parenthesized arrow + follow-up property
 //      { singleArrow: (x) => x * 3, other: 2 }
 //
-// Both pre-fix failed with ExpectedCommaOrRBrace in parseArrowFunction body.
-// Post-fix they must produce identical output between Node and Lou.
+//   C. block-bodied function expression next to an arrow, and a function
+//      expression followed by another property
+//      { fn: function(a, b) { ... }, arrow: (a, b) => a + b }
 //
-// C-1 (non-block function body + follow-up) is NOT covered here because
-// the resulting syntax — `function() 1` — is invalid ES: function bodies
-// must be BlockStatements per ECMAScript. That subcase was a parser
-// consolidation that has no equivalent in standard JS, so it lives only
-// in the parser unit tests. See the consolidated spec for context.
+// Pre-fix, A/B failed with ExpectedCommaOrRBrace and C failed with
+// ExpectedPropertyName/token drift. All are valid ES and must stay
+// byte-identical to Node.
+//
+// Canonical fix record:
+// specs/todos/completadas/object-method-call-edge-parser-fixes.md
+//
+// C-1 (`function() 1`, a non-block function body) is invalid ES; it is
+// enforced by parser unit tests instead of this compat fixture.
 
 const a = { f: () => 99, g: 1 };
 console.log(a.f(), a.g);
 
 const b = { singleArrow: (x) => x * 3, other: 2 };
 console.log(b.singleArrow(4), b.other);
+
+const c = { fn: function(a, b) { return a + b; }, arrow: (a, b) => a + b };
+console.log(c.fn(1, 2), c.arrow(3, 4));
+
+const d = { fn: function() { return 7; }, other: 8 };
+console.log(d.fn(), d.other);

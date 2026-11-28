@@ -6,8 +6,8 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 19:46:15 |
-| Commit | `d642e6b` |
+| Snapshot | 2026-11-27 19:57:57 |
+| Commit | `de10fa0` |
 | Binario | `zig-out/bin/lou` |
 | Fixtures | 104 |
 | PASS | 104 |
@@ -22,7 +22,7 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | **PASS** | 104 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 7 |
+| Specs pendientes | 4 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -31,9 +31,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Spec | Estado declarado | Test | Resultado |
 |---|---|---|---|
-| `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
-| `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |
-| `object-method-call-edge-zero-arg-arrow.md` | pendiente | — | sin test |
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |
 | `temporal.md` | pendiente | `temporal` | sin test |

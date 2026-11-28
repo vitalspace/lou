@@ -4,7 +4,7 @@
 
 completado (4 of 4 subcases fixed: A, B, C-1, C-2)
 
-Last updated: 2026-06-29.
+Last updated: 2026-11-27.
 
 Note on prior C-1 framing: an earlier turn in this fix bundle framed
 the C-1 parser unit test as "currently missing — list as TODO" (in a
@@ -158,11 +158,9 @@ message but have completely different root causes.
     a regression guard for plain identifier / string / numeric keys,
     and a bounds-guard negative test (`{ ;: 1 }`).
   - **Dedicated spec**: [object-method-call-edge-reserved-keyword-key.md](./object-method-call-edge-reserved-keyword-key.md).
-  - **Compat**: not exercised — the C-2 repros are valid ES, but the
-    equivalent pre-fix-vs-post-fix regression shape can be inferred
-    from any anonymous-keyword-key input. If a future compat test is
-    desired, `tests/compat/object-method-call-edge-reserved-keyword.{js,lou}`
-    could be added; not prioritised since parser unit tests cover it.
+  - **Compat**: exercised by `object-method-call-edge-cases.{js,lou}`
+    (`fn:` as a property key, including the mixed `fn` + `arrow` literal)
+    and by `object-method-call.{js,lou}`.
 
 ### Estado del caso mixto `fn: ..., arrow: ...`
 
@@ -186,7 +184,7 @@ different surfaces** depending on what's testable:
 | A       | ✅ `tests/compat/object-method-call-edge-cases.{js,lou}` | indirect | this spec |
 | B       | ✅ `tests/compat/object-method-call-edge-cases.{js,lou}` | indirect | this spec |
 | C-1     | ❌ (invalid ES) | ✅ `test "parse object literal - non-block function expression as value"` in `src/parser.zig` | this spec |
-| C-2     | ❌ (no compat file — `f` / `g` in A and B are plain identifiers, not reserved keywords; a dedicated compat file for C-2 would just duplicate the unit-test coverage) | ✅ 6 tests at end of `src/parser.zig` | [object-method-call-edge-reserved-keyword-key.md](./object-method-call-edge-reserved-keyword-key.md) |
+| C-2     | ✅ `tests/compat/object-method-call-edge-cases.{js,lou}` | ✅ 6 tests at end of `src/parser.zig` | [object-method-call-edge-reserved-keyword-key.md](./object-method-call-edge-reserved-keyword-key.md) |
 
 This asymmetry is intentional: A and B are valid ES shapes with Node
 baselines; C-1 has no Node baseline (Node refuses `function() 1`); C-2
@@ -242,10 +240,14 @@ includes reserved words).
 - [x] 1 parser unit test for C-1 (2 phases: structural + state) at end
       of `src/parser.zig`.
 - [x] Compat test `tests/compat/object-method-call-edge-cases.{js,lou}`
-      with subcases A and B (C-1 explicitly excluded; rationale
-      documented in the file's header).
+      with subcases A and B, plus the mixed function+arrow and
+      function+follow-up-property shapes (C-1 explicitly excluded;
+      rationale documented in the file's header).
+- [x] 1 parser unit test for the mixed block-function + arrow literal
+      (`parse object literal - function expression block followed by
+      arrow property`).
 - [x] Dedicated spec for C-2:
-      `specs/todos/pendientes/object-method-call-edge-reserved-keyword-key.md`.
+      `specs/todos/completadas/object-method-call-edge-reserved-keyword-key.md`.
 - [x] This consolidated spec updated to reflect actual delivered state.
 
 ### [ ] Open (cosmetic only)
@@ -312,7 +314,7 @@ bash /home/lou/tests/compat/run.sh
   pair for A and B (C-1 explicitly excluded with rationale in header).
 - `tests/compat/object-method-call.{js,lou}` — pre-existing; still
   passes (multiple closed paths verified here too).
-- `specs/todos/pendientes/object-method-call-edge-reserved-keyword-key.md` —
+- `specs/todos/completadas/object-method-call-edge-reserved-keyword-key.md` —
   dedicated spec for C-2 (cross-linked from this consolidated spec).
 - This consolidated spec — updated to reflect actual delivered state.
 
