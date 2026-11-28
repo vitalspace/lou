@@ -177,6 +177,25 @@ pub fn PromiseRejectStatic(args: []Types.Value, env: *Types.Environment) Types.B
     return .{ .value = createRejected(env, reason) };
 }
 
+pub fn PromiseWithResolvers(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    _ = args;
+
+    const promise = createPending(env);
+    if (!isPromise(promise)) return .{ .value = .{ .void = {} } };
+
+    const resolve_fn = makeResolver(env, promise, false);
+    const reject_fn = makeResolver(env, promise, true);
+    if (!isResolver(resolve_fn) or !isResolver(reject_fn)) {
+        return .{ .value = .{ .void = {} } };
+    }
+
+    const resolvers = makeObject(env) catch return .{ .value = .{ .void = {} } };
+    resolvers.properties.put("promise", promise) catch {};
+    resolvers.properties.put("resolve", resolve_fn) catch {};
+    resolvers.properties.put("reject", reject_fn) catch {};
+    return .{ .value = .{ .js_object = resolvers } };
+}
+
 fn arrayFromValues(env: *Types.Environment, values: []const Types.Value) Types.Value {
     const arr = ast.ArrayObject.init(env.allocator) catch return .{ .void = {} };
     env.arrays.append(env.allocator, arr) catch {};
@@ -266,6 +285,7 @@ pub const PROMISE_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "finally", .func = PromiseFinally },
     .{ .name = "resolve", .func = PromiseResolveStatic },
     .{ .name = "reject", .func = PromiseRejectStatic },
+    .{ .name = "withResolvers", .func = PromiseWithResolvers },
     .{ .name = "all", .func = PromiseAll },
     .{ .name = "allSettled", .func = PromiseAllSettled },
     .{ .name = "race", .func = PromiseRace },

@@ -2976,7 +2976,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .void => "undefined",
                 .null => "object",
                 .array => "object",
-                .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null or functionMod.isBoundFunction(val.js_object)) "function" else "object",
+                .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null or functionMod.isBoundFunction(val.js_object) or isCallableValue(val)) "function" else "object",
                 .function => "function",
                 .closure => "function",
                 .object => "object",
@@ -7053,6 +7053,31 @@ test "Promise.all waits for deferred resolutions" {
         &env_,
     );
     try std.testing.expectEqual(@as(i64, 8), (try parseAndEvaluate("out", &env_)).integer);
+}
+
+test "Promise.withResolvers settles promises independently" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = ''; const first = Promise.withResolvers(); const second = Promise.withResolvers(); first.resolve('a'); first.reject('ignored'); second.reject('b'); Promise.all([first.promise, second.promise.catch(e => 'caught:' + e)]).then(v => { out = v.join(','); });",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("a,caught:b", (try parseAndEvaluate("out", &env_)).string);
+}
+
+test "Promise.withResolvers adopts promises and exposes functions" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var out = ''; var kinds = ''; const inner = Promise.withResolvers(); const outer = Promise.withResolvers(); kinds = typeof outer.resolve + typeof outer.reject; outer.resolve(inner.promise); inner.resolve('adopted'); outer.promise.then(v => { out = v; });",
+        &env_,
+    );
+    try std.testing.expectEqualStrings("functionfunction", (try parseAndEvaluate("kinds", &env_)).string);
+    try std.testing.expectEqualStrings("adopted", (try parseAndEvaluate("out", &env_)).string);
 }
 
 test "async generator next returns a Promise" {

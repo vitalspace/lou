@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 19:00:34 |
-| Commit | `fd9961a` |
+| Snapshot | 2026-11-27 19:05:30 |
+| Commit | `04df049` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 102 |
-| PASS | 102 |
+| Fixtures | 103 |
+| PASS | 103 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 102 |
-| **PASS** | 102 |
+| Test files total | 103 |
+| **PASS** | 103 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 9 |
+| Specs pendientes | 8 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -34,7 +34,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-zero-arg-arrow.md` | pendiente | — | sin test |
-| `promise-withresolvers.md` | pendiente | `promise-withresolvers` | sin test |
 | `proxy.md` | pendiente | `proxy` | sin test |
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |
