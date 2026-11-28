@@ -2,6 +2,7 @@ const std = @import("std");
 const Types = @import("../../types/types.zig");
 const Ast = @import("../../ast.zig");
 const Environment = @import("../../evaluator.zig").Environment;
+const typedArrayMod = @import("../typedarray.zig");
 
 pub fn Keys(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -20,6 +21,16 @@ pub fn Keys(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
             arr.deinit();
             return .{ .value = .{ .void = {} } };
         };
+        return .{ .value = .{ .array = arr } };
+    }
+
+    if (typedArrayMod.isTypedArray(obj)) {
+        const arr = Ast.ArrayObject.init(env.allocator) catch return .{ .value = .{ .void = {} } };
+        env.arrays.append(env.allocator, arr) catch {
+            arr.deinit();
+            return .{ .value = .{ .void = {} } };
+        };
+        typedArrayMod.appendForInKeys(obj, env, arr);
         return .{ .value = .{ .array = arr } };
     }
 

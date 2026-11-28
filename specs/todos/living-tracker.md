@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 19:57:57 |
-| Commit | `de10fa0` |
+| Snapshot | 2026-11-27 20:53:28 |
+| Commit | `7028a9c` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 104 |
-| PASS | 104 |
+| Fixtures | 105 |
+| PASS | 105 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 104 |
-| **PASS** | 104 |
+| Test files total | 105 |
+| **PASS** | 105 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 4 |
+| Specs pendientes | 3 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -34,7 +34,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 | `string-icu.md` | ❌ PENDIENTE | — | sin test |
 | `structured-clone.md` | pendiente | `structured-clone` | sin test |
 | `temporal.md` | pendiente | `temporal` | sin test |
-| `typed-arrays.md` | pendiente | `typed-arrays` | sin test |
 
 ## Section 4 — Drift: specs en `hechos/` cuyo test sigue FAIL
 

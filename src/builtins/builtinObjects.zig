@@ -28,6 +28,7 @@ const intl = @import("./intl/intl.zig");
 const NUMBER_OBJECT = @import("./number/number_object.zig").NUMBER_OBJECT;
 const REGEXP_OBJECT = @import("./regex/regexp.zig").REGEXP_OBJECT;
 const PROXY_OBJECT = @import("./proxy.zig").PROXY_OBJECT;
+const typed = @import("./typedarray.zig");
 
 pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &CONSOLE_OBJECT,
@@ -62,4 +63,18 @@ pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &NUMBER_OBJECT,
     &REGEXP_OBJECT,
     &PROXY_OBJECT,
+    &typed.ARRAYBUFFER_OBJECT,
+    &typed.SHARED_ARRAYBUFFER_OBJECT,
+    &typed.DATAVIEW_OBJECT,
+    &typed.INT8ARRAY_OBJECT,
+    &typed.UINT8ARRAY_OBJECT,
+    &typed.UINT8CLAMPEDARRAY_OBJECT,
+    &typed.INT16ARRAY_OBJECT,
+    &typed.UINT16ARRAY_OBJECT,
+    &typed.INT32ARRAY_OBJECT,
+    &typed.UINT32ARRAY_OBJECT,
+    &typed.FLOAT32ARRAY_OBJECT,
+    &typed.FLOAT64ARRAY_OBJECT,
+    &typed.BIGINT64ARRAY_OBJECT,
+    &typed.BIGUINT64ARRAY_OBJECT,
 };

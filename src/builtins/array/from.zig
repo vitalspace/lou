@@ -4,6 +4,7 @@ const Ast = @import("../../ast.zig");
 const callbackThrow = @import("../callbacks.zig");
 const Environment = @import("../../evaluator.zig").Environment;
 const evaluate = @import("../../evaluator.zig").evaluate;
+const typedArrayMod = @import("../typedarray.zig");
 
 fn getFuncNode(arg: Types.Value, env: *Types.Environment) ?*Ast.Node {
     return switch (arg) {
@@ -55,6 +56,24 @@ pub fn From(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     }
 
     const source = args[0];
+
+    if (typedArrayMod.isTypedArray(source)) {
+        const arr = Ast.ArrayObject.init(env.allocator) catch {
+            return .{ .value = .{ .void = {} } };
+        };
+        env.arrays.append(env.allocator, arr) catch {
+            arr.deinit();
+            return .{ .value = .{ .void = {} } };
+        };
+        const len = typedArrayMod.getLength(source);
+        var idx: usize = 0;
+        while (idx < len) : (idx += 1) {
+            arr.elements.append(env.allocator, typedArrayMod.getElement(source, idx, env)) catch {
+                return .{ .value = .{ .void = {} } };
+            };
+        }
+        return .{ .value = .{ .array = arr } };
+    }
 
     var new_array = Ast.ArrayObject.init(env.allocator) catch {
         return .{ .value = .{ .void = {} } };

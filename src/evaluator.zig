@@ -13,6 +13,7 @@ const functionMod = @import("./builtins/function/function.zig");
 const regexpMod = @import("./builtins/regex/regexp.zig");
 const promiseMod = @import("./builtins/promise/promise.zig");
 const proxyMod = @import("./builtins/proxy.zig");
+const typedArrayMod = @import("./builtins/typedarray.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -30,6 +31,12 @@ fn evaluateArgs(args_nodes: []*ast.Node, env: *Environment) anyerror!std.ArrayLi
                     }
                 },
                 .js_object => |obj| {
+                    if (typedArrayMod.isTypedArray(spread_val)) {
+                        const len = typedArrayMod.getLength(spread_val);
+                        var i: usize = 0;
+                        while (i < len) : (i += 1) try result.append(env.allocator, typedArrayMod.getElement(spread_val, i, env));
+                        break;
+                    }
                     const type_tag = obj.properties.get("@@type");
                     if (type_tag != null and type_tag.? == .string) {
                         if (std.mem.eql(u8, type_tag.?.string, "Set")) {
@@ -412,6 +419,9 @@ fn readIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value) !ast.V
         const key = try ocKeyString(key_val, env);
         return try proxyGet(env, obj_val, key, obj_val);
     }
+    if (typedArrayMod.isTypedArray(obj_val)) {
+        return typedArrayMod.getIndex(obj_val, key_val, env);
+    }
     if (obj_val == .js_object) {
         const key = try valueToKeyString(env, key_val);
         return obj_val.js_object.properties.get(key) orelse .{ .void = {} };
@@ -428,6 +438,9 @@ fn writeIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value, val: 
     if (proxyMod.isProxy(obj_val)) {
         const key = try ocKeyString(key_val, env);
         return try proxySet(env, obj_val, key, val, obj_val);
+    }
+    if (typedArrayMod.isTypedArray(obj_val)) {
+        return try typedArrayMod.setIndex(obj_val, key_val, val, env);
     }
     if (obj_val == .js_object) {
         const key = try valueToKeyString(env, key_val);
@@ -491,6 +504,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             }
                         },
                         .js_object => |obj| {
+                            if (typedArrayMod.isTypedArray(spread_val)) {
+                                const len = typedArrayMod.getLength(spread_val);
+                                var idx: usize = 0;
+                                while (idx < len) : (idx += 1) try array_obj.elements.append(env.allocator, typedArrayMod.getElement(spread_val, idx, env));
+                                continue;
+                            }
                             const type_tag = obj.properties.get("@@type");
                             if (type_tag != null and type_tag.? == .string) {
                                 if (std.mem.eql(u8, type_tag.?.string, "Set")) {
@@ -646,6 +665,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 }
                 return .{ .void = {} };
             }
+            if (typedArrayMod.isTypedArray(array_val)) {
+                const index_val = try evaluate(a.index, env);
+                return typedArrayMod.getIndex(array_val, index_val, env);
+            }
             if (array_val == .js_object) {
                 const index_val = try evaluate(a.index, env);
                 const key = switch (index_val) {
@@ -799,6 +822,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         return val;
                     }
                     const val = try evaluate(b.right, env);
+                    if (typedArrayMod.isTypedArray(obj_val)) {
+                        const key_val = try evaluate(ai.index, env);
+                        try typedArrayMod.setIndex(obj_val, key_val, val, env);
+                        return val;
+                    }
                     if (obj_val == .js_object) {
                         const key_val = try evaluate(ai.index, env);
                         const key: []const u8 = switch (key_val) {
@@ -1283,6 +1311,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 if (proxyMod.isProxy(right)) {
                     return .{ .boolean = try proxyHas(env, right, key) };
                 }
+                if (typedArrayMod.isManaged(right)) {
+                    return .{ .boolean = typedArrayMod.hasProperty(right, key) };
+                }
                 return switch (right) {
                     .js_object => |obj| blk: {
                         var cur: ?*ast.ObjectValue = obj;
@@ -1338,6 +1369,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 return .{ .boolean = switch (left) {
                     .array => std.mem.eql(u8, name, "Array") or std.mem.eql(u8, name, "Object"),
                     .js_object => |obj| blk: {
+                        if (typedArrayMod.isArrayBuffer(left)) {
+                            if (typedArrayMod.getTag(left)) |tag| {
+                                if (std.mem.eql(u8, tag, name)) break :blk true;
+                            }
+                        }
+                        if (typedArrayMod.isDataView(left) and std.mem.eql(u8, name, "DataView")) break :blk true;
+                        if (typedArrayMod.getKind(left)) |kind| {
+                            if (std.mem.eql(u8, typedArrayMod.kindName(kind), name)) break :blk true;
+                        }
                         const tag = obj.properties.get("@@type");
                         if (tag) |t| {
                             if (t == .string and std.mem.eql(u8, t.string, name)) break :blk true;
@@ -1352,6 +1392,14 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     else => false,
                 } };
+            }
+
+            if (b.operator == .Minus and left == .integer and left.integer == 0 and right == .big_int) {
+                const result = ast.BigIntValue.init(env.allocator) catch return error.OutOfMemory;
+                env.bigints.append(env.allocator, result) catch {};
+                result.value.copy(right.big_int.value.toConst()) catch return error.OutOfMemory;
+                result.value.negate();
+                return .{ .big_int = result };
             }
 
             if (left == .big_int and right == .big_int) {
@@ -3043,7 +3091,7 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .closure => "function",
                 .object => |obj| blk: {
                     const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj));
-                    if (std.mem.eql(u8, bObjPtr.name, "Proxy")) break :blk "function";
+                    if (std.mem.eql(u8, bObjPtr.name, "Proxy") or typedArrayMod.isConstructorName(bObjPtr.name)) break :blk "function";
                     break :blk "object";
                 },
                 .generator => "function",
@@ -3565,6 +3613,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             if (proxyMod.isProxy(value)) {
                 return try proxyGet(env, value, m.property, value);
             }
+            if (typedArrayMod.isManaged(value)) {
+                return typedArrayMod.getMember(value, m.property);
+            }
 
             if (value == .array) {
                 if (std.mem.eql(u8, m.property, "length")) {
@@ -3899,6 +3950,25 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                             return try evaluateGeneratorThrow(value.generator, env, method_args.items);
                         }
                         return .{ .void = {} };
+                    } else if (typedArrayMod.isManaged(value)) {
+                        var typed_args = try std.ArrayList(ast.Value).initCapacity(env.allocator, m.arguments.len);
+                        defer typed_args.deinit(env.allocator);
+                        if (expanded_method_args) |ema| {
+                            try typed_args.appendSlice(env.allocator, ema.items);
+                        } else {
+                            for (m.arguments) |arg| try typed_args.append(env.allocator, try evaluate(arg, env));
+                        }
+                        if (try typedArrayMod.callMethod(value, m.method, typed_args.items, env)) |result| {
+                            if (env.throw_hit) return error.Thrown;
+                            return result;
+                        }
+                        const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                            _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                            return error.Thrown;
+                        };
+                        defer env.allocator.free(_msg);
+                        _ = throwError(env, "TypeError", .{ .string = _msg });
+                        return error.Thrown;
                     } else if (value == .js_object) {
                         if (findPropertyInChain(value.js_object, m.method)) |method_val| {
                             if (accessorPart(method_val, "get")) |getter| {
@@ -4026,6 +4096,25 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 var proxy_method_args = try evaluateArgs(m.arguments, env);
                 defer proxy_method_args.deinit(env.allocator);
                 return try callFunctionValue(method_val, proxy_method_args.items, env, value);
+            }
+            if (typedArrayMod.isManaged(value)) {
+                var owned_args: ?std.ArrayList(ast.Value) = null;
+                defer if (owned_args) |*owned| owned.deinit(env.allocator);
+                const call_args: []ast.Value = if (expanded_method_args) |ema| ema.items else blk: {
+                    owned_args = try evaluateArgs(m.arguments, env);
+                    break :blk owned_args.?.items;
+                };
+                if (try typedArrayMod.callMethod(value, m.method, call_args, env)) |result| {
+                    if (env.throw_hit) return error.Thrown;
+                    return result;
+                }
+                const _msg = std.fmt.allocPrint(env.allocator, "{s} is not a function", .{m.method}) catch {
+                    _ = throwError(env, "TypeError", .{ .string = "is not a function" });
+                    return error.Thrown;
+                };
+                defer env.allocator.free(_msg);
+                _ = throwError(env, "TypeError", .{ .string = _msg });
+                return error.Thrown;
             }
             if (value == .array) {
                 if (expanded_method_args) |ema| {
@@ -5505,6 +5594,7 @@ fn ocKeyString(value: ast.Value, env: *Environment) anyerror![]const u8 {
 
 fn ocMember(value: ast.Value, property: []const u8, env: *Environment) anyerror!ast.Value {
     if (proxyMod.isProxy(value)) return try proxyGet(env, value, property, value);
+    if (typedArrayMod.isManaged(value)) return typedArrayMod.getMember(value, property);
     if (value == .array) {
         if (std.mem.eql(u8, property, "length")) {
             return .{ .integer = @intCast(value.array.elements.items.len) };
@@ -5543,6 +5633,9 @@ fn ocIndex(value: ast.Value, index_val: ast.Value, env: *Environment) anyerror!a
     if (proxyMod.isProxy(value)) {
         const key = try ocKeyString(index_val, env);
         return try proxyGet(env, value, key, value);
+    }
+    if (typedArrayMod.isTypedArray(value)) {
+        return typedArrayMod.getIndex(value, index_val, env);
     }
     if (value == .js_object) {
         const key = try ocKeyString(index_val, env);

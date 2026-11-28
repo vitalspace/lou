@@ -35,6 +35,7 @@ const Search = @import("search.zig").Search;
 const Slice = @import("slice.zig").Slice;
 const Split = @import("split.zig").Split;
 const StartsWith = @import("startsWith.zig").StartsWith;
+const typedArrayMod = @import("../typedarray.zig");
 
 pub fn StringConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -48,6 +49,9 @@ pub fn StringConstructor(args: []Types.Value, env: *Types.Environment) Types.Bui
 /// Convert a Value to its JS string representation (ES ToString).
 /// BigInt is rendered without the trailing 'n' (unlike console.log / valToStr).
 fn valueToString(env: *Types.Environment, v: Types.Value) Types.Value {
+    if (typedArrayMod.isTypedArray(v)) {
+        if (typedArrayMod.callMethod(v, "toString", &.{}, env) catch null) |result| return result;
+    }
     switch (v) {
         .string => |s| return .{ .string = s },
         .integer => |i| {
@@ -96,7 +100,6 @@ fn valueToString(env: *Types.Environment, v: Types.Value) Types.Value {
         else => return .{ .string = "[object]" },
     }
 }
-
 
 test "String constructor coerces primitives" {
     var env = try Types.Environment.init(testing.allocator, null);

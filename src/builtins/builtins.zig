@@ -32,6 +32,7 @@ const BigIntConstructorFn = @import("./bigint/bigint.zig").BigIntConstructor;
 const IntlConstructorFn = @import("./intl/intl.zig").IntlConstructor;
 const RegExpConstructorFn = @import("./regex/regexp_constructor.zig").RegExpConstructor;
 const ProxyConstructorFn = @import("./proxy.zig").ProxyConstructor;
+const typed = @import("./typedarray.zig");
 
 fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -101,6 +102,20 @@ const BUILTIN_FUNCTIONS = [_]struct { name: []const u8, func: Types.BuiltinFn }{
     .{ .name = "Intl", .func = IntlConstructorFn },
     .{ .name = "RegExp", .func = RegExpConstructorFn },
     .{ .name = "Proxy", .func = ProxyConstructorFn },
+    .{ .name = "ArrayBuffer", .func = typed.ArrayBufferConstructor },
+    .{ .name = "SharedArrayBuffer", .func = typed.SharedArrayBufferConstructor },
+    .{ .name = "DataView", .func = typed.DataViewConstructor },
+    .{ .name = "Int8Array", .func = typed.Int8ArrayConstructor },
+    .{ .name = "Uint8Array", .func = typed.Uint8ArrayConstructor },
+    .{ .name = "Uint8ClampedArray", .func = typed.Uint8ClampedArrayConstructor },
+    .{ .name = "Int16Array", .func = typed.Int16ArrayConstructor },
+    .{ .name = "Uint16Array", .func = typed.Uint16ArrayConstructor },
+    .{ .name = "Int32Array", .func = typed.Int32ArrayConstructor },
+    .{ .name = "Uint32Array", .func = typed.Uint32ArrayConstructor },
+    .{ .name = "Float32Array", .func = typed.Float32ArrayConstructor },
+    .{ .name = "Float64Array", .func = typed.Float64ArrayConstructor },
+    .{ .name = "BigInt64Array", .func = typed.BigInt64ArrayConstructor },
+    .{ .name = "BigUint64Array", .func = typed.BigUint64ArrayConstructor },
 };
 
 pub fn initBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(Types.BuiltinFn) {

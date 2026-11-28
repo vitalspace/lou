@@ -3,6 +3,7 @@ const Types = @import("../../types/types.zig");
 const Env = @import("../../evaluator.zig").Environment;
 const ansi = @import("../../utils/ansi.zig");
 const number_format = @import("../number/format.zig");
+const typedArrayMod = @import("../typedarray.zig");
 
 const MaxLineWidth = 80;
 
@@ -305,6 +306,72 @@ fn printArray(out: anytype, a: *Types.ArrayObject, ctx: Ctx) void {
     }
 }
 
+fn typedElementWidth(value: Types.Value, env: *Env) usize {
+    return switch (value) {
+        .integer => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk 0;
+            break :blk s.len;
+        },
+        .float => |f| blk: {
+            var buf = std.ArrayList(u8).empty;
+            defer buf.deinit(env.allocator);
+            number_format.appendFloat(env.allocator, &buf, f);
+            break :blk buf.items.len;
+        },
+        .big_int => |b| blk: {
+            const digits = b.toString(env.allocator) catch break :blk 1;
+            defer env.allocator.free(digits);
+            break :blk digits.len + 1;
+        },
+        .string => |s| s.len + 2,
+        .boolean => |b| if (b) 4 else 5,
+        .void => 9,
+        .null => 4,
+        else => 9,
+    };
+}
+
+fn printTypedArray(out: anytype, value: Types.Value, ctx: Ctx) void {
+    const kind = typedArrayMod.getKind(value) orelse return;
+    const name = typedArrayMod.kindName(kind);
+    const len = typedArrayMod.getLength(value);
+    const C = if (ctx.use_ansi) ansi.Cyan else "";
+    const R = if (ctx.use_ansi) ansi.DefaultForeground else "";
+
+    if (len == 0) {
+        out.print("{s}{s}(0){s} []", .{ C, name, R }) catch {};
+        return;
+    }
+
+    var total: usize = name.len + 8;
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        total += typedElementWidth(typedArrayMod.getElement(value, i, ctx.env), ctx.env) + 2;
+    }
+
+    if (total <= 72) {
+        out.print("{s}{s}({d}){s} [ ", .{ C, name, len, R }) catch {};
+        i = 0;
+        while (i < len) : (i += 1) {
+            if (i > 0) out.print(", ", .{}) catch {};
+            printChild(out, typedArrayMod.getElement(value, i, ctx.env), ctx);
+        }
+        out.print(" ]", .{}) catch {};
+        return;
+    }
+
+    out.print("{s}{s}({d}){s} [\n", .{ C, name, len, R }) catch {};
+    i = 0;
+    while (i < len) : (i += 1) {
+        out.print("  ", .{}) catch {};
+        printChild(out, typedArrayMod.getElement(value, i, ctx.env), ctx);
+        if (i + 1 < len) out.print(",", .{}) catch {};
+        out.print("\n", .{}) catch {};
+    }
+    out.print("]", .{}) catch {};
+}
+
 fn printValueCtx(out: anytype, value: Types.Value, ctx: Ctx) void {
     const Y = if (ctx.use_ansi) ansi.Yellow else "";
     const G = if (ctx.use_ansi) ansi.Green else "";
@@ -345,7 +412,13 @@ fn printValueCtx(out: anytype, value: Types.Value, ctx: Ctx) void {
                 out.print("{s}Symbol({s}){s}", .{ G, sym.description, R }) catch {};
             }
         },
-        .js_object => |o| printObject(out, o, ctx),
+        .js_object => |o| {
+            if (typedArrayMod.isTypedArray(value)) {
+                printTypedArray(out, value, ctx);
+            } else {
+                printObject(out, o, ctx);
+            }
+        },
         .array_iterator => |a| printArray(out, a, ctx),
     }
 }

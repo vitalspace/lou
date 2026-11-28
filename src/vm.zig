@@ -17,6 +17,7 @@ const runtime = @import("./types/runtime.zig");
 const objectPrototypeMod = @import("./builtins/object/prototype.zig");
 const coercion = @import("coercion.zig");
 const regexpMod = @import("./builtins/regex/regexp.zig");
+const typedArrayMod = @import("./builtins/typedarray.zig");
 
 pub const Op = enum(u8) {
     constant,
@@ -2100,6 +2101,8 @@ pub const VM = struct {
                                 self.push(arrayGet(arr.array, i));
                             }
                         }
+                    } else if (typedArrayMod.isTypedArray(arr)) {
+                        self.push(typedArrayMod.getIndex(arr, idx, self.env));
                     } else if (arr == .js_object) {
                         if (idx == .symbol) {
                             const prop_name = try std.fmt.allocPrint(self.env.allocator, "@@{s}", .{idx.symbol.description});
@@ -2138,6 +2141,8 @@ pub const VM = struct {
                         self.push(.{ .integer = @intCast(obj.array.elements.items.len) });
                     } else if (obj == .string and std.mem.eql(u8, p, "length")) {
                         self.push(.{ .integer = @intCast(obj.string.len) });
+                    } else if (typedArrayMod.isManaged(obj)) {
+                        self.push(typedArrayMod.getMember(obj, p));
                     } else if (obj == .js_object) {
                         const type_tag = obj.js_object.properties.get("@@type");
                         if (type_tag != null and type_tag.? == .string) {
@@ -2275,7 +2280,19 @@ pub const VM = struct {
                             args.insert(self.env.allocator, 0, self.pop()) catch {};
                         }
                         const obj = self.pop();
-                        if (obj == .regexp) {
+                        if (typedArrayMod.isManaged(obj)) {
+                            const maybe = typedArrayMod.callMethod(obj, m, args.items, self.env) catch {
+                                if (try self.deliverBuiltinThrow()) continue;
+                                self.push(.{ .void = {} });
+                                continue;
+                            };
+                            if (maybe) |v| {
+                                if (try self.deliverBuiltinThrow()) continue;
+                                self.push(v);
+                            } else {
+                                return self.throwTypeError(m);
+                            }
+                        } else if (obj == .regexp) {
                             args.insert(self.env.allocator, 0, obj) catch {};
                             const rObj = self.env.getBuiltinObject("RegExp") orelse {
                                 self.push(.{ .void = {} });
@@ -2533,7 +2550,19 @@ pub const VM = struct {
                         }
                     } else {
                         const obj = self.pop();
-                        if (obj == .regexp) {
+                        if (typedArrayMod.isManaged(obj)) {
+                            const maybe = typedArrayMod.callMethod(obj, m, &.{}, self.env) catch {
+                                if (try self.deliverBuiltinThrow()) continue;
+                                self.push(.{ .void = {} });
+                                continue;
+                            };
+                            if (maybe) |v| {
+                                if (try self.deliverBuiltinThrow()) continue;
+                                self.push(v);
+                            } else {
+                                return self.throwTypeError(m);
+                            }
+                        } else if (obj == .regexp) {
                             const rObj = self.env.getBuiltinObject("RegExp") orelse {
                                 self.push(.{ .void = {} });
                                 break;
@@ -2851,7 +2880,11 @@ pub const VM = struct {
                         .array => "object",
                         .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null) "function" else "object",
                         .function, .closure, .generator => "function",
-                        .object => "object",
+                        .object => |obj| blk: {
+                            const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj));
+                            if (typedArrayMod.isConstructorName(bObjPtr.name)) break :blk "function";
+                            break :blk "object";
+                        },
                         .symbol => "symbol",
                         .iterator => "object",
                         .hole => "undefined",
@@ -2913,7 +2946,10 @@ pub const VM = struct {
                             self.push(.{ .js_object = obj });
                         },
                         .js_object => |obj| {
-                            if (obj.properties.get("@@iterator")) |iter_fn| {
+                            if (typedArrayMod.isTypedArray(val)) {
+                                const iter_val = typedArrayMod.callMethod(val, "values", &.{}, self.env) catch null;
+                                self.push(iter_val orelse .{ .void = {} });
+                            } else if (obj.properties.get("@@iterator")) |iter_fn| {
                                 const res = callFunctionValue(iter_fn, &[_]Value{}, self.env, .{ .js_object = obj }) catch Value{ .void = {} };
                                 self.push(res);
                             } else {
@@ -3041,11 +3077,15 @@ pub const VM = struct {
                     var keys_arr = ast.ArrayObject.init(self.env.allocator) catch unreachable;
                     switch (val) {
                         .js_object => |obj| {
-                            // ES [[OwnPropertyKeys]] order: integer keys ascending,
-                            // then string keys in insertion order. getForInKeys also
-                            // registers the array in env.arrays.
-                            keys_arr.deinit();
-                            keys_arr = obj.getForInKeys(self.env.allocator, &self.env.arrays) catch return error.OutOfMemory;
+                            if (typedArrayMod.isTypedArray(val)) {
+                                typedArrayMod.appendForInKeys(val, self.env, keys_arr);
+                            } else {
+                                // ES [[OwnPropertyKeys]] order: integer keys ascending,
+                                // then string keys in insertion order. getForInKeys also
+                                // registers the array in env.arrays.
+                                keys_arr.deinit();
+                                keys_arr = obj.getForInKeys(self.env.allocator, &self.env.arrays) catch return error.OutOfMemory;
+                            }
                         },
                         .array => |arr| {
                             var i: usize = 0;

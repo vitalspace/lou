@@ -1,7 +1,7 @@
 # Typed Arrays y ArrayBuffer
 
 ## status
-pendiente
+✅ COMPLETADO
 
 ## Problema
 Los Typed Arrays (`Int8Array`, `Uint8Array`, `Float64Array`, etc.) y `ArrayBuffer` no están implementados.
@@ -17,10 +17,10 @@ Lou es un intérprete JavaScript escrito en Zig. Los Typed Arrays son esenciales
 - Typed Arrays NO existen
 - Falta estructura para binary data (no hay `Value.bytes` variant)
 
-## Quick verify (estado actual)
+## Quick verify (completado)
 ```bash
-echo 'const b = new ArrayBuffer(8); console.log(b);' > /tmp/t.lou && ./zig-out/bin/lou run /tmp/t.lou 2>&1
-# Actual: "ArrayBuffer is not defined"
+echo 'const b = new ArrayBuffer(8); console.log(b.byteLength);' > /tmp/t.lou && ./zig-out/bin/lou run /tmp/t.lou 2>&1
+# Actual: 8
 ```
 
 ## Patrones a seguir
@@ -182,10 +182,118 @@ Plantilla para promover un edge case a spec:
 3. Verificar que el test correspondiente cubre el caso.
 
 
-## Estado del test (auto 2026-06-22)
+## Implementación completada (2026-11-27)
 
-- Compat test match: `-` (NO-MATCH)
-- Test status: `-`
+### Arquitectura
 
-- Disposition: stays in pendientes/ — no corresponding test exists in tests/compat/. Create tests/compat/typed-arrays.lou + tests/compat/typed-arrays.js to enable automatic PASS/FAIL tracking.
+Se reutiliza `ObjectValue` en lugar de añadir variantes nuevas a `Value`. Cada
+buffer y cada vista guarda metadatos en claves internas `@@`:
+
+- `@@type`: `ArrayBuffer`, `SharedArrayBuffer`, `TypedArray` o `DataView`.
+- `@@buffer_bytes`: `[]u8` crudo del buffer, registrado en `env.owned_strings`.
+- `@@typed_buffer`, `@@typed_offset`, `@@typed_length`, `@@typed_kind`.
+- `@@view_buffer`, `@@view_offset`, `@@view_length`.
+
+Los bytes se leen/escriben en little-endian para los Typed Arrays; `DataView`
+acepta el flag `littleEndian` en cada get/set. Las vistas comparten el mismo
+`ArrayBuffer`, por lo que `subarray`, varias vistas y `SharedArrayBuffer`
+reflejan escrituras cruzadas.
+
+### Constructores y métodos
+
+- `ArrayBuffer`, `SharedArrayBuffer`, `DataView`.
+- `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`,
+  `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array`,
+  `BigInt64Array`, `BigUint64Array`.
+- Constructores desde longitud, array, typed array, array-like y
+  `(buffer, byteOffset, length)`.
+- Estáticos `from`, `of`, `BYTES_PER_ELEMENT`, `ArrayBuffer.isView`.
+- Métodos: `set`, `subarray`, `slice`, `fill`, `copyWithin`, `map`, `filter`,
+  `reduce`, `reduceRight`, `forEach`, `find`, `findIndex`, `some`, `every`,
+  `includes`, `indexOf`, `join`, `reverse`, `sort`, `at`, `keys`, `values`,
+  `entries`, `toString` y `@@iterator`.
+- DataView: 10 getters `getInt8`..`getBigUint64` y sus 10 setters, con
+  endianness configurable.
+- Integración con `typeof`, `instanceof`, `in`, `Object.keys`, `for...of`,
+  spread, `Array.from`, `String(typedArray)` y el formateo de `console.log`.
+
+### Limitaciones conocidas
+
+- No hay `ArrayBuffer` redimensionable/growable, `transfer`, `detach` ni
+  `resize`.
+- No hay `Atomics` para `SharedArrayBuffer` (solo memoria compartida entre
+  vistas).
+- No hay subclases/especies ni cadena de prototipos real para Typed Arrays;
+  `instanceof` se resuelve por nombre de constructor.
+- `JSON.stringify`, descriptores de propiedades y `Reflect.ownKeys` no enumeran
+  los índices de un Typed Array.
+- `console.log` formatea Typed Arrays, pero `ArrayBuffer` y `DataView` todavía
+  se muestran como `{}`.
+- Los Typed Arrays BigInt aceptan el rango `u64`/`i64`; valores fuera de rango
+  lanzan en lugar de envolver módulo 2^64.
+- Los constructores pueden invocarse sin `new` (JavaScript estricto lanzaría
+  TypeError en varios de ellos).
+
+### Verificación
+
+```bash
+bash tests/compat/run.sh
+zig test src/main.zig
+diff <(./zig-out/bin/lou run tests/compat/typed-arrays.lou) \
+     <(node tests/compat/typed-arrays.js)
+```
+
+Resultados:
+
+- `tests/compat/typed-arrays.lou` idéntico a Node (`diff` vacío).
+- `PASS=105 FAIL=0 SKIP=0`.
+- `All 1136 tests passed.`
+
+### Cobertura del fixture
+
+- Constructores de los 11 Typed Arrays, `ArrayBuffer`, `SharedArrayBuffer` y
+  `DataView`; `typeof`, `instanceof` y `ArrayBuffer.isView`.
+- Lecturas/escrituras fuera de rango, wrap entero, `Uint8Clamped`, precisión
+  `Float32` y BigInt con signo.
+- Vistas compartidas, `slice` copia vs `subarray` comparte, `(buffer, offset,
+  length)`, `set`, `fill`, `copyWithin`, `sort`, `reverse` y la familia
+  `map`/`filter`/`reduce`/`forEach`/`find`/`some`/`every`.
+- DataView big/little endian, `ArrayBuffer.slice`, `Object.keys`, `in`,
+  spread, `for...of`, `entries`, `keys`, `values`, `Array.from` y
+  `String(typedArray)`.
+
+### Tests unitarios añadidos
+
+- Conversión de enteros con wrap y `Uint8Clamped` con redondeo half-to-even.
+- Redondeo a precisión simple de `Float32Array`.
+- Buffer compartido entre vistas y `subarray`.
+- `slice` copia vs `subarray` comparte.
+- DataView big-endian y little-endian.
+- `BigInt64Array` conserva valores negativos.
+
+### Archivos tocados
+
+- `src/builtins/typedarray.zig`
+- `src/builtins/builtins.zig`
+- `src/builtins/builtinObjects.zig`
+- `src/builtins/array/from.zig`
+- `src/builtins/object/keys.zig`
+- `src/builtins/console/format.zig`
+- `src/builtins/string/string.zig`
+- `src/evaluator.zig`
+- `src/vm.zig`
+- `tests/compat/typed-arrays.js`
+- `tests/compat/typed-arrays.lou`
+- `README.md`
+
+## Edge cases y seguimiento
+
+- Promover a spec propio `ArrayBuffer` redimensionable/growable y
+  `transfer`/`detach`.
+- Promover a spec propio `Atomics` y sincronización real de
+  `SharedArrayBuffer`.
+- Promover a spec propio la enumeración completa (`JSON.stringify`,
+  descriptores, `Reflect.ownKeys`) de Typed Arrays.
+- Promover a spec propio el formateo de `ArrayBuffer`/`DataView` en
+  `console.log`.
 
