@@ -1,103 +1,275 @@
-// Minimal synthetic Promise — bounds the dynamic-import result in a
-// Promise-shaped js_object so that `import("./mod.lou").then(fn)` is
-// syntactically valid and returns the loaded module.
+// Promise runtime with a deterministic microtask queue.
 //
-// Semantics (intentionally simple, synchronous):
-//   * `import("./mod.lou")` returns a Promise already resolved with the
-//     namespace object.
-//   * `.then(onFulfilled)` ignores `onFulfilled` and returns a NEW Promise
-//     wrapping the original resolved value (no callback invocation).
-//   * `.catch(onRejected)` is never triggered (sync promises never reject)
-//     and returns a new Promise wrapping the original value.
-//   * `.finally(fn)` ignores `fn` and returns a new Promise wrapping the
-//     original value.
-//
-// Why no callback invocation?
-//   Syntactic dispatching into a user-provided `onFulfilled` from inside a
-//   BuiltinFn requires casting `*AstNode` (an opaque pointer type) back to a
-//   concrete `*ast.Node` and calling `evaluator.invokeFunctionNode`. Zig 0.16
-//   is strict about anonymous-struct type inference in those catch/orelse
-//   chain positions, and the union-init pattern of `BuiltinResult` plus the
-//   opaque cast has been unstable across recent Zig versions. Rather than
-//   fight the inference, this minimal implementation provides a working
-//   Promise shape that downstream user code can chain on syntactically.
-//   `import("./mod.lou").then(fn).then(gn)` will work — it returns the
-//   resolved module each step. It will not run `fn` or `gn`. This is a
-//   documented trade-off; see specs/todos/pendientes/import-meta.md.
-//
-// Storage slots on each Promise js_object:
-//   * `@@type` = "Promise"
-//   * `[[PromiseState]]` = "fulfilled"
-//   * `[[PromiseValue]]"  = the resolved Value
+// Promises are `.js_object` values tagged with `@@type = "Promise"`. State
+// and result live in hidden `@@promise_*` properties so user-visible
+// enumeration/inspection does not see them. Reactions are queued on the
+// root environment and drained by `evaluator.drainPromiseJobs()` after the
+// top-level program completes, which matches Node ordering for programs
+// whose promises resolve synchronously.
 
 const std = @import("std");
 const Types = @import("../../types/types.zig");
 const ast = @import("../../ast.zig");
-const env_mod = @import("../../environment.zig");
-const tracePrint = env_mod.tracePrint;
-const DEBUG_TRACE = env_mod.DEBUG_TRACE;
 
-/// Builds a Promise js_object that is already resolved with `value`.
-///
-/// Ownership: on success the new ObjectValue is appended to `env.objects`
-/// and will be freed by `env.deinit` together with the rest of the heap
-/// tracker. The single `errdefer` registered after `ObjectValue.init` is the
-/// only fallible operation that requires a guarantee that the obj gets
-/// destroyed — if `env.objects.append` fails we return raw `value` and
-/// `errdefer` cleans up the orphaned ObjectValue. Properties.put failures use
-/// `catch{}` (memory pressure is OOM-only and matches surrounding code).
-fn makePromise(env: *Types.Environment, value: Types.Value) Types.Value {
-    if (DEBUG_TRACE) tracePrint("makePromise entered, value tag={s}\n", .{@tagName(value)});
-    const obj = ast.ObjectValue.init(env.allocator) catch { if (DEBUG_TRACE) tracePrint("makePromise: ObjectValue.init failed\n", .{}); return value; };
-    errdefer obj.deinit();
+const STATE_PENDING = "pending";
+const STATE_FULFILLED = "fulfilled";
+const STATE_REJECTED = "rejected";
 
-    env.objects.append(env.allocator, obj) catch { if (DEBUG_TRACE) tracePrint("makePromise: env.objects.append failed\n", .{}); return value; };
-    // Once appended, env.deinit will free it. The errdefer above was the
-    // only cleanup we needed for that fallible path.
-
-    obj.properties.put("@@type", Types.Value{ .string = "Promise" }) catch { if (DEBUG_TRACE) tracePrint("makePromise: put @@type failed\n", .{}); };
-    obj.properties.put("[[PromiseState]]", Types.Value{ .string = "fulfilled" }) catch { if (DEBUG_TRACE) tracePrint("makePromise: put PromiseState failed\n", .{}); };
-    obj.properties.put("[[PromiseValue]]", value) catch { if (DEBUG_TRACE) tracePrint("makePromise: put PromiseValue failed\n", .{}); };
-
-    if (DEBUG_TRACE) tracePrint("makePromise: success, returning wrapper obj=0x{x}\n", .{@intFromPtr(obj)});
-    return Types.Value{ .js_object = obj };
+pub fn isPromise(value: Types.Value) bool {
+    if (value != .js_object) return false;
+    const tag = value.js_object.properties.get("@@type") orelse return false;
+    return tag == .string and std.mem.eql(u8, tag.string, "Promise");
 }
 
-fn getResolved(args: []Types.Value) Types.Value {
-    if (args.len < 1) return Types.Value{ .void = {} };
-    if (args[0] != .js_object) return Types.Value{ .void = {} };
-    const obj = args[0].js_object;
-    return obj.properties.get("[[PromiseValue]]") orelse Types.Value{ .void = {} };
+pub fn isPending(value: Types.Value) bool {
+    return isPromise(value) and std.mem.eql(u8, promiseState(value), STATE_PENDING);
+}
+
+pub fn promiseState(value: Types.Value) []const u8 {
+    if (value != .js_object) return STATE_PENDING;
+    const state = value.js_object.properties.get("@@promise_state") orelse return STATE_PENDING;
+    return if (state == .string) state.string else STATE_PENDING;
+}
+
+pub fn promiseValue(value: Types.Value) Types.Value {
+    if (value != .js_object) return .{ .void = {} };
+    return value.js_object.properties.get("@@promise_value") orelse .{ .void = {} };
+}
+
+fn makeObject(env: *Types.Environment) !*ast.ObjectValue {
+    const obj = try ast.ObjectValue.init(env.allocator);
+    errdefer obj.deinit();
+    try env.objects.append(env.allocator, obj);
+    return obj;
+}
+
+pub fn createPromise(env: *Types.Environment, state: []const u8, value: Types.Value) Types.Value {
+    const obj = makeObject(env) catch return .{ .void = {} };
+    obj.properties.put("@@type", .{ .string = "Promise" }) catch {};
+    obj.properties.put("@@promise_state", .{ .string = state }) catch {};
+    obj.properties.put("@@promise_value", value) catch {};
+    return .{ .js_object = obj };
+}
+
+pub fn createPending(env: *Types.Environment) Types.Value {
+    return createPromise(env, STATE_PENDING, .{ .void = {} });
+}
+
+pub fn createResolved(env: *Types.Environment, value: Types.Value) Types.Value {
+    if (isPromise(value)) return value;
+    return createPromise(env, STATE_FULFILLED, value);
+}
+
+pub fn createRejected(env: *Types.Environment, reason: Types.Value) Types.Value {
+    return createPromise(env, STATE_REJECTED, reason);
+}
+
+fn setState(promise: *ast.ObjectValue, state: []const u8, value: Types.Value) void {
+    promise.properties.put("@@promise_state", .{ .string = state }) catch {};
+    promise.properties.put("@@promise_value", value) catch {};
+}
+
+fn enqueuePassThrough(env: *Types.Environment, parent: Types.Value, child: Types.Value) void {
+    const reaction = makeObject(env) catch return;
+    reaction.properties.put("@@type", .{ .string = "PromiseReaction" }) catch {};
+    reaction.properties.put("parent", parent) catch {};
+    reaction.properties.put("child", child) catch {};
+    const root = env.root();
+    root.promise_jobs.append(root.allocator, .{ .js_object = reaction }) catch {};
+}
+
+pub fn resolvePromise(env: *Types.Environment, promise: *ast.ObjectValue, value: Types.Value) void {
+    const target = Types.Value{ .js_object = promise };
+    if (!std.mem.eql(u8, promiseState(target), STATE_PENDING)) return;
+
+    if (isPromise(value)) {
+        if (value.js_object == promise) {
+            setState(promise, STATE_REJECTED, .{ .string = "TypeError: Chaining cycle detected for promise" });
+            return;
+        }
+        const parent_state = promiseState(value);
+        if (std.mem.eql(u8, parent_state, STATE_FULFILLED)) {
+            setState(promise, STATE_FULFILLED, promiseValue(value));
+        } else if (std.mem.eql(u8, parent_state, STATE_REJECTED)) {
+            setState(promise, STATE_REJECTED, promiseValue(value));
+        } else {
+            enqueuePassThrough(env, value, target);
+        }
+        return;
+    }
+
+    setState(promise, STATE_FULFILLED, value);
+}
+
+pub fn rejectPromise(promise: *ast.ObjectValue, reason: Types.Value) void {
+    const target = Types.Value{ .js_object = promise };
+    if (!std.mem.eql(u8, promiseState(target), STATE_PENDING)) return;
+    setState(promise, STATE_REJECTED, reason);
+}
+
+pub fn makeResolver(env: *Types.Environment, target: Types.Value, reject: bool) Types.Value {
+    const obj = makeObject(env) catch return .{ .void = {} };
+    obj.properties.put("@@type", .{ .string = "PromiseResolver" }) catch {};
+    obj.properties.put("@@callable", .{ .boolean = true }) catch {};
+    obj.properties.put("@@promise", target) catch {};
+    obj.properties.put("@@reject", .{ .boolean = reject }) catch {};
+    return .{ .js_object = obj };
+}
+
+pub fn isResolver(value: Types.Value) bool {
+    if (value != .js_object) return false;
+    const tag = value.js_object.properties.get("@@type") orelse return false;
+    return tag == .string and std.mem.eql(u8, tag.string, "PromiseResolver");
+}
+
+pub fn callResolver(env: *Types.Environment, obj: *ast.ObjectValue, args: []const Types.Value) void {
+    const target = obj.properties.get("@@promise") orelse return;
+    if (!isPromise(target)) return;
+    const reject = obj.properties.get("@@reject") orelse ast.Value{ .boolean = false };
+    const value = if (args.len > 0) args[0] else Types.Value{ .void = {} };
+    if (reject == .boolean and reject.boolean) {
+        rejectPromise(target.js_object, value);
+    } else {
+        resolvePromise(env, target.js_object, value);
+    }
+}
+
+fn queuedReaction(env: *Types.Environment, parent: Types.Value, on_fulfilled: ?Types.Value, on_rejected: ?Types.Value, on_finally: ?Types.Value) Types.Value {
+    const child = createPending(env);
+    const reaction = makeObject(env) catch return child;
+    reaction.properties.put("@@type", .{ .string = "PromiseReaction" }) catch {};
+    reaction.properties.put("parent", parent) catch {};
+    reaction.properties.put("child", child) catch {};
+    if (on_fulfilled) |f| reaction.properties.put("onFulfilled", f) catch {};
+    if (on_rejected) |r| reaction.properties.put("onRejected", r) catch {};
+    if (on_finally) |f| reaction.properties.put("onFinally", f) catch {};
+    const root = env.root();
+    root.promise_jobs.append(root.allocator, .{ .js_object = reaction }) catch {};
+    return child;
 }
 
 pub fn PromiseThen(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
-    if (DEBUG_TRACE) tracePrint("PromiseThen called, args.len={d}\n", .{args.len});
-    const resolved = getResolved(args);
-    const out = makePromise(env, resolved);
-    if (DEBUG_TRACE) tracePrint("PromiseThen: returning BuildInResult wrapper\n", .{});
-    return Types.BuiltinResult{ .value = out };
+    if (args.len == 0 or !isPromise(args[0])) return .{ .value = .{ .void = {} } };
+    const on_fulfilled = if (args.len > 1) args[1] else null;
+    const on_rejected = if (args.len > 2) args[2] else null;
+    return .{ .value = queuedReaction(env, args[0], on_fulfilled, on_rejected, null) };
 }
 
 pub fn PromiseCatch(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
-    if (DEBUG_TRACE) tracePrint("PromiseCatch called, args.len={d}\n", .{args.len});
-    const resolved = getResolved(args);
-    const out = makePromise(env, resolved);
-    if (DEBUG_TRACE) tracePrint("PromiseCatch: returning BuildInResult wrapper\n", .{});
-    return Types.BuiltinResult{ .value = out };
+    if (args.len == 0 or !isPromise(args[0])) return .{ .value = .{ .void = {} } };
+    const on_rejected = if (args.len > 1) args[1] else null;
+    return .{ .value = queuedReaction(env, args[0], null, on_rejected, null) };
 }
 
 pub fn PromiseFinally(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
-    if (DEBUG_TRACE) tracePrint("PromiseFinally called, args.len={d}\n", .{args.len});
-    const resolved = getResolved(args);
-    const out = makePromise(env, resolved);
-    if (DEBUG_TRACE) tracePrint("PromiseFinally: returning BuildInResult wrapper\n", .{});
-    return Types.BuiltinResult{ .value = out };
+    if (args.len == 0 or !isPromise(args[0])) return .{ .value = .{ .void = {} } };
+    const on_finally = if (args.len > 1) args[1] else null;
+    return .{ .value = queuedReaction(env, args[0], null, null, on_finally) };
+}
+
+pub fn PromiseResolveStatic(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const value = if (args.len > 0) args[0] else Types.Value{ .void = {} };
+    return .{ .value = createResolved(env, value) };
+}
+
+pub fn PromiseRejectStatic(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const reason = if (args.len > 0) args[0] else Types.Value{ .void = {} };
+    return .{ .value = createRejected(env, reason) };
+}
+
+fn arrayFromValues(env: *Types.Environment, values: []const Types.Value) Types.Value {
+    const arr = ast.ArrayObject.init(env.allocator) catch return .{ .void = {} };
+    env.arrays.append(env.allocator, arr) catch {};
+    for (values) |value| arr.elements.append(env.allocator, value) catch {};
+    return .{ .array = arr };
+}
+
+fn iterableValues(value: Types.Value) ?[]const Types.Value {
+    return switch (value) {
+        .array => |arr| arr.elements.items,
+        else => null,
+    };
+}
+
+fn arrayOfNulls(env: *Types.Environment, len: usize) Types.Value {
+    const arr = ast.ArrayObject.init(env.allocator) catch return .{ .void = {} };
+    env.arrays.append(env.allocator, arr) catch {};
+    for (0..len) |_| arr.elements.append(env.allocator, .{ .null = {} }) catch {};
+    return .{ .array = arr };
+}
+
+fn enqueueAggregateJob(
+    env: *Types.Environment,
+    parent: Types.Value,
+    result: Types.Value,
+    kind: []const u8,
+    index: usize,
+    values: Types.Value,
+    remaining: usize,
+    rejected: usize,
+) void {
+    const reaction = makeObject(env) catch return;
+    reaction.properties.put("@@type", .{ .string = "PromiseAggregateReaction" }) catch {};
+    reaction.properties.put("@@aggregate", .{ .boolean = true }) catch {};
+    reaction.properties.put("parent", parent) catch {};
+    reaction.properties.put("@@result", result) catch {};
+    reaction.properties.put("@@kind", .{ .string = kind }) catch {};
+    reaction.properties.put("@@index", .{ .integer = @intCast(index) }) catch {};
+    reaction.properties.put("@@values", values) catch {};
+    reaction.properties.put("@@remaining", .{ .integer = @intCast(remaining) }) catch {};
+    reaction.properties.put("@@rejected", .{ .integer = @intCast(rejected) }) catch {};
+    const root = env.root();
+    root.promise_jobs.append(root.allocator, .{ .js_object = reaction }) catch {};
+}
+
+fn aggregateStart(env: *Types.Environment, values: []const Types.Value, kind: []const u8) Types.Value {
+    const result = createPending(env);
+    if (result == .js_object) {
+        result.js_object.properties.put("@@remaining", .{ .integer = @intCast(values.len) }) catch {};
+        result.js_object.properties.put("@@rejected", .{ .integer = 0 }) catch {};
+    }
+    if (values.len == 0) {
+        if (std.mem.eql(u8, kind, "any")) return createRejected(env, .{ .string = "AggregateError: All promises were rejected" });
+        if (std.mem.eql(u8, kind, "race")) return createPending(env);
+        return createResolved(env, arrayFromValues(env, &.{}));
+    }
+    const slots = arrayOfNulls(env, values.len);
+    for (values, 0..) |value, index| {
+        const parent = if (isPromise(value)) value else createResolved(env, value);
+        enqueueAggregateJob(env, parent, result, kind, index, slots, values.len, 0);
+    }
+    return result;
+}
+pub fn PromiseAll(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const values = if (args.len > 0) iterableValues(args[0]) orelse &[_]Types.Value{} else &[_]Types.Value{};
+    return .{ .value = aggregateStart(env, values, "all") };
+}
+
+pub fn PromiseAllSettled(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const values = if (args.len > 0) iterableValues(args[0]) orelse &[_]Types.Value{} else &[_]Types.Value{};
+    return .{ .value = aggregateStart(env, values, "allSettled") };
+}
+
+pub fn PromiseRace(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const values = if (args.len > 0) iterableValues(args[0]) orelse &[_]Types.Value{} else &[_]Types.Value{};
+    return .{ .value = aggregateStart(env, values, "race") };
+}
+
+pub fn PromiseAny(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
+    const values = if (args.len > 0) iterableValues(args[0]) orelse &[_]Types.Value{} else &[_]Types.Value{};
+    return .{ .value = aggregateStart(env, values, "any") };
 }
 
 pub const PROMISE_METHODS = [_]Types.BuiltinMethod{
     .{ .name = "then", .func = PromiseThen },
     .{ .name = "catch", .func = PromiseCatch },
     .{ .name = "finally", .func = PromiseFinally },
+    .{ .name = "resolve", .func = PromiseResolveStatic },
+    .{ .name = "reject", .func = PromiseRejectStatic },
+    .{ .name = "all", .func = PromiseAll },
+    .{ .name = "allSettled", .func = PromiseAllSettled },
+    .{ .name = "race", .func = PromiseRace },
+    .{ .name = "any", .func = PromiseAny },
 };
 
 pub const PROMISE_OBJECT = Types.BuiltinObjectImpl{

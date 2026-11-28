@@ -71,6 +71,7 @@ pub const NodeType = enum {
     ExportStatement,
     GeneratorDeclaration,
     YieldExpression,
+    AwaitExpression,
     SpreadExpression,
     Elision,
     NewExpression,
@@ -220,6 +221,7 @@ pub const Node = union(NodeType) {
         closure_env: ?*anyopaque = null,
         rest_param: ?[]const u8 = null,
         param_defaults: []?*Node = &[_]?*Node{},
+        is_async: bool = false,
     },
     FunctionCall: struct {
         name: []const u8,
@@ -231,6 +233,7 @@ pub const Node = union(NodeType) {
         closure_env: ?*anyopaque = null,
         rest_param: ?[]const u8 = null,
         param_defaults: []?*Node = &[_]?*Node{},
+        is_async: bool = false,
     },
     MemberAccess: struct {
         object: *Node, // Nodo del objeto (ej: Identifier "console")
@@ -267,6 +270,9 @@ pub const Node = union(NodeType) {
     YieldExpression: struct {
         value: ?*Node, // null for bare yield
         is_star: bool, // true for yield*
+    },
+    AwaitExpression: struct {
+        value: *Node,
     },
     SpreadExpression: struct {
         value: *Node,
@@ -764,6 +770,12 @@ pub fn printAst(node: *Node, depth: usize, writer: anytype) !void {
                 try printAst(val, depth + 2, writer);
             }
         },
+        .AwaitExpression => |a| {
+            try writer.print("AwaitExpression:\n", .{});
+            try printIdent(writer, depth + 1);
+            try writer.print("Value:\n", .{});
+            try printAst(a.value, depth + 2, writer);
+        },
         .SpreadExpression => |s| {
             try writer.print("SpreadExpression:\n", .{});
             try printIdent(writer, depth + 1);
@@ -985,6 +997,7 @@ pub fn containsClosure(node: *const Node) bool {
         .MemberAccess => |m| containsClosure(m.object),
         .ExportStatement => |e| containsClosure(e.declaration),
         .YieldExpression => |y| if (y.value) |v| containsClosure(v) else false,
+        .AwaitExpression => |a| containsClosure(a.value),
         .SpreadExpression => |s| containsClosure(s.value),
         .NewExpression => |ne| containsClosure(ne.callee) or nodesContainClosure(ne.arguments),
         .DirectCall => |dc| containsClosure(dc.callee) or nodesContainClosure(dc.arguments),
@@ -1172,6 +1185,7 @@ pub fn freeAst(allocator: std.mem.Allocator, node: *Node) void {
                 freeAst(allocator, val);
             }
         },
+        .AwaitExpression => |a| freeAst(allocator, a.value),
         .SpreadExpression => |s| {
             freeAst(allocator, s.value);
         },

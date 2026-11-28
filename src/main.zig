@@ -6,6 +6,7 @@ const Dir = Io.Dir;
 const Ast = @import("ast.zig");
 const Environment = @import("evaluator.zig").Environment;
 const evaluate = @import("evaluator.zig").evaluate;
+const drainPromiseJobs = @import("evaluator.zig").drainPromiseJobs;
 const Lexer = @import("lexer.zig").Lexer;
 const Parser = @import("parser.zig").Parser;
 const VM = @import("vm.zig").VM;
@@ -180,7 +181,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (use_vm) {
+    // Async/await and Promise need evaluator-level continuations and the
+    // promise job queue; run those programs through the evaluator so the VM
+    // does not need a suspension opcode.
+    const needs_evaluator = std.mem.indexOf(u8, content, "async") != null or
+        std.mem.indexOf(u8, content, "await") != null or
+        std.mem.indexOf(u8, content, "Promise") != null;
+
+    if (use_vm and !needs_evaluator) {
         var chunk = Chunk.init(allocator);
         defer chunk.deinit();
         var comp = Compiler.init(&env_);
@@ -206,4 +214,5 @@ pub fn main(init: std.process.Init) !void {
             _ = try evaluate(stmt, &env_);
         }
     }
+    drainPromiseJobs(&env_);
 }

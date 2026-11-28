@@ -6,11 +6,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Metrica | Valor |
 |---|---|
-| Snapshot | 2026-11-27 17:48:46 |
-| Commit | `e0084f9` |
+| Snapshot | 2026-11-27 18:34:11 |
+| Commit | `9e9f451` |
 | Binario | `zig-out/bin/lou` |
-| Fixtures | 100 |
-| PASS | 100 |
+| Fixtures | 101 |
+| PASS | 101 |
 | FAIL | 0 |
 | SKIP | 0 |
 
@@ -18,11 +18,11 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Estado | Count |
 |---|---|
-| Test files total | 100 |
-| **PASS** | 100 |
+| Test files total | 101 |
+| **PASS** | 101 |
 | **FAIL** | 0 |
 | SKIP (sin .js) | 0 |
-| Specs pendientes | 11 |
+| Specs pendientes | 10 |
 | Specs hechos | 61 |
 
 ## Section 2 — Failing Tests (first divergence)
@@ -31,7 +31,6 @@ Generado por `scripts/compat_tracker.py`; no editar a mano.
 
 | Spec | Estado declarado | Test | Resultado |
 |---|---|---|---|
-| `async-await.md` | pendiente | `async-await` | sin test |
 | `async-generators.md` | pendiente | `async-generators` | sin test |
 | `object-method-call-edge-function-and-arrow.md` | pendiente | — | sin test |
 | `object-method-call-edge-parens-single-arrow.md` | pendiente | — | sin test |

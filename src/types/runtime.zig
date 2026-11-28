@@ -504,6 +504,7 @@ pub const BuiltinResult = union(enum) {
 pub fn isCallable(v: Value) bool {
     return switch (v) {
         .function, .closure, .generator => true,
+        .js_object => |obj| obj.properties.get("@@callable") != null,
         else => false,
     };
 }

@@ -60,6 +60,9 @@ pub const Environment = struct {
     console_group_depth: u32 = 0,
     /// Root-only: user-visible call frames for `console.trace`.
     trace_frames: std.ArrayList(TraceFrame),
+    /// Root-only: queued Promise reactions drained after the top-level
+    /// program finishes (microtask queue approximation).
+    promise_jobs: std.ArrayList(ast.Value),
     /// Root-only: name of the script currently being executed.
     source_name: []const u8 = "<script>",
     current_call_line: u32 = 0,
@@ -191,6 +194,7 @@ pub const Environment = struct {
             .timers = std.StringHashMap(i128).init(allocator),
             .console_counts = std.StringHashMap(u64).init(allocator),
             .trace_frames = trace_frames,
+            .promise_jobs = try std.ArrayList(ast.Value).initCapacity(allocator, 0),
             .arrays = arrays,
             .iterators = iterators,
             .objects = objects,
@@ -341,6 +345,7 @@ pub const Environment = struct {
             .timers = std.StringHashMap(i128).init(allocator),
             .console_counts = std.StringHashMap(u64).init(allocator),
             .trace_frames = trace_frames,
+            .promise_jobs = try std.ArrayList(ast.Value).initCapacity(allocator, 0),
             .arrays = try std.ArrayList(*ast.ArrayObject).initCapacity(allocator, 0),
             .iterators = try std.ArrayList(*ast.ArrayIterator).initCapacity(allocator, 0),
             .objects = try std.ArrayList(*ast.ObjectValue).initCapacity(allocator, 0),
@@ -618,6 +623,12 @@ pub const Environment = struct {
         self.builtin_objects.deinit();
         self.timers.deinit();
         self.console_counts.deinit();
+        if (self.outer) |outer| {
+            for (self.promise_jobs.items) |job| {
+                outer.promise_jobs.append(outer.allocator, job) catch {};
+            }
+        }
+        self.promise_jobs.deinit(self.allocator);
         self.trace_frames.deinit(self.allocator);
 
         for (self.module_contents.items) |c| {

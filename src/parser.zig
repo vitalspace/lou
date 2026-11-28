@@ -69,7 +69,7 @@ pub const Parser = struct {
     fn isPropertyName(tok_type: TokenType) bool {
         return switch (tok_type) {
             .Identifier => true,
-            .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn, .Return, .If, .Else, .For, .While, .Do, .In, .Of, .Break, .Continue, .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf, .Yield, .New, .Delete, .InstanceOf, .Void, .Try, .Catch, .Finally, .Throw, .Using, .Await, .Class, .Extends, .Super, .Static, .Get, .Set => true,
+            .Const, .Var, .Let, .Null, .Undefined, .True, .False, .Fn, .Return, .If, .Else, .For, .While, .Do, .In, .Of, .Break, .Continue, .Switch, .Case, .Default, .Match, .Import, .From, .As, .Export, .TypeOf, .Yield, .New, .Delete, .InstanceOf, .Void, .Try, .Catch, .Finally, .Throw, .Using, .Await, .Async, .Class, .Extends, .Super, .Static, .Get, .Set => true,
             else => false,
         };
     }
@@ -194,6 +194,10 @@ pub const Parser = struct {
                 .Try => break :stmt try this.parseTryStatement(),
                 .Throw => break :stmt try this.parseThrowStatement(),
                 .Fn => break :stmt try this.parseFunctionDeclaration(),
+                .Async => {
+                    if (this.isAsyncSyntaxStart()) break :stmt try this.parseAsyncFunctionOrArrow();
+                    break :stmt try this.parseCommaExpression();
+                },
                 .Class => break :stmt try this.parseClass(true),
                 .Import => break :stmt try this.parseImportStatement(),
                 .Export => break :stmt try this.parseExportStatement(),
@@ -946,6 +950,23 @@ pub const Parser = struct {
             .Yield => {
                 base = try this.parseYieldExpression();
             },
+            .Await => {
+                this.nextToken(); // consume 'await'
+                const value = try this.parsePrimary();
+                const node = try this.allocator.create(ast.Node);
+                node.* = .{ .AwaitExpression = .{ .value = value } };
+                base = node;
+            },
+            .Async => {
+                if (this.isAsyncSyntaxStart()) {
+                    base = try this.parseAsyncFunctionOrArrow();
+                } else {
+                    this.nextToken(); // consume contextual keyword as identifier
+                    const node = try this.allocator.create(ast.Node);
+                    node.* = .{ .Identifier = .{ .name = "async" } };
+                    base = node;
+                }
+            },
             .New => {
                 this.nextToken(); // consume 'new'
                 // Parse just the callee identifier, not a full primary expression
@@ -1543,6 +1564,14 @@ pub const Parser = struct {
         defer properties.deinit(this.allocator);
 
         while (this.current_token.type != .RBrace and this.current_token.type != .EOF) {
+            // Async method shorthand: `async name() {}`. `async()` remains a
+            // method literally named "async", and `async: value` a property.
+            var is_async_method = false;
+            if (this.current_token.type == .Async and this.peek_token.type != .LParen and this.peek_token.type != .Colon) {
+                is_async_method = true;
+                this.nextToken();
+            }
+
             // Handle spread property: {...expr}
             if (this.current_token.type == .DotDotDot) {
                 this.nextToken(); // consume '...'
@@ -1567,7 +1596,8 @@ pub const Parser = struct {
                 this.nextToken(); // consume ']'
 
                 if (this.current_token.type == .LParen) {
-                    const prop = try this.parseMethodProperty("", key_expr);
+                    var prop = try this.parseMethodProperty("", key_expr);
+                    if (is_async_method and prop.value.* == .FunctionDeclaration) prop.value.FunctionDeclaration.is_async = true;
                     try properties.append(this.allocator, prop);
                 } else {
                     if (this.current_token.type != .Colon) return error.ExpectedColon;
@@ -1669,7 +1699,8 @@ pub const Parser = struct {
             }
 
             if (this.current_token.type == .LParen) {
-                const prop = try this.parseMethodProperty(key, null);
+                var prop = try this.parseMethodProperty(key, null);
+                if (is_async_method and prop.value.* == .FunctionDeclaration) prop.value.FunctionDeclaration.is_async = true;
                 try properties.append(this.allocator, prop);
 
                 if (this.current_token.type == .Comma) {
@@ -2418,6 +2449,12 @@ pub const Parser = struct {
                 this.nextToken();
             }
 
+            var is_async = false;
+            if (this.current_token.type == .Async and this.peek_token.type != .LParen) {
+                is_async = true;
+                this.nextToken();
+            }
+
             var kind: ast.ClassMethodKind = .method;
             if ((this.current_token.type == .Get or this.current_token.type == .Set) and this.peek_token.type != .LParen) {
                 kind = if (this.current_token.type == .Get) .get else .set;
@@ -2475,6 +2512,7 @@ pub const Parser = struct {
                 .body = final_body,
                 .rest_param = params.rest_param,
                 .param_defaults = params.defaults,
+                .is_async = is_async,
             } };
             try methods.append(this.allocator, .{ .name = method_name, .function = func_node, .is_static = is_static, .kind = kind });
         }
@@ -2502,6 +2540,71 @@ pub const Parser = struct {
         return node;
     }
 
+    fn isAsyncSyntaxStart(this: *Parser) bool {
+        return switch (this.peek_token.type) {
+            .Fn, .Identifier => true,
+            .LParen => this.tokenAfterBalancedParens() == .Arrow,
+            else => false,
+        };
+    }
+
+    /// Starting just after the peek token `(`, scan to its matching `)` and
+    /// return the token that follows. Used to distinguish `async (x) => ...`
+    /// from a call to a variable named `async`.
+    fn tokenAfterBalancedParens(this: *Parser) TokenType {
+        var lex_copy = this.lexer.*;
+        var depth: usize = 1;
+        while (true) {
+            const tok = lex_copy.nextToken();
+            switch (tok.type) {
+                .LParen => depth += 1,
+                .RParen => {
+                    depth -= 1;
+                    if (depth == 0) break;
+                },
+                .EOF => return .EOF,
+                else => {},
+            }
+        }
+        return lex_copy.nextToken().type;
+    }
+    fn parseAsyncFunctionOrArrow(this: *Parser) !*ast.Node {
+        this.nextToken(); // consume 'async'
+
+        if (this.current_token.type == .Fn) {
+            const node = try this.parseFunctionDeclaration();
+            if (node.* == .FunctionDeclaration) {
+                node.FunctionDeclaration.is_async = true;
+                return node;
+            }
+            // `async function*` is handled by the async-generators spec.
+            return error.UnexpectedToken;
+        }
+
+        if (this.current_token.type == .LParen) {
+            const node = try this.parseArrowFunction();
+            node.ArrowFunction.is_async = true;
+            return node;
+        }
+
+        // Single-parameter async arrow: async x => ...
+        if (this.current_token.type == .Identifier) {
+            const param_name = this.current_token.literal;
+            this.nextToken();
+            if (this.current_token.type != .Arrow) return error.ExpectedArrow;
+            this.nextToken(); // consume '=>'
+            const body = try this.parseFunctionBody();
+            const node = try this.allocator.create(ast.Node);
+            node.* = .{ .ArrowFunction = .{
+                .parameters = try this.allocator.dupe([]const u8, &.{param_name}),
+                .body = body,
+                .is_async = true,
+            } };
+            return node;
+        }
+
+        return error.ExpectedLParen;
+    }
     fn parseFunctionDeclaration(this: *Parser) !*ast.Node {
         this.nextToken(); // consume 'fn'
 
@@ -2513,7 +2616,7 @@ pub const Parser = struct {
         }
 
         var name: []const u8 = "";
-        if (this.current_token.type == .Identifier) {
+        if (this.current_token.type == .Identifier or this.current_token.type == .Async) {
             name = this.current_token.literal;
             this.nextToken(); // consume identifier
         }
@@ -3693,4 +3796,42 @@ test "parse class expression with private field" {
     try std.testing.expectEqualStrings("#value", init.ClassExpression.fields[0].name);
     try std.testing.expectEqual(@as(usize, 1), init.ClassExpression.methods.len);
     try std.testing.expect(init.ClassExpression.methods[0].kind == .get);
+}
+
+test "parse async function with await" {
+    const allocator = std.testing.allocator;
+    const input = "async function f() { return await p; }";
+    var lexer = Lexer.init(input);
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+    try std.testing.expect(node.* == .FunctionDeclaration);
+    try std.testing.expect(node.FunctionDeclaration.is_async);
+    const body = node.FunctionDeclaration.body;
+    try std.testing.expect(body.* == .BlockStatement);
+    try std.testing.expectEqual(@as(usize, 1), body.BlockStatement.statements.len);
+    const ret = body.BlockStatement.statements[0];
+    try std.testing.expect(ret.* == .ReturnStatement);
+    try std.testing.expect(ret.ReturnStatement.value.?.* == .AwaitExpression);
+}
+
+test "parse async arrow forms" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("async (x) => await x");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseExpression();
+    try std.testing.expect(node.* == .ArrowFunction);
+    try std.testing.expect(node.ArrowFunction.is_async);
+    try std.testing.expectEqual(@as(usize, 1), node.ArrowFunction.parameters.len);
+}
+
+test "async remains a valid identifier" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init("const async = 2;");
+    var parser = try Parser.init(&lexer, allocator);
+    defer parser.deinit();
+    const node = try parser.parseStatement();
+    try std.testing.expect(node.* == .ConstantDeclaration);
+    try std.testing.expectEqualStrings("async", node.ConstantDeclaration.name);
 }

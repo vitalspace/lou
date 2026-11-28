@@ -116,6 +116,7 @@ pub const TokenType = enum {
     Throw,
     Using,
     Await,
+    Async,
 
     // Delimiters
     LParen,
@@ -817,6 +818,7 @@ fn getKeywordType(literal: []const u8) TokenType {
         .{ "throw", .Throw },
         .{ "using", .Using },
         .{ "await", .Await },
+        .{ "async", .Async },
         .{ "class", .Class },
         .{ "extends", .Extends },
         .{ "super", .Super },

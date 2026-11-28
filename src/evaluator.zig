@@ -11,6 +11,7 @@ const objectPrototypeMod = @import("./builtins/object/prototype.zig");
 const booleanMod = @import("./builtins/boolean/boolean.zig");
 const functionMod = @import("./builtins/function/function.zig");
 const regexpMod = @import("./builtins/regex/regexp.zig");
+const promiseMod = @import("./builtins/promise/promise.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -1602,6 +1603,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
             return if (u.prefix) new_val else current;
         },
+        .AwaitExpression => |a| {
+            const awaited = try evaluate(a.value, env);
+            return try awaitValue(env, awaited);
+        },
         .YieldExpression => |y| {
             if (y.is_star) {
                 // yield* — delegate to another generator or iterable
@@ -3087,6 +3092,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         defer bound_call_args.deinit(env.allocator);
                         return try invokeBoundFunction(val.js_object, bound_call_args.items, env);
                     }
+                    if (val == .js_object and promiseMod.isResolver(val)) {
+                        var resolver_args = try evaluateArgs(f.arguments, env);
+                        defer resolver_args.deinit(env.allocator);
+                        promiseMod.callResolver(env, val.js_object, resolver_args.items);
+                        return .{ .void = {} };
+                    }
                 }
             }
 
@@ -3139,6 +3150,12 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .Identifier => |id| id.name,
                 else => return error.InvalidCallee,
             };
+
+            if (std.mem.eql(u8, func_name, "Promise")) {
+                var promise_args = try evaluateArgs(ne.arguments, env);
+                defer promise_args.deinit(env.allocator);
+                return try constructPromise(env, promise_args.items);
+            }
 
             if (env.get(func_name)) |callee_val| {
                 if (callee_val == .js_object and callee_val.js_object.properties.get("@@class") != null) {
@@ -4357,6 +4374,19 @@ fn parseAndEvaluateProgram(source: []const u8, env_: *Environment) !ast.Value {
     return result;
 }
 
+/// Evaluate a whole program and drain Promise reactions before releasing the
+/// parser arena, because queued callbacks still reference its AST nodes.
+fn parseEvaluateAndDrain(source: []const u8, env_: *Environment) !void {
+    var lexer = Lexer.init(source);
+    var parser = try Parser.init(&lexer, env_.allocator);
+    defer parser.deinit();
+    const statements = try parser.parseProgram();
+    for (statements) |stmt| {
+        _ = try evaluate(stmt, env_);
+    }
+    drainPromiseJobs(env_);
+}
+
 pub fn resolveArgumentIn(
     idx: usize,
     args: []ast.Value,
@@ -4628,6 +4658,281 @@ fn bindRestArguments(dest: *Environment, parameters: []const []const u8, rest_pa
     try dest.arrays.append(dest.allocator, restrict);
     try dest.set(name, .{ .array = restrict });
 }
+fn isCallableValue(value: ast.Value) bool {
+    return switch (value) {
+        .function, .closure, .generator => true,
+        .js_object => |obj| obj.properties.get("@@callable") != null,
+        else => false,
+    };
+}
+
+fn constructPromise(env: *Environment, args: []ast.Value) anyerror!ast.Value {
+    const pending = promiseMod.createPending(env);
+    if (pending != .js_object) return pending;
+
+    if (args.len == 0 or !isCallableValue(args[0])) {
+        _ = throwError(env, "TypeError", .{ .string = "Promise resolver is not a function" });
+        const reason = if (env.throw_hit) env.throw_value else ast.Value{ .string = "TypeError" };
+        env.throw_hit = false;
+        env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(pending.js_object, reason);
+        return pending;
+    }
+
+    const resolve_fn = promiseMod.makeResolver(env, pending, false);
+    const reject_fn = promiseMod.makeResolver(env, pending, true);
+    var call_args = [2]ast.Value{ resolve_fn, reject_fn };
+    _ = callFunctionValue(args[0], call_args[0..], env, .{ .void = {} }) catch {
+        const reason = if (env.throw_hit) env.throw_value else ast.Value{ .string = "Error" };
+        env.throw_hit = false;
+        env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(pending.js_object, reason);
+        return pending;
+    };
+    if (env.throw_hit) {
+        const reason = env.throw_value;
+        env.throw_hit = false;
+        env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(pending.js_object, reason);
+    }
+    return pending;
+}
+
+fn awaitValue(env: *Environment, value: ast.Value) anyerror!ast.Value {
+    if (!promiseMod.isPromise(value)) return value;
+    var state = promiseMod.promiseState(value);
+    if (std.mem.eql(u8, state, "pending")) {
+        drainPromiseJobs(env);
+        state = promiseMod.promiseState(value);
+    }
+    if (std.mem.eql(u8, state, "fulfilled")) return promiseMod.promiseValue(value);
+    if (std.mem.eql(u8, state, "rejected")) {
+        env.throw_hit = true;
+        env.throw_value = promiseMod.promiseValue(value);
+        return error.Thrown;
+    }
+    return .{ .void = {} };
+}
+
+fn invokeAsyncFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
+    const pending = promiseMod.createPending(env);
+    if (pending != .js_object) return pending;
+
+    const func_env = try Environment.initHeap(env.allocator, env);
+    defer if (!func_env.captured) {
+        func_env.deinit();
+        env.allocator.destroy(func_env);
+    };
+
+    var body: *ast.Node = undefined;
+    if (func_node.* == .FunctionDeclaration) {
+        const func = func_node.FunctionDeclaration;
+        if (this_val) |tv| {
+            const bound_this: ast.Value = switch (tv) {
+                .null, .void => if (env.globalObject()) |g| ast.Value{ .js_object = g } else tv,
+                else => tv,
+            };
+            try func_env.set("this", bound_this);
+        }
+        for (func.parameters, 0..) |param, idx| {
+            try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
+        }
+        try bindRestArguments(func_env, func.parameters, func.rest_param, args);
+        body = func.body;
+    } else if (func_node.* == .ArrowFunction) {
+        const func = func_node.ArrowFunction;
+        const lexical_this = env.get("this") orelse ast.Value{ .void = {} };
+        try func_env.set("this", lexical_this);
+        for (func.parameters, 0..) |param, idx| {
+            try func_env.set(param, try resolveArgumentIn(idx, args, func.param_defaults, func_env));
+        }
+        try bindRestArguments(func_env, func.parameters, func.rest_param, args);
+        body = func.body;
+    } else {
+        return error.NotAFunction;
+    }
+
+    if (body.* == .BlockStatement) predeclareLexicals(func_env, body.BlockStatement.statements);
+    const expression_body = body.* != .BlockStatement;
+    const result = evaluate(body, func_env) catch {
+        const reason = if (func_env.throw_hit) func_env.throw_value else ast.Value{ .string = "Error" };
+        promiseMod.rejectPromise(pending.js_object, reason);
+        return pending;
+    };
+    if (func_env.throw_hit) {
+        const reason = func_env.throw_value;
+        func_env.throw_hit = false;
+        func_env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(pending.js_object, reason);
+        return pending;
+    }
+    const settled = if (!expression_body and !func_env.return_hit) ast.Value{ .void = {} } else result;
+    promiseMod.resolvePromise(env, pending.js_object, settled);
+    return pending;
+}
+
+fn settleReactionChild(env: *Environment, child: ast.Value, state: []const u8, value: ast.Value) void {
+    if (child != .js_object) return;
+    if (std.mem.eql(u8, state, "fulfilled")) {
+        promiseMod.resolvePromise(env, child.js_object, value);
+    } else {
+        promiseMod.rejectPromise(child.js_object, value);
+    }
+}
+
+fn processAggregateReaction(env: *Environment, reaction: *ast.ObjectValue) bool {
+    const parent = reaction.properties.get("parent") orelse return true;
+    const result = reaction.properties.get("@@result") orelse return true;
+    if (!promiseMod.isPromise(parent) or !promiseMod.isPromise(result)) return true;
+    if (!promiseMod.isPending(result)) return true;
+
+    const state = promiseMod.promiseState(parent);
+    if (std.mem.eql(u8, state, "pending")) return false;
+    const parent_value = promiseMod.promiseValue(parent);
+    const kind_val = reaction.properties.get("@@kind") orelse return true;
+    const kind = if (kind_val == .string) kind_val.string else "";
+    const index_val = reaction.properties.get("@@index") orelse return true;
+    const index: usize = if (index_val == .integer and index_val.integer >= 0) @intCast(index_val.integer) else 0;
+    const slots_val = reaction.properties.get("@@values") orelse ast.Value{ .void = {} };
+    const remaining_val = result.js_object.properties.get("@@remaining") orelse ast.Value{ .integer = 0 };
+    const rejected_val = result.js_object.properties.get("@@rejected") orelse ast.Value{ .integer = 0 };
+    var remaining: usize = if (remaining_val == .integer and remaining_val.integer > 0) @intCast(remaining_val.integer) else 0;
+    var rejected: usize = if (rejected_val == .integer and rejected_val.integer > 0) @intCast(rejected_val.integer) else 0;
+
+    if (std.mem.eql(u8, kind, "all")) {
+        if (std.mem.eql(u8, state, "rejected")) {
+            settleReactionChild(env, result, "rejected", parent_value);
+            return true;
+        }
+        if (slots_val == .array) slots_val.array.set(index, parent_value) catch {};
+        if (remaining > 0) remaining -= 1;
+        if (remaining == 0) settleReactionChild(env, result, "fulfilled", slots_val);
+        result.js_object.properties.put("@@remaining", .{ .integer = @intCast(remaining) }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, kind, "allSettled")) {
+        const record = ast.ObjectValue.init(env.allocator) catch return true;
+        env.objects.append(env.allocator, record) catch {};
+        if (std.mem.eql(u8, state, "rejected")) {
+            record.properties.put("status", .{ .string = "rejected" }) catch {};
+            record.properties.put("reason", parent_value) catch {};
+        } else {
+            record.properties.put("status", .{ .string = "fulfilled" }) catch {};
+            record.properties.put("value", parent_value) catch {};
+        }
+        if (slots_val == .array) slots_val.array.set(index, .{ .js_object = record }) catch {};
+        if (remaining > 0) remaining -= 1;
+        if (remaining == 0) settleReactionChild(env, result, "fulfilled", slots_val);
+        result.js_object.properties.put("@@remaining", .{ .integer = @intCast(remaining) }) catch {};
+        return true;
+    }
+
+    if (std.mem.eql(u8, kind, "race")) {
+        settleReactionChild(env, result, state, parent_value);
+        return true;
+    }
+
+    if (std.mem.eql(u8, kind, "any")) {
+        if (std.mem.eql(u8, state, "fulfilled")) {
+            settleReactionChild(env, result, "fulfilled", parent_value);
+        } else {
+            rejected += 1;
+            result.js_object.properties.put("@@rejected", .{ .integer = @intCast(rejected) }) catch {};
+            if (remaining > 0 and rejected >= remaining) {
+                settleReactionChild(env, result, "rejected", .{ .string = "AggregateError: All promises were rejected" });
+            }
+        }
+        return true;
+    }
+
+    return true;
+}
+fn processPromiseReaction(env: *Environment, job: ast.Value) bool {
+    if (job != .js_object) return true;
+    const reaction = job.js_object;
+    if (reaction.properties.get("@@aggregate")) |agg_flag| {
+        if (agg_flag == .boolean and agg_flag.boolean) return processAggregateReaction(env, reaction);
+    }
+    const parent = reaction.properties.get("parent") orelse return true;
+    const child = reaction.properties.get("child") orelse return true;
+    if (!promiseMod.isPromise(parent) or !promiseMod.isPromise(child)) return true;
+    if (!promiseMod.isPending(child)) return true;
+
+    const state = promiseMod.promiseState(parent);
+    if (std.mem.eql(u8, state, "pending")) return false;
+    const parent_value = promiseMod.promiseValue(parent);
+
+    if (reaction.properties.get("onFinally")) |on_finally| {
+        if (isCallableValue(on_finally)) {
+            env.throw_hit = false;
+            env.throw_value = .{ .void = {} };
+            _ = callFunctionValue(on_finally, &[_]ast.Value{}, env, .{ .void = {} }) catch {
+                const reason = if (env.throw_hit) env.throw_value else ast.Value{ .string = "Error" };
+                env.throw_hit = false;
+                env.throw_value = .{ .void = {} };
+                promiseMod.rejectPromise(child.js_object, reason);
+                return true;
+            };
+            if (env.throw_hit) {
+                const reason = env.throw_value;
+                env.throw_hit = false;
+                env.throw_value = .{ .void = {} };
+                promiseMod.rejectPromise(child.js_object, reason);
+                return true;
+            }
+        }
+        settleReactionChild(env, child, state, parent_value);
+        return true;
+    }
+
+    const handler = if (std.mem.eql(u8, state, "fulfilled"))
+        reaction.properties.get("onFulfilled")
+    else
+        reaction.properties.get("onRejected");
+
+    if (handler == null or !isCallableValue(handler.?)) {
+        settleReactionChild(env, child, state, parent_value);
+        return true;
+    }
+
+    env.throw_hit = false;
+    env.throw_value = .{ .void = {} };
+    var call_args = [1]ast.Value{parent_value};
+    const result = callFunctionValue(handler.?, call_args[0..], env, .{ .void = {} }) catch {
+        const reason = if (env.throw_hit) env.throw_value else ast.Value{ .string = "Error" };
+        env.throw_hit = false;
+        env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(child.js_object, reason);
+        return true;
+    };
+    if (env.throw_hit) {
+        const reason = env.throw_value;
+        env.throw_hit = false;
+        env.throw_value = .{ .void = {} };
+        promiseMod.rejectPromise(child.js_object, reason);
+        return true;
+    }
+    promiseMod.resolvePromise(env, child.js_object, result);
+    return true;
+}
+
+pub fn drainPromiseJobs(env: *Environment) void {
+    const root = env.root();
+    var progress = true;
+    while (progress) {
+        progress = false;
+        var i: usize = 0;
+        while (i < root.promise_jobs.items.len) {
+            if (processPromiseReaction(env, root.promise_jobs.items[i])) {
+                _ = root.promise_jobs.orderedRemove(i);
+                progress = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
 fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment, this_val: ?ast.Value) anyerror!ast.Value {
         if (func_node.* == .GeneratorDeclaration) {
             const gen_decl = func_node.GeneratorDeclaration;
@@ -4657,6 +4962,12 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             env.pushTraceFrame(frame_name, 0);
         }
         defer if (traced) env.popTraceFrame();
+        if (func_node.* == .FunctionDeclaration and func_node.FunctionDeclaration.is_async) {
+            return try invokeAsyncFunctionNode(func_node, args, env, this_val);
+        }
+        if (func_node.* == .ArrowFunction and func_node.ArrowFunction.is_async) {
+            return try invokeAsyncFunctionNode(func_node, args, env, this_val);
+        }
         if (func_node.* == .FunctionDeclaration) {
             const func = func_node.FunctionDeclaration;
             // Heap-owned so closures created in the body can adopt it; freed
@@ -4679,13 +4990,19 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             }
             try bindRestArguments(func_env, func.parameters, func.rest_param, args);
             if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
-            return evaluate(func.body, func_env) catch |err| {
+            const result = evaluate(func.body, func_env) catch |err| {
                 if (func_env.throw_hit) {
                     env.throw_hit = true;
                     env.throw_value = func_env.throw_value;
                 }
                 return err;
             };
+            if (func_env.throw_hit) {
+                env.throw_hit = true;
+                env.throw_value = func_env.throw_value;
+                return error.Thrown;
+            }
+            return result;
         }
         if (func_node.* == .ArrowFunction) {
             const func = func_node.ArrowFunction;
@@ -4702,13 +5019,19 @@ fn invokeFunctionNode(func_node: *ast.Node, args: []ast.Value, env: *Environment
             }
             try bindRestArguments(func_env, func.parameters, func.rest_param, args);
             if (func.body.* == .BlockStatement) predeclareLexicals(func_env, func.body.BlockStatement.statements);
-            return evaluate(func.body, func_env) catch |err| {
+            const result = evaluate(func.body, func_env) catch |err| {
                 if (func_env.throw_hit) {
                     env.throw_hit = true;
                     env.throw_value = func_env.throw_value;
                 }
                 return err;
             };
+            if (func_env.throw_hit) {
+                env.throw_hit = true;
+                env.throw_value = func_env.throw_value;
+                return error.Thrown;
+            }
+            return result;
         }
     return error.NotAFunction;
 }
@@ -4942,6 +5265,10 @@ pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, t
             return .{ .generator = gen };
         },
         .js_object => |obj| {
+            if (promiseMod.isResolver(.{ .js_object = obj })) {
+                promiseMod.callResolver(env, obj, args);
+                return .{ .void = {} };
+            }
             if (functionMod.isBoundFunction(obj)) return try invokeBoundFunction(obj, args, env);
             return error.NotAFunction;
         },
@@ -6507,4 +6834,55 @@ test "optional chaining short-circuits and preserves method this" {
 
     const r = try parseAndEvaluate("(() => { const o = null; const t = { v: 1, get: function () { return this.v; } }; return [o?.a?.b, t.get?.(), t?.get()].join(\",\"); })()", &env_);
     try std.testing.expectEqualStrings(",1,1", r.string);
+}
+
+test "async functions await values and resolve chained promises" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var result = 0; var chained = 0; async function f() { result = await Promise.resolve(41); return result + 1; } f().then(v => { chained = v; });",
+        &env_,
+    );
+    try std.testing.expectEqual(@as(i64, 41), (try parseAndEvaluate("result", &env_)).integer);
+    try std.testing.expectEqual(@as(i64, 42), (try parseAndEvaluate("chained", &env_)).integer);
+}
+
+test "async throw rejects and catch handlers observe the reason" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var state = { message: \"\" }; async function boom() { throw new Error(\"nope\"); } boom().catch(e => { state.message = e.message; });",
+        &env_,
+    );
+    const value = try parseAndEvaluate("state.message", &env_);
+    try std.testing.expectEqualStrings("nope", value.string);
+}
+
+test "Promise constructor and Promise.all settle queued reactions" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var values = \"\"; new Promise(resolve => resolve(5)).then(v => { values = values + v; }); Promise.all([Promise.resolve(1), 2]).then(v => { values = values + \":\" + v.join(\",\"); });",
+        &env_,
+    );
+    const value = try parseAndEvaluate("values", &env_);
+    try std.testing.expectEqualStrings("5:1,2", value.string);
+}
+
+test "Promise.all waits for deferred resolutions" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    try parseEvaluateAndDrain(
+        "var resolveLater = null; var out = 0; const p = new Promise(r => { resolveLater = r; }); Promise.all([p]).then(v => { out = v[0]; }); resolveLater(8);",
+        &env_,
+    );
+    try std.testing.expectEqual(@as(i64, 8), (try parseAndEvaluate("out", &env_)).integer);
 }
