@@ -12,6 +12,7 @@ const booleanMod = @import("./builtins/boolean/boolean.zig");
 const functionMod = @import("./builtins/function/function.zig");
 const regexpMod = @import("./builtins/regex/regexp.zig");
 const promiseMod = @import("./builtins/promise/promise.zig");
+const proxyMod = @import("./builtins/proxy.zig");
 
 pub const Environment = env_mod.Environment;
 
@@ -407,6 +408,10 @@ fn keyToArrayIndex(key: ast.Value) ?usize {
 }
 
 fn readIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value) !ast.Value {
+    if (proxyMod.isProxy(obj_val)) {
+        const key = try ocKeyString(key_val, env);
+        return try proxyGet(env, obj_val, key, obj_val);
+    }
     if (obj_val == .js_object) {
         const key = try valueToKeyString(env, key_val);
         return obj_val.js_object.properties.get(key) orelse .{ .void = {} };
@@ -420,6 +425,10 @@ fn readIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value) !ast.V
 }
 
 fn writeIndexed(env: *Environment, obj_val: ast.Value, key_val: ast.Value, val: ast.Value) !void {
+    if (proxyMod.isProxy(obj_val)) {
+        const key = try ocKeyString(key_val, env);
+        return try proxySet(env, obj_val, key, val, obj_val);
+    }
     if (obj_val == .js_object) {
         const key = try valueToKeyString(env, key_val);
         try obj_val.js_object.properties.put(key, val);
@@ -618,6 +627,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
         },
         .ArrayIndex => |a| {
             const array_val = try evaluate(a.array, env);
+            if (proxyMod.isProxy(array_val)) {
+                const index_val = try evaluate(a.index, env);
+                const key = try ocKeyString(index_val, env);
+                return try proxyGet(env, array_val, key, array_val);
+            }
             if (array_val == .iterator) {
                 return .{ .void = {} };
             }
@@ -754,6 +768,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             if (b.operator == .Assign) {
                 if (b.left.* == .MemberAccess) {
                     const obj_val = try evaluate(b.left.MemberAccess.object, env);
+                    if (proxyMod.isProxy(obj_val)) {
+                        const val = try evaluate(b.right, env);
+                        try proxySet(env, obj_val, b.left.MemberAccess.property, val, obj_val);
+                        return val;
+                    }
                     if (obj_val == .regexp) {
                         const val = try evaluate(b.right, env);
                         regexpMod.setProperty(obj_val.regexp, b.left.MemberAccess.property, val) catch {};
@@ -772,6 +791,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 if (b.left.* == .ArrayIndex) {
                     const ai = b.left.ArrayIndex;
                     const obj_val = try evaluate(ai.array, env);
+                    if (proxyMod.isProxy(obj_val)) {
+                        const key_val = try evaluate(ai.index, env);
+                        const val = try evaluate(b.right, env);
+                        const key = try ocKeyString(key_val, env);
+                        try proxySet(env, obj_val, key, val, obj_val);
+                        return val;
+                    }
                     const val = try evaluate(b.right, env);
                     if (obj_val == .js_object) {
                         const key_val = try evaluate(ai.index, env);
@@ -845,6 +871,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .Identifier => env.get(name) orelse return error.UndefinedVariable,
                     .MemberAccess => |m| blk: {
                         obj_val = try evaluate(m.object, env);
+                        if (proxyMod.isProxy(obj_val)) {
+                            break :blk try proxyGet(env, obj_val, m.property, obj_val);
+                        }
                         if (obj_val != .js_object) return error.InvalidAssignment;
                         break :blk obj_val.js_object.properties.get(m.property) orelse ast.Value{ .void = {} };
                     },
@@ -959,7 +988,13 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 };
                 switch (target) {
                     .Identifier => try env.setInScope(name, result),
-                    .MemberAccess => |m| try obj_val.js_object.properties.put(m.property, result),
+                    .MemberAccess => |m| {
+                        if (proxyMod.isProxy(obj_val)) {
+                            try proxySet(env, obj_val, m.property, result, obj_val);
+                        } else {
+                            try obj_val.js_object.properties.put(m.property, result);
+                        }
+                    },
                     .ArrayIndex => try writeIndexed(env, obj_val, key_val, result),
                     else => unreachable,
                 }
@@ -1026,14 +1061,19 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                         },
                         .MemberAccess => |m| {
                             const obj_val = try evaluate(m.object, env);
-                            if (obj_val == .js_object) {
+                            if (proxyMod.isProxy(obj_val)) {
+                                try proxySet(env, obj_val, m.property, val, obj_val);
+                            } else if (obj_val == .js_object) {
                                 try obj_val.js_object.properties.put(m.property, val);
                             } else return error.InvalidAssignment;
                         },
                         .ArrayIndex => |ai| {
                             const obj_val = try evaluate(ai.array, env);
                             const idx_val = try evaluate(ai.index, env);
-                            if (obj_val == .array) {
+                            if (proxyMod.isProxy(obj_val)) {
+                                const key = try ocKeyString(idx_val, env);
+                                try proxySet(env, obj_val, key, val, obj_val);
+                            } else if (obj_val == .array) {
                                 const index = switch (idx_val) {
                                     .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else return error.InvalidAssignmentTarget,
                                     else => return error.InvalidAssignmentTarget,
@@ -1240,6 +1280,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     else => return .{ .boolean = false },
                 };
+                if (proxyMod.isProxy(right)) {
+                    return .{ .boolean = try proxyHas(env, right, key) };
+                }
                 return switch (right) {
                     .js_object => |obj| blk: {
                         var cur: ?*ast.ObjectValue = obj;
@@ -1512,6 +1555,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     },
                     .MemberAccess => |m| {
                         const obj_val = try evaluate(m.object, env);
+                        if (proxyMod.isProxy(obj_val)) {
+                            break :blk try proxyGet(env, obj_val, m.property, obj_val);
+                        }
                         if (obj_val == .js_object) {
                             if (obj_val.js_object.properties.get(m.property)) |val| {
                                 break :blk val;
@@ -1522,6 +1568,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                     .ArrayIndex => |ai| {
                         const obj_val = try evaluate(ai.array, env);
                         const idx_val = try evaluate(ai.index, env);
+                        if (proxyMod.isProxy(obj_val)) {
+                            const key = try ocKeyString(idx_val, env);
+                            break :blk try proxyGet(env, obj_val, key, obj_val);
+                        }
                         if (obj_val == .array) {
                             const index = switch (idx_val) {
                                 .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else break :blk null,
@@ -1584,14 +1634,19 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .Identifier => |ident| try env.setInScope(ident.name, new_val),
                 .MemberAccess => |m| {
                     const obj_val = try evaluate(m.object, env);
-                    if (obj_val == .js_object) {
+                    if (proxyMod.isProxy(obj_val)) {
+                        try proxySet(env, obj_val, m.property, new_val, obj_val);
+                    } else if (obj_val == .js_object) {
                         try obj_val.js_object.properties.put(m.property, new_val);
                     }
                 },
                 .ArrayIndex => |ai| {
                     const obj_val = try evaluate(ai.array, env);
                     const idx_val = try evaluate(ai.index, env);
-                    if (obj_val == .array) {
+                    if (proxyMod.isProxy(obj_val)) {
+                        const key = try ocKeyString(idx_val, env);
+                        try proxySet(env, obj_val, key, new_val, obj_val);
+                    } else if (obj_val == .array) {
                         const index = switch (idx_val) {
                             .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else return error.InvalidAssignmentTarget,
                             else => return error.InvalidAssignmentTarget,
@@ -2899,6 +2954,9 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             switch (d.operand.*) {
                 .MemberAccess => |m| {
                     const obj_val = try evaluate(m.object, env);
+                    if (proxyMod.isProxy(obj_val)) {
+                        return .{ .boolean = try proxyDelete(env, obj_val, m.property) };
+                    }
                     if (obj_val == .js_object) {
                         _ = obj_val.js_object.properties.remove(m.property);
                         if (env.globalObject()) |g| {
@@ -2910,6 +2968,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .ArrayIndex => |ai| {
                     const obj_val = try evaluate(ai.array, env);
                     const idx_val = try evaluate(ai.index, env);
+                    if (proxyMod.isProxy(obj_val)) {
+                        const key = try ocKeyString(idx_val, env);
+                        return .{ .boolean = try proxyDelete(env, obj_val, key) };
+                    }
                     if (obj_val == .js_object) {
                         const key = switch (idx_val) {
                             .string => |s| s,
@@ -2979,7 +3041,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 .js_object => if (objectPrototypeMod.isObjectPrototypeMethodStub(val) != null or functionMod.isBoundFunction(val.js_object) or isCallableValue(val)) "function" else "object",
                 .function => "function",
                 .closure => "function",
-                .object => "object",
+                .object => |obj| blk: {
+                    const bObjPtr: *const builtinsTypes.BuiltinObjectImpl = @ptrCast(@alignCast(obj));
+                    if (std.mem.eql(u8, bObjPtr.name, "Proxy")) break :blk "function";
+                    break :blk "object";
+                },
                 .generator => "function",
                 .symbol => "symbol",
                 .iterator => "object",
@@ -3070,6 +3136,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 break :blk found;
             };
 
+            if (std.mem.eql(u8, f.name, "Proxy")) {
+                _ = throwError(env, "TypeError", .{ .string = "Constructor Proxy requires 'new'" });
+                return error.Thrown;
+            }
+
             if (env.getBuiltin(f.name)) |builtin_fn| {
                 if (has_spread_args) {
                     var expanded = try evaluateArgs(f.arguments, env);
@@ -3111,6 +3182,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
 
             if (env.getFunctionWithModuleFallback(f.name) == null) {
                 if (env.get(f.name)) |val| {
+                    if (proxyMod.isProxy(val)) {
+                        var proxy_call_args = try evaluateArgs(f.arguments, env);
+                        defer proxy_call_args.deinit(env.allocator);
+                        return try proxyApply(env, val, proxy_call_args.items, .{ .void = {} });
+                    }
                     if (val == .closure) {
                         var closed_args = try evaluateArgs(f.arguments, env);
                         defer closed_args.deinit(env.allocator);
@@ -3187,6 +3263,11 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
 
             if (env.get(func_name)) |callee_val| {
+                if (proxyMod.isProxy(callee_val)) {
+                    var proxy_ctor_args = try evaluateArgs(ne.arguments, env);
+                    defer proxy_ctor_args.deinit(env.allocator);
+                    return try proxyConstruct(env, callee_val, proxy_ctor_args.items);
+                }
                 if (callee_val == .js_object and callee_val.js_object.properties.get("@@class") != null) {
                     var class_args = try evaluateArgs(ne.arguments, env);
                     defer class_args.deinit(env.allocator);
@@ -3481,6 +3562,10 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
             const value = try evaluate(m.object, env);
 
+            if (proxyMod.isProxy(value)) {
+                return try proxyGet(env, value, m.property, value);
+            }
+
             if (value == .array) {
                 if (std.mem.eql(u8, m.property, "length")) {
                     return .{ .integer = @intCast(value.array.elements.items.len) };
@@ -3532,6 +3617,18 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
                 defer super_args.deinit(env.allocator);
                 return try callSuperMethod(env, m.method, super_args.items);
             }
+
+            if (m.object.* == .Identifier) {
+                if (env.get(m.object.Identifier.name)) |recv| {
+                    if (proxyMod.isProxy(recv)) {
+                        const method_val = try proxyGet(env, recv, m.method, recv);
+                        var proxy_method_args = try evaluateArgs(m.arguments, env);
+                        defer proxy_method_args.deinit(env.allocator);
+                        return try callFunctionValue(method_val, proxy_method_args.items, env, recv);
+                    }
+                }
+            }
+
             const has_spread_args = blk: {
                 var found = false;
                 for (m.arguments) |arg| {
@@ -3921,6 +4018,15 @@ pub fn evaluate(node: *ast.Node, env: *Environment) !ast.Value {
             }
 
             const value = try evaluate(m.object, env);
+            if (proxyMod.isProxy(value)) {
+                const method_val = try proxyGet(env, value, m.method, value);
+                if (expanded_method_args) |ema| {
+                    return try callFunctionValue(method_val, ema.items, env, value);
+                }
+                var proxy_method_args = try evaluateArgs(m.arguments, env);
+                defer proxy_method_args.deinit(env.allocator);
+                return try callFunctionValue(method_val, proxy_method_args.items, env, value);
+            }
             if (value == .array) {
                 if (expanded_method_args) |ema| {
                     var ma = try std.ArrayList(ast.Value).initCapacity(env.allocator, 1 + ema.items.len);
@@ -4695,6 +4801,224 @@ fn isCallableValue(value: ast.Value) bool {
     };
 }
 
+fn valueTruthy(value: ast.Value) bool {
+    return switch (value) {
+        .void, .null => false,
+        .boolean => |b| b,
+        .integer => |i| i != 0,
+        .float => |f| f != 0 and !std.math.isNan(f),
+        .string => |s| s.len > 0,
+        else => true,
+    };
+}
+
+fn proxyMakeArgsArray(env: *Environment, args: []const ast.Value) anyerror!ast.Value {
+    const arr = try ast.ArrayObject.init(env.allocator);
+    errdefer arr.deinit();
+    for (args) |arg| try arr.elements.append(env.allocator, arg);
+    try env.arrays.append(env.allocator, arr);
+    return .{ .array = arr };
+}
+
+fn proxyTrap(env: *Environment, proxy: ast.Value, name: []const u8, args: []ast.Value) anyerror!?ast.Value {
+    const handler = proxyMod.getHandler(proxy) orelse return null;
+    const trap = try ocMember(handler, name, env);
+    if (trap == .void) return null;
+    if (!isCallableValue(trap)) {
+        _ = throwError(env, "TypeError", .{ .string = "Proxy handler trap is not a function" });
+        return error.Thrown;
+    }
+    return try callFunctionValue(trap, args, env, handler);
+}
+
+fn proxyGetFallback(env: *Environment, target: ast.Value, key: []const u8, receiver: ast.Value) anyerror!ast.Value {
+    if (proxyMod.isProxy(target)) return proxyGet(env, target, key, receiver);
+    return switch (target) {
+        .js_object => |obj| blk: {
+            var cur: ?*ast.ObjectValue = obj;
+            while (cur) |o| {
+                if (o.properties.get(key)) |v| {
+                    if (accessorPart(v, "get")) |getter| {
+                        break :blk try callFunctionValue(getter, &[_]ast.Value{}, env, receiver);
+                    }
+                    if (isAccessorValue(v)) break :blk .{ .void = {} };
+                    break :blk v;
+                }
+                cur = o.prototype;
+            }
+            break :blk .{ .void = {} };
+        },
+        .array => |arr| blk: {
+            if (std.mem.eql(u8, key, "length")) break :blk .{ .integer = @intCast(arr.elements.items.len) };
+            if (std.fmt.parseInt(usize, key, 10)) |index| {
+                if (index < arr.elements.items.len and arr.elements.items[index] != .hole) {
+                    break :blk arr.elements.items[index];
+                }
+                break :blk .{ .void = {} };
+            } else |_| {}
+            break :blk try ocMember(target, key, env);
+        },
+        .regexp, .object => try ocMember(target, key, env),
+        else => .{ .void = {} },
+    };
+}
+
+fn proxyGet(env: *Environment, proxy: ast.Value, key: []const u8, receiver: ast.Value) anyerror!ast.Value {
+    const target = proxyMod.getTarget(proxy) orelse return .{ .void = {} };
+    const key_val = ast.Value{ .string = key };
+    var trap_args = [_]ast.Value{ target, key_val, receiver };
+    if (try proxyTrap(env, proxy, "get", trap_args[0..])) |result| return result;
+    return try proxyGetFallback(env, target, key, receiver);
+}
+
+fn proxySetFallback(env: *Environment, target: ast.Value, key: []const u8, value: ast.Value, receiver: ast.Value) anyerror!void {
+    if (proxyMod.isProxy(target)) return proxySet(env, target, key, value, receiver);
+    switch (target) {
+        .js_object => |obj| {
+            if (findAccessorValue(obj, key)) |acc| {
+                if (acc.js_object.properties.get("set")) |setter| {
+                    var setter_args = [_]ast.Value{value};
+                    _ = try callFunctionValue(setter, setter_args[0..], env, receiver);
+                }
+                return;
+            }
+            try obj.properties.put(key, value);
+        },
+        .array => |arr| {
+            if (std.mem.eql(u8, key, "length")) {
+                const len = switch (value) {
+                    .integer => |i| if (i >= 0) @as(usize, @intCast(i)) else return,
+                    else => return,
+                };
+                if (len < arr.elements.items.len) {
+                    arr.elements.shrinkRetainingCapacity(len);
+                } else {
+                    while (arr.elements.items.len < len) try arr.elements.append(env.allocator, .{ .hole = {} });
+                }
+                return;
+            }
+            const index = std.fmt.parseInt(usize, key, 10) catch return;
+            try arr.set(index, value);
+        },
+        .regexp => |re| regexpMod.setProperty(re, key, value) catch {},
+        else => {},
+    }
+}
+
+fn proxySet(env: *Environment, proxy: ast.Value, key: []const u8, value: ast.Value, receiver: ast.Value) anyerror!void {
+    const target = proxyMod.getTarget(proxy) orelse return;
+    const key_val = ast.Value{ .string = key };
+    var trap_args = [_]ast.Value{ target, key_val, value, receiver };
+    if (try proxyTrap(env, proxy, "set", trap_args[0..])) |result| {
+        if (!valueTruthy(result)) return;
+        return;
+    }
+    try proxySetFallback(env, target, key, value, receiver);
+}
+
+fn proxyHasFallback(env: *Environment, target: ast.Value, key: []const u8) anyerror!bool {
+    if (proxyMod.isProxy(target)) return proxyHas(env, target, key);
+    return switch (target) {
+        .js_object => |obj| blk: {
+            var cur: ?*ast.ObjectValue = obj;
+            while (cur) |o| {
+                if (o.properties.contains(key)) break :blk true;
+                cur = o.prototype;
+            }
+            break :blk false;
+        },
+        .array => |arr| blk: {
+            if (std.mem.eql(u8, key, "length")) break :blk true;
+            const index = std.fmt.parseInt(usize, key, 10) catch break :blk false;
+            break :blk index < arr.elements.items.len and arr.elements.items[index] != .hole;
+        },
+        .regexp, .object => (try ocMember(target, key, env)) != .void,
+        else => false,
+    };
+}
+
+fn proxyHas(env: *Environment, proxy: ast.Value, key: []const u8) anyerror!bool {
+    const target = proxyMod.getTarget(proxy) orelse return false;
+    const key_val = ast.Value{ .string = key };
+    var trap_args = [_]ast.Value{ target, key_val };
+    if (try proxyTrap(env, proxy, "has", trap_args[0..])) |result| return valueTruthy(result);
+    return try proxyHasFallback(env, target, key);
+}
+
+fn proxyDeleteFallback(env: *Environment, target: ast.Value, key: []const u8) anyerror!bool {
+    if (proxyMod.isProxy(target)) return proxyDelete(env, target, key);
+    return switch (target) {
+        .js_object => |obj| blk: {
+            _ = obj.properties.remove(key);
+            break :blk true;
+        },
+        .array => |arr| blk: {
+            if (std.mem.eql(u8, key, "length")) break :blk false;
+            const index = std.fmt.parseInt(usize, key, 10) catch break :blk false;
+            if (index >= arr.elements.items.len) break :blk true;
+            arr.elements.items[index] = .{ .hole = {} };
+            break :blk true;
+        },
+        else => false,
+    };
+}
+
+fn proxyDelete(env: *Environment, proxy: ast.Value, key: []const u8) anyerror!bool {
+    const target = proxyMod.getTarget(proxy) orelse return true;
+    const key_val = ast.Value{ .string = key };
+    var trap_args = [_]ast.Value{ target, key_val };
+    if (try proxyTrap(env, proxy, "deleteProperty", trap_args[0..])) |result| return valueTruthy(result);
+    return try proxyDeleteFallback(env, target, key);
+}
+
+fn proxyApply(env: *Environment, proxy: ast.Value, args: []ast.Value, this_val: ?ast.Value) anyerror!ast.Value {
+    const target = proxyMod.getTarget(proxy) orelse return error.NotAFunction;
+    const this_arg = this_val orelse ast.Value{ .void = {} };
+    const args_array = try proxyMakeArgsArray(env, args);
+    var trap_args = [_]ast.Value{ target, this_arg, args_array };
+    if (try proxyTrap(env, proxy, "apply", trap_args[0..])) |result| return result;
+    if (!isCallableValue(target)) {
+        _ = throwError(env, "TypeError", .{ .string = "proxy target is not a function" });
+        return error.Thrown;
+    }
+    return try callFunctionValue(target, args, env, this_val);
+}
+
+fn constructProxyTarget(env: *Environment, target: ast.Value, args: []ast.Value) anyerror!ast.Value {
+    if (proxyMod.isProxy(target)) return proxyConstruct(env, target, args);
+    if (target == .js_object and target.js_object.properties.get("@@class") != null) {
+        return try constructClass(env, target, args);
+    }
+    if (target == .function or target == .closure or (target == .js_object and isCallableValue(target))) {
+        const new_obj = try ast.ObjectValue.init(env.allocator);
+        errdefer new_obj.deinit();
+        try env.objects.append(env.allocator, new_obj);
+        const result = try callFunctionValue(target, args, env, .{ .js_object = new_obj });
+        return switch (result) {
+            .js_object, .array, .object, .regexp, .function, .closure, .generator => result,
+            else => .{ .js_object = new_obj },
+        };
+    }
+    _ = throwError(env, "TypeError", .{ .string = "proxy target is not a constructor" });
+    return error.Thrown;
+}
+
+fn proxyConstruct(env: *Environment, proxy: ast.Value, args: []ast.Value) anyerror!ast.Value {
+    const target = proxyMod.getTarget(proxy) orelse return error.NotAConstructor;
+    const args_array = try proxyMakeArgsArray(env, args);
+    var trap_args = [_]ast.Value{ target, args_array, proxy };
+    if (try proxyTrap(env, proxy, "construct", trap_args[0..])) |result| {
+        return switch (result) {
+            .js_object, .array, .object, .regexp, .function, .closure, .generator => result,
+            else => {
+                _ = throwError(env, "TypeError", .{ .string = "construct trap must return an object" });
+                return error.Thrown;
+            },
+        };
+    }
+    return try constructProxyTarget(env, target, args);
+}
+
 fn constructPromise(env: *Environment, args: []ast.Value) anyerror!ast.Value {
     const pending = promiseMod.createPending(env);
     if (pending != .js_object) return pending;
@@ -5180,6 +5504,7 @@ fn ocKeyString(value: ast.Value, env: *Environment) anyerror![]const u8 {
 }
 
 fn ocMember(value: ast.Value, property: []const u8, env: *Environment) anyerror!ast.Value {
+    if (proxyMod.isProxy(value)) return try proxyGet(env, value, property, value);
     if (value == .array) {
         if (std.mem.eql(u8, property, "length")) {
             return .{ .integer = @intCast(value.array.elements.items.len) };
@@ -5215,6 +5540,10 @@ fn ocMember(value: ast.Value, property: []const u8, env: *Environment) anyerror!
 }
 
 fn ocIndex(value: ast.Value, index_val: ast.Value, env: *Environment) anyerror!ast.Value {
+    if (proxyMod.isProxy(value)) {
+        const key = try ocKeyString(index_val, env);
+        return try proxyGet(env, value, key, value);
+    }
     if (value == .js_object) {
         const key = try ocKeyString(index_val, env);
         var cur: ?*ast.ObjectValue = value.js_object;
@@ -5248,7 +5577,7 @@ fn ocCall(current: ast.Value, receiver: ?ast.Value, args: []ast.Value, env: *Env
     switch (current) {
         .function, .closure, .generator => return try callFunctionValue(current, args, env, receiver),
         .js_object => {
-            if (functionMod.isBoundFunction(current.js_object)) {
+            if (proxyMod.isProxy(current) or functionMod.isBoundFunction(current.js_object)) {
                 return try callFunctionValue(current, args, env, receiver);
             }
             return error.NotAFunction;
@@ -5295,6 +5624,9 @@ pub fn callFunctionValue(val: ast.Value, args: []ast.Value, env: *Environment, t
             return .{ .generator = gen };
         },
         .js_object => |obj| {
+            if (proxyMod.isProxy(.{ .js_object = obj })) {
+                return try proxyApply(env, .{ .js_object = obj }, args, this_val);
+            }
             if (promiseMod.isResolver(.{ .js_object = obj })) {
                 promiseMod.callResolver(env, obj, args);
                 return .{ .void = {} };
@@ -7030,6 +7362,23 @@ test "async throw rejects and catch handlers observe the reason" {
     try std.testing.expectEqualStrings("nope", value.string);
 }
 
+test "Proxy traps intercept property and call operations" {
+    const allocator = std.testing.allocator;
+    var env_ = try Environment.init(allocator, null);
+    defer env_.deinit();
+
+    _ = try parseAndEvaluateProgram(
+        "var log = \"\"; const target = { x: 1 }; const p = new Proxy(target, { get: function(t, k) { log += \"g\" + k; return t[k]; }, set: function(t, k, v) { log += \"s\" + k; t[k] = v; return true; }, has: function(t, k) { log += \"h\" + k; return k in t; }, deleteProperty: function(t, k) { log += \"d\" + k; return delete t[k]; } }); p.x = 2; var read = p.x; var present = \"x\" in p; var removed = delete p.x; function add(a, b) { return a + b; } const applied = new Proxy(add, { apply: function(t, thisArg, args) { return t(args[0], args[1]) + 1; } }); var appliedResult = applied(2, 3); function Person(name) { this.name = name; } const Constructed = new Proxy(Person, { construct: function(t, args) { return { name: args[0] + \"!\" }; } }); var person = new Constructed(\"Ann\");",
+        &env_,
+    );
+
+    try std.testing.expectEqualStrings("sxgxhxdx", (try parseAndEvaluate("log", &env_)).string);
+    try std.testing.expectEqual(@as(i64, 2), (try parseAndEvaluate("read", &env_)).integer);
+    try std.testing.expect((try parseAndEvaluate("present", &env_)).boolean);
+    try std.testing.expect((try parseAndEvaluate("removed", &env_)).boolean);
+    try std.testing.expectEqual(@as(i64, 6), (try parseAndEvaluate("appliedResult", &env_)).integer);
+    try std.testing.expectEqualStrings("Ann!", (try parseAndEvaluate("person.name", &env_)).string);
+}
 test "Promise constructor and Promise.all settle queued reactions" {
     const allocator = std.testing.allocator;
     var env_ = try Environment.init(allocator, null);

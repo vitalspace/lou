@@ -186,7 +186,8 @@ pub fn main(init: std.process.Init) !void {
     // does not need a suspension opcode.
     const needs_evaluator = std.mem.indexOf(u8, content, "async") != null or
         std.mem.indexOf(u8, content, "await") != null or
-        std.mem.indexOf(u8, content, "Promise") != null;
+        std.mem.indexOf(u8, content, "Promise") != null or
+        std.mem.indexOf(u8, content, "Proxy") != null;
 
     if (use_vm and !needs_evaluator) {
         var chunk = Chunk.init(allocator);

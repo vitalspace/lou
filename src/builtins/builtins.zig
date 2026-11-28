@@ -31,6 +31,7 @@ const parseFloatFn = @import("./parseint-parsefloat.zig").parseFloat;
 const BigIntConstructorFn = @import("./bigint/bigint.zig").BigIntConstructor;
 const IntlConstructorFn = @import("./intl/intl.zig").IntlConstructor;
 const RegExpConstructorFn = @import("./regex/regexp_constructor.zig").RegExpConstructor;
+const ProxyConstructorFn = @import("./proxy.zig").ProxyConstructor;
 
 fn arrayConstructor(args: []Types.Value, env: *Types.Environment) Types.BuiltinResult {
     if (args.len == 0) {
@@ -99,6 +100,7 @@ const BUILTIN_FUNCTIONS = [_]struct { name: []const u8, func: Types.BuiltinFn }{
     .{ .name = "BigInt", .func = BigIntConstructorFn },
     .{ .name = "Intl", .func = IntlConstructorFn },
     .{ .name = "RegExp", .func = RegExpConstructorFn },
+    .{ .name = "Proxy", .func = ProxyConstructorFn },
 };
 
 pub fn initBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(Types.BuiltinFn) {

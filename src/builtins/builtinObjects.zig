@@ -27,6 +27,7 @@ const JSON_OBJECT = @import("./json/json.zig").JSON_OBJECT;
 const intl = @import("./intl/intl.zig");
 const NUMBER_OBJECT = @import("./number/number_object.zig").NUMBER_OBJECT;
 const REGEXP_OBJECT = @import("./regex/regexp.zig").REGEXP_OBJECT;
+const PROXY_OBJECT = @import("./proxy.zig").PROXY_OBJECT;
 
 pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &CONSOLE_OBJECT,
@@ -60,4 +61,5 @@ pub const BUILTIN_OBJECTS = [_]*const Types.BuiltinObjectImpl{
     &intl.COLLATOR_OBJECT,
     &NUMBER_OBJECT,
     &REGEXP_OBJECT,
+    &PROXY_OBJECT,
 };
